@@ -290,6 +290,7 @@ def convert_unit(value, unit, to, floor: bool = True):
         i, j = units.index(unit), units.index(to)
     except ValueError:
         try:
+            print(to)
             i, j = monthly_units.index(unit), monthly_units.index(to)
             factors = monthly_factors
         except ValueError:

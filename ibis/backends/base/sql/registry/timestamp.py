@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import datetime
+
 import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
 from ibis import util
+from ibis.common.temporal import IntervalUnit, normalize_timedelta
 
 
 def extract_field(sql_attr):
@@ -120,3 +123,45 @@ def strftime(t, op):
 
 def day_of_week_name(t, op):
     return f"dayname({t.translate(op.arg)})"
+
+
+def _process_interval_op(op, negative=False):
+    # Recursively process the op, flipping the sign if necessary
+    interval_dicts = []
+    if isinstance(op, ops.IntervalSubtract):
+        interval_dicts.extend(_process_interval_op(op.left, negative))
+        interval_dicts.extend(_process_interval_op(op.right, not negative))
+    elif isinstance(op, ops.Negate):
+        for child in op.__children__:
+            interval_dicts.extend(_process_interval_op(child, not negative))
+    elif not isinstance(op, ops.Literal):
+        for child in op.__children__:
+            interval_dicts.extend(_process_interval_op(child, negative))
+    else:
+        # Process the literal operation, taking into account the sign
+        info = {}
+        info["n"], info["interval"] = op.args
+        for j, inter in enumerate(IntervalUnit):
+            if info["interval"].unit == inter:
+                info["interval_index"] = j
+
+        if negative:
+            info["n"] = -info["n"]
+
+        interval_dicts.append(info)
+    return interval_dicts
+
+
+def _interval_flatten(op):
+    interval_dicts = _process_interval_op(op)
+    # get the finest grained interval
+    interval = max(interval_dicts, key=lambda x: x["interval_index"])["interval"]
+
+    # adjust n to finest grained
+    for val in interval_dicts:
+        val["n"] = normalize_timedelta(
+            datetime.timedelta(**{f"{val['interval'].unit.name.lower()}s": val["n"]}),
+            interval.unit,
+        )
+
+    return ops.Literal(sum([i["n"] for i in interval_dicts]), interval)

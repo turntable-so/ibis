@@ -21,6 +21,7 @@ from ibis.backends.base.sql.alchemy.registry import (
     unary,
     varargs,
 )
+from ibis.backends.base.sql.registry.timestamp import _interval_flatten
 from ibis.backends.postgres.registry import _literal as _postgres_literal
 from ibis.backends.postgres.registry import operation_registry as _operation_registry
 
@@ -262,18 +263,32 @@ def _map_get(t, op):
     return sa.cast(expr, sqla_type)
 
 
-def _timestamp_bucket(t, op):
-    if op.offset is not None:
-        raise com.UnsupportedOperationError(
-            "`offset` is not supported in the Snowflake backend for timestamp bucketing"
-        )
+def _interval_add_subtract(t, op):
+    n, unit = _interval_flatten(op).args
+    unit = unit.unit
+    return sa.literal_column(f"INTERVAL '{n} {unit.name.upper()}'")
 
-    interval = op.interval
+
+def _timestamp_bucket(t, op):
+    interval = _interval_flatten(op.interval)
 
     if not isinstance(interval, ops.Literal):
         raise com.UnsupportedOperationError(
             f"Interval must be a literal for the Snowflake backend, got {type(interval)}"
         )
+
+    if op.offset is not None:
+        offset_interval = _interval_flatten(op.offset)
+        adj_arg = sa.func.timestampadd(
+            t.translate(op.arg), -offset_interval.value, offset_interval.dtype.unit.name
+        )
+        intermediate = sa.func.time_slice(
+            adj_arg, interval.value, interval.dtype.unit.name
+        )
+        final = sa.func.timestampadd(
+            intermediate, offset_interval.value, offset_interval.dtype.unit.name
+        )
+        return final
 
     return sa.func.time_slice(
         t.translate(op.arg), interval.value, interval.dtype.unit.name
@@ -553,6 +568,8 @@ operation_registry.update(
             lambda part, left, right: sa.func.timestampdiff(part, right, left), 3
         ),
         ops.TimestampBucket: _timestamp_bucket,
+        ops.IntervalAdd: _interval_add_subtract,
+        ops.IntervalSubtract: _interval_add_subtract,
         ops.IntegerRange: fixed_arity(
             lambda start, stop, step: sa.func.iff(
                 step != 0,

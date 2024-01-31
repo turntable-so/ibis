@@ -35,6 +35,7 @@ from ibis.backends.base.sql.alchemy.registry import (
     geospatial_functions,
     get_col,
 )
+from ibis.backends.base.sql.registry.timestamp import _interval_flatten
 
 operation_registry = sqlalchemy_operation_registry.copy()
 operation_registry.update(sqlalchemy_window_functions_registry)
@@ -64,6 +65,12 @@ def _timestamp_truncate(t, op):
     except KeyError:
         raise com.UnsupportedOperationError(f"Unsupported truncate unit {op.unit!r}")
     return sa.func.date_trunc(precision, sa_arg)
+
+
+def _interval_add_subtract(t, op):
+    n, unit = _interval_flatten(op).args
+    unit = unit.unit
+    return sa.literal_column(f"INTERVAL '{n} {unit.name.upper()}'")
 
 
 def _timestamp_bucket(t, op):
@@ -716,6 +723,8 @@ operation_registry.update(
         ops.TimestampAdd: fixed_arity(operator.add, 2),
         ops.TimestampSub: fixed_arity(operator.sub, 2),
         ops.TimestampDiff: fixed_arity(operator.sub, 2),
+        ops.IntervalAdd: _interval_add_subtract,
+        ops.IntervalSubtract: _interval_add_subtract,
         ops.Strftime: fixed_arity(_strftime, 2),
         ops.ExtractEpochSeconds: fixed_arity(
             lambda arg: sa.cast(sa.extract("epoch", arg), sa.INTEGER), 1

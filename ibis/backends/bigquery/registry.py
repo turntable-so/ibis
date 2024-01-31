@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import contextlib
+import datetime
 from typing import TYPE_CHECKING, Literal
 
 import numpy as np
@@ -23,8 +24,9 @@ from ibis.backends.base.sql.registry import (
 )
 from ibis.backends.base.sql.registry.literal import _string_literal_format
 from ibis.backends.base.sql.registry.main import table_array_view
+from ibis.backends.base.sql.registry.timestamp import _interval_flatten
 from ibis.backends.bigquery.datatypes import BigQueryType
-from ibis.common.temporal import DateUnit, IntervalUnit, TimeUnit
+from ibis.common.temporal import DateUnit, IntervalUnit, TimeUnit, normalize_timedelta
 
 if TYPE_CHECKING:
     from ibis.backends.base.sql import compiler
@@ -476,9 +478,11 @@ def _timestamp_binary(func):
             )
 
         if unit.is_date():
+            print(offset.value, offset.dtype)
             try:
                 offset = offset.to_expr().to_unit("h").op()
-            except ValueError:
+            except ValueError as e:
+                print(e)
                 raise com.UnsupportedOperationError(
                     f"BigQuery does not allow binary operation {func} with INTERVAL offset {unit}"
                 )
@@ -764,6 +768,68 @@ def _timestamp_delta(t, op):
         )
 
 
+def _bq_interval_flatten(op):
+    interval = _interval_flatten(op)
+    # bigquery does not support intervals finer than microseconds
+    if interval.args[1].unit == IntervalUnit.NANOSECOND:
+        raise com.UnsupportedOperationError(
+            "BigQuery does not support intervals finer than microseconds"
+        )
+    return interval
+
+
+def _bq_translate_interval(interval):
+    args = interval.args
+    return f"INTERVAL {args[0]} {args[1].unit.name.upper()}"
+
+
+def _interval_add_subtract(t, op):
+    return _bq_translate_interval(_bq_interval_flatten(op))
+
+
+def _timestamp_bucket(t, op):
+    arg = t.translate(op.arg)
+    if op.offset is not None:
+        offset = _bq_translate_interval(_bq_interval_flatten(op.offset))
+    else:
+        offset = None
+
+    finest_grained_n, finest_grained_unit = _bq_interval_flatten(op.interval).args
+    finest_grained_unit = finest_grained_unit.unit
+
+    # Bigquery only supports unix conversion for microsecond, millisecond, and second intervals
+    if finest_grained_unit in [
+        IntervalUnit.MICROSECOND,
+        IntervalUnit.MILLISECOND,
+        IntervalUnit.SECOND,
+    ]:
+        n_adj = finest_grained_n
+    else:
+        n_adj = normalize_timedelta(
+            datetime.timedelta(
+                **{f"{finest_grained_unit.name.lower()}s": finest_grained_n}
+            ),
+            IntervalUnit.SECOND,
+        )
+        finest_grained_unit = IntervalUnit.SECOND
+
+    adj_arg = f"TIMESTAMP_SUB({arg}, {offset})" if offset is not None else arg
+    offset_wrapper = (
+        lambda x: f"TIMESTAMP_ADD({x}, {offset})" if offset is not None else x
+    )
+
+    if finest_grained_unit == IntervalUnit.MICROSECOND:
+        time_key = "MICROS"
+    elif finest_grained_unit == IntervalUnit.MILLISECOND:
+        time_key = "MILLIS"
+    else:
+        time_key = "SECONDS"
+
+    return offset_wrapper(
+        f"TIMESTAMP_{time_key}(CAST( FLOOR(UNIX_{time_key}({adj_arg}) / {n_adj}) * {n_adj} AS INT))"
+    )
+
+
 def _group_concat(translator, op):
     arg = op.arg
     where = op.where
@@ -825,10 +891,10 @@ def _timestamp_range(translator, op):
     start = op.start
     stop = op.stop
 
-    if start.dtype.timezone is None or stop.dtype.timezone is None:
-        raise com.IbisTypeError(
-            "Timestamps without timezone values are not supported when generating timestamp ranges"
-        )
+    # if start.dtype.timezone is None or stop.dtype.timezone is None:
+    #     raise com.IbisTypeError(
+    #         "Timestamps without timezone values are not supported when generating timestamp ranges"
+    #     )
 
     rule = _make_range("GENERATE_TIMESTAMP_ARRAY")
     return rule(translator, op)
@@ -999,6 +1065,9 @@ OPERATION_REGISTRY = {
     ops.TimestampDelta: _timestamp_delta,
     ops.IntegerRange: _make_range("GENERATE_ARRAY"),
     ops.TimestampRange: _timestamp_range,
+    ops.IntervalAdd: _interval_add_subtract,
+    ops.IntervalSubtract: _interval_add_subtract,
+    ops.TimestampBucket: _timestamp_bucket,
 }
 
 _invalid_operations = {
