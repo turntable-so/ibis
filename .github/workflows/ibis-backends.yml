@@ -9,6 +9,7 @@ on:
       - "**/*.qmd"
       - "codecov.yml"
       - ".envrc"
+      - ".codespellrc"
     branches:
       - main
       - "*.x.x"
@@ -20,6 +21,7 @@ on:
       - "**/*.qmd"
       - "codecov.yml"
       - ".envrc"
+      - ".codespellrc"
     branches:
       - main
       - "*.x.x"
@@ -38,6 +40,7 @@ env:
   FORCE_COLOR: "1"
   ODBCSYSINI: "${{ github.workspace }}/ci/odbc"
   SQLALCHEMY_WARN_20: "1"
+  HYPOTHESIS_PROFILE: "ci"
 
 jobs:
   test_backends:
@@ -120,6 +123,12 @@ jobs:
               - postgres
             sys-deps:
               - libgeos-dev
+          - name: risingwave
+            title: Risingwave
+            services:
+              - risingwave
+            extras:
+              - risingwave
           - name: impala
             title: Impala
             extras:
@@ -208,6 +217,14 @@ jobs:
                 - postgres
               sys-deps:
                 - libgeos-dev
+          - os: windows-latest
+            backend:
+              name: risingwave
+              title: Risingwave
+              services:
+                - risingwave
+              extras:
+                - risingwave
           - os: windows-latest
             backend:
               name: postgres
@@ -382,7 +399,8 @@ jobs:
 
       - name: upload code coverage
         if: success()
-        uses: codecov/codecov-action@v3
+        continue-on-error: true
+        uses: codecov/codecov-action@v4
         with:
           flags: backend,${{ matrix.backend.name }},${{ runner.os }},python-${{ steps.install_python.outputs.python-version }}
 
@@ -509,7 +527,8 @@ jobs:
 
       - name: upload code coverage
         if: success()
-        uses: codecov/codecov-action@v3
+        continue-on-error: true
+        uses: codecov/codecov-action@v4
         with:
           flags: backend,${{ matrix.backend.name }},${{ runner.os }},python-${{ steps.install_python.outputs.python-version }}
 
@@ -581,7 +600,8 @@ jobs:
       - name: upload code coverage
         # only upload coverage for jobs that aren't mostly xfails
         if: success() && matrix.python-version != '3.11'
-        uses: codecov/codecov-action@v3
+        continue-on-error: true
+        uses: codecov/codecov-action@v4
         with:
           flags: backend,pyspark,${{ runner.os }},python-${{ steps.install_python.outputs.python-version }}
 
@@ -676,7 +696,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: remove deps that are not compatible with sqlalchemy 2
-        run: poetry remove snowflake-sqlalchemy sqlalchemy-exasol
+        run: poetry remove snowflake-sqlalchemy sqlalchemy-exasol sqlalchemy-risingwave
 
       - name: add sqlalchemy 2
         run: poetry update sqlalchemy
@@ -696,7 +716,8 @@ jobs:
 
       - name: upload code coverage
         if: success()
-        uses: codecov/codecov-action@v3
+        continue-on-error: true
+        uses: codecov/codecov-action@v4
         with:
           flags: backend,${{ matrix.backend.name }},${{ runner.os }},python-${{ steps.install_python.outputs.python-version }}
 

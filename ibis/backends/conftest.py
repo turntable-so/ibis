@@ -25,6 +25,8 @@ from ibis.conftest import WINDOWS
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
+    from ibis.backends.tests.base import BackendTest
+
 TEST_TABLES = {
     "functional_alltypes": ibis.schema(
         {
@@ -399,11 +401,6 @@ def pytest_runtest_call(item):
 
     backend = next(iter(backend))
 
-    if tpch_markers := list(item.iter_markers(name="tpch")):
-        assert len(tpch_markers) == 1
-        # TODO: there has to be a better way than hacking `_fixtureinfo`
-        item._fixtureinfo.argnames += ("backend", "snapshot")
-
     # Ibis hasn't exposed existing functionality
     # This xfails so that you know when it starts to pass
     for marker in item.iter_markers(name="notimpl"):
@@ -472,7 +469,7 @@ def pytest_runtest_call(item):
 
 
 @pytest.fixture(params=_get_backends_to_test(), scope="session")
-def backend(request, data_dir, tmp_path_factory, worker_id):
+def backend(request, data_dir, tmp_path_factory, worker_id) -> BackendTest:
     """Return an instance of BackendTest, loaded with data."""
 
     cls = _get_backend_conf(request.param)
@@ -544,6 +541,7 @@ def ddl_con(ddl_backend):
             "mysql",
             "oracle",
             "postgres",
+            "risingwave",
             "snowflake",
             "sqlite",
             "trino",

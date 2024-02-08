@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import functools
 import operator
-from typing import TYPE_CHECKING, Any, Iterable, Literal, Sequence
+from typing import TYPE_CHECKING, Any, Literal
 
 from public import public
 
@@ -12,6 +12,8 @@ from ibis.expr.types.core import _binop
 from ibis.expr.types.generic import Column, Scalar, Value
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
     import ibis.expr.types as ir
 
 
@@ -464,6 +466,40 @@ class StringValue(Value):
             Binary expression
         """
         return ops.HashBytes(self, how).to_expr()
+
+    def hexdigest(
+        self,
+        how: Literal["md5", "sha1", "sha256", "sha512"] = "sha256",
+    ) -> ir.StringValue:
+        """Return the hash digest of the input as a hex encoded string.
+
+        Parameters
+        ----------
+        how
+            Hash algorithm to use
+
+        Returns
+        -------
+        StringValue
+            Hexadecimal representation of the hash as a string
+
+        Examples
+        --------
+        >>> import ibis
+        >>> ibis.options.interactive = True
+        >>> t = ibis.memtable({"species": ["Adelie", "Chinstrap", "Gentoo"]})
+        >>> t.species.hexdigest()
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ HexDigest(species)                                           ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ string                                                           │
+        ├──────────────────────────────────────────────────────────────────┤
+        │ a4d7d46b27480037bc1e513e0e157cbf258baae6ee69e3110d0f9ff418b57a3c │
+        │ cb97d113ca69899ae4f1fb581f4a90d86989db77b4a33873d604b0ee412b4cc9 │
+        │ b5e90cdff65949fe6bc226823245f7698110e563a12363fc57b3eed3e4a0a612 │
+        └──────────────────────────────────────────────────────────────────┘
+        """
+        return ops.HexDigest(self, how.lower()).to_expr()
 
     def substr(
         self,
@@ -1082,7 +1118,7 @@ class StringValue(Value):
         why="Different backends support different regular expression syntax."
     )
     def re_split(self, pattern: str | StringValue) -> ir.ArrayValue:
-        """Split a string by a regular expression `pattern`.
+        r"""Split a string by a regular expression `pattern`.
 
         Parameters
         ----------
@@ -1150,9 +1186,7 @@ class StringValue(Value):
         --------
         >>> import ibis
         >>> ibis.options.interactive = True
-        >>> t = ibis.memtable(
-        ...     {"s": ["abc", "bac", "bca", "this has  multi \t whitespace"]}
-        ... )
+        >>> t = ibis.memtable({"s": ["abc", "bac", "bca", "this has  multi \t whitespace"]})
         >>> s = t.s
 
         Replace all "a"s that are at the beginning of the string with "b":

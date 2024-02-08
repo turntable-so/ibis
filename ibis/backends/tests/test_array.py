@@ -21,6 +21,7 @@ from ibis.backends.tests.errors import (
     ClickHouseDatabaseError,
     GoogleBadRequest,
     PolarsComputeError,
+    Py4JJavaError,
     PySparkAnalysisException,
 )
 
@@ -39,7 +40,6 @@ pytestmark = [
 # list.
 
 
-@pytest.mark.notimpl(["flink"], raises=com.OperationNotDefinedError)
 def test_array_column(backend, alltypes, df):
     expr = ibis.array(
         [alltypes["double_col"], alltypes["double_col"], 5.0, ibis.literal(6.0)]
@@ -54,7 +54,6 @@ def test_array_column(backend, alltypes, df):
     backend.assert_series_equal(result, expected, check_names=False)
 
 
-@pytest.mark.notimpl(["flink"], raises=com.OperationNotDefinedError)
 def test_array_scalar(con):
     expr = ibis.array([1.0, 2.0, 3.0])
     assert isinstance(expr, ir.ArrayScalar)
@@ -65,7 +64,7 @@ def test_array_scalar(con):
     assert np.array_equal(result, expected)
 
 
-@pytest.mark.notimpl(["polars", "flink"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["flink", "polars"], raises=com.OperationNotDefinedError)
 def test_array_repeat(con):
     expr = ibis.array([1.0, 2.0]) * 2
 
@@ -103,6 +102,11 @@ def test_array_concat_variadic(con):
     ["postgres", "trino"],
     raises=sa.exc.ProgrammingError,
     reason="backend can't infer the type of an empty array",
+)
+@pytest.mark.notyet(
+    ["risingwave"],
+    raises=sa.exc.InternalError,
+    reason="Bind error: cannot determine type of empty array",
 )
 def test_array_concat_some_empty(con):
     left = ibis.literal([])
@@ -165,8 +169,6 @@ builtin_array = toolz.compose(
     pytest.mark.never(
         ["sqlite"], reason="array types are unsupported", raises=NotImplementedError
     ),
-    # someone needs to implement these
-    pytest.mark.notimpl(["flink"], raises=Exception),
 )
 
 
@@ -175,6 +177,11 @@ builtin_array = toolz.compose(
     ["clickhouse", "postgres"],
     reason="backend does not support nullable nested types",
     raises=AssertionError,
+)
+@pytest.mark.notimpl(
+    ["risingwave"],
+    raises=ValueError,
+    reason="Do not nest ARRAY types; ARRAY(basetype) handles multi-dimensional arrays of basetype",
 )
 @pytest.mark.never(
     ["bigquery"], reason="doesn't support arrays of arrays", raises=AssertionError
@@ -206,7 +213,12 @@ def test_array_discovery(backend):
     raises=GoogleBadRequest,
 )
 @pytest.mark.notimpl(["dask"], raises=ValueError)
-@pytest.mark.notimpl(["datafusion"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["datafusion", "flink"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(
+    ["risingwave"],
+    raises=ValueError,
+    reason="Do not nest ARRAY types; ARRAY(basetype) handles multi-dimensional arrays of basetype",
+)
 def test_unnest_simple(backend):
     array_types = backend.array_types
     expected = (
@@ -223,7 +235,12 @@ def test_unnest_simple(backend):
 
 @builtin_array
 @pytest.mark.notimpl("dask", raises=com.OperationNotDefinedError)
-@pytest.mark.notimpl(["datafusion"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["datafusion", "flink"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(
+    ["risingwave"],
+    raises=ValueError,
+    reason="ValueError: Do not nest ARRAY types; ARRAY(basetype) handles multi-dimensional arrays of basetype",
+)
 def test_unnest_complex(backend):
     array_types = backend.array_types
     df = array_types.execute()
@@ -261,7 +278,12 @@ def test_unnest_complex(backend):
     raises=AssertionError,
 )
 @pytest.mark.notimpl(["dask"], raises=ValueError)
-@pytest.mark.notimpl(["datafusion"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["datafusion", "flink"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(
+    ["risingwave"],
+    raises=ValueError,
+    reason="Do not nest ARRAY types; ARRAY(basetype) handles multi-dimensional arrays of basetype",
+)
 def test_unnest_idempotent(backend):
     array_types = backend.array_types
     df = array_types.execute()
@@ -282,7 +304,12 @@ def test_unnest_idempotent(backend):
 
 @builtin_array
 @pytest.mark.notimpl("dask", raises=ValueError)
-@pytest.mark.notimpl(["datafusion"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["datafusion", "flink"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(
+    ["risingwave"],
+    raises=ValueError,
+    reason="ValueError: Do not nest ARRAY types; ARRAY(basetype) handles multi-dimensional arrays of basetype",
+)
 def test_unnest_no_nulls(backend):
     array_types = backend.array_types
     df = array_types.execute()
@@ -309,7 +336,12 @@ def test_unnest_no_nulls(backend):
 
 @builtin_array
 @pytest.mark.notimpl("dask", raises=ValueError)
-@pytest.mark.notimpl(["datafusion"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["datafusion", "flink"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(
+    ["risingwave"],
+    raises=ValueError,
+    reason="ValueError: Do not nest ARRAY types; ARRAY(basetype) handles multi-dimensional arrays of basetype",
+)
 def test_unnest_default_name(backend):
     array_types = backend.array_types
     df = array_types.execute()
@@ -336,28 +368,56 @@ def test_unnest_default_name(backend):
         (None, None),
         (3, None),
         (-3, None),
-        (None, -3),
         (-3, -1),
+        param(
+            None,
+            -3,
+            marks=[
+                pytest.mark.notyet(
+                    ["flink"],
+                    raises=AssertionError,
+                    reason=(
+                        "ArraySlice in Flink behaves unexpectedly when"
+                        "`start` is None and `stop` is negative."
+                    ),
+                )
+            ],
+            id="nulls",
+        ),
     ],
 )
 @pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
 @pytest.mark.notimpl(
-    ["datafusion", "flink"], raises=Exception, reason="array_types table isn't defined"
+    ["datafusion"], raises=Exception, reason="array_types table isn't defined"
 )
 @pytest.mark.notimpl(["dask"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(
+    ["risingwave"],
+    raises=ValueError,
+    reason="ValueError: Do not nest ARRAY types; ARRAY(basetype) handles multi-dimensional arrays of basetype",
+)
 def test_array_slice(backend, start, stop):
     array_types = backend.array_types
     expr = array_types.select(sliced=array_types.y[start:stop])
-    result = expr.execute()
-    expected = pd.DataFrame(
-        {"sliced": array_types.y.execute().map(lambda x: x[start:stop])}
+    result = expr.sliced.execute()
+    expected = array_types.y.execute().map(lambda x: x[start:stop])
+    assert frozenset(map(tuple, result.values)) == frozenset(
+        map(tuple, expected.values)
     )
-    tm.assert_frame_equal(result, expected)
 
 
 @builtin_array
 @pytest.mark.notimpl(
-    ["datafusion", "impala", "mssql", "polars", "snowflake", "sqlite", "mysql"],
+    [
+        "datafusion",
+        "flink",
+        "impala",
+        "mssql",
+        "polars",
+        "snowflake",
+        "sqlite",
+        "mysql",
+    ],
     raises=com.OperationNotDefinedError,
 )
 @pytest.mark.notimpl(
@@ -388,22 +448,44 @@ def test_array_slice(backend, start, stop):
         param({"a": [[1, 2], [4]]}, {"a": [[2, 3], [5]]}, id="no_nulls"),
     ],
 )
-def test_array_map(backend, con, input, output):
+@pytest.mark.parametrize(
+    "func",
+    [
+        lambda x: x + 1,
+        functools.partial(lambda x, y: x + y, y=1),
+        ibis._ + 1,
+    ],
+)
+@pytest.mark.broken(
+    ["risingwave"],
+    raises=AssertionError,
+    reason="TODO(Kexiang): seems a bug",
+)
+def test_array_map(con, input, output, func):
     t = ibis.memtable(input, schema=ibis.schema(dict(a="!array<int8>")))
-    expected = pd.DataFrame(output)
+    t = ibis.memtable(input, schema=ibis.schema(dict(a="!array<int8>")))
+    expected = pd.Series(output["a"])
 
-    expr = t.select(a=t.a.map(lambda x: x + 1))
-    result = con.execute(expr)
-    backend.assert_frame_equal(result, expected)
-
-    expr = t.select(a=t.a.map(functools.partial(lambda x, y: x + y, y=1)))
-    result = con.execute(expr)
-    backend.assert_frame_equal(result, expected)
+    expr = t.select(a=t.a.map(func))
+    result = con.execute(expr.a)
+    assert frozenset(map(tuple, result.values)) == frozenset(
+        map(tuple, expected.values)
+    )
 
 
 @builtin_array
 @pytest.mark.notimpl(
-    ["dask", "datafusion", "impala", "mssql", "pandas", "polars", "snowflake", "mysql"],
+    [
+        "dask",
+        "datafusion",
+        "flink",
+        "impala",
+        "mssql",
+        "pandas",
+        "polars",
+        "snowflake",
+        "mysql",
+    ],
     raises=com.OperationNotDefinedError,
 )
 @pytest.mark.notimpl(
@@ -432,17 +514,23 @@ def test_array_map(backend, con, input, output):
         param({"a": [[1, 2], [4]]}, {"a": [[2], [4]]}, id="no_nulls"),
     ],
 )
-def test_array_filter(backend, con, input, output):
+@pytest.mark.parametrize(
+    "predicate",
+    [
+        lambda x: x > 1,
+        functools.partial(lambda x, y: x > y, y=1),
+        ibis._ > 1,
+    ],
+)
+def test_array_filter(con, input, output, predicate):
     t = ibis.memtable(input, schema=ibis.schema(dict(a="!array<int8>")))
-    expected = pd.DataFrame(output)
+    expected = pd.Series(output["a"])
 
-    expr = t.select(a=t.a.filter(lambda x: x > 1))
-    result = con.execute(expr)
-    backend.assert_frame_equal(result, expected)
-
-    expr = t.select(a=t.a.filter(functools.partial(lambda x, y: x > y, y=1)))
-    result = con.execute(expr)
-    backend.assert_frame_equal(result, expected)
+    expr = t.select(a=t.a.filter(predicate))
+    result = con.execute(expr.a)
+    assert frozenset(map(tuple, result.values)) == frozenset(
+        map(tuple, expected.values)
+    )
 
 
 @builtin_array
@@ -452,12 +540,68 @@ def test_array_filter(backend, con, input, output):
 )
 @pytest.mark.notimpl(["dask"], raises=com.OperationNotDefinedError)
 @pytest.mark.never(["impala"], reason="array_types table isn't defined")
+@pytest.mark.notimpl(
+    ["risingwave"],
+    raises=ValueError,
+    reason="ValueError: Do not nest ARRAY types; ARRAY(basetype) handles multi-dimensional arrays of basetype",
+)
+@pytest.mark.broken(
+    ["flink"],
+    raises=Py4JJavaError,
+    reason="Caused by: java.lang.NullPointerException",
+)
 def test_array_contains(backend, con):
     t = backend.array_types
     expr = t.x.contains(1)
     result = con.execute(expr)
     expected = t.x.execute().map(lambda lst: 1 in lst)
-    backend.assert_series_equal(result, expected, check_names=False)
+    assert frozenset(result.values) == frozenset(expected.values)
+
+
+@pytest.mark.parametrize(
+    ("a", "expected_array"),
+    [
+        param(
+            [[1], [], [42, 42], []],
+            [-1, -1, 0, -1],
+            id="including-empty-array",
+            marks=[
+                pytest.mark.notyet(
+                    ["flink"],
+                    raises=Py4JJavaError,
+                    reason="SQL validation failed; Flink does not support ARRAY[]",
+                ),
+                pytest.mark.broken(
+                    ["datafusion"],
+                    raises=Exception,
+                    reason="Internal error: start_from index out of bounds",
+                ),
+            ],
+        ),
+        param(
+            [[1], [1], [42, 42], [1]],
+            [-1, -1, 0, -1],
+            id="all-non-empty-arrays",
+        ),
+        param(
+            [[1], [1, 42], [42, 42, 42], [42, 1]],
+            [-1, 1, 0, 0],
+            id="all-non-empty-arrays-2",
+        ),
+    ],
+)
+@builtin_array
+@pytest.mark.notimpl(
+    ["dask", "impala", "mssql", "pandas", "polars"],
+    raises=com.OperationNotDefinedError,
+)
+def test_array_position(backend, con, a, expected_array):
+    t = ibis.memtable({"a": a})
+    expr = t.a.index(42)
+    result = con.execute(expr)
+    expected = pd.Series(expected_array, dtype="object")
+    backend.assert_series_equal(result, expected, check_names=False, check_dtype=False)
+    assert frozenset(result.values) == frozenset(expected.values)
 
 
 @builtin_array
@@ -466,27 +610,35 @@ def test_array_contains(backend, con):
     raises=com.OperationNotDefinedError,
 )
 @pytest.mark.broken(
-    ["datafusion"], reason="internal error as of 34.0.0", raises=Exception
+    ["risingwave"],
+    raises=AssertionError,
+    reason="TODO(Kexiang): seems a bug",
 )
-def test_array_position(backend, con):
-    t = ibis.memtable({"a": [[1], [], [42, 42], []]})
-    expr = t.a.index(42)
-    result = con.execute(expr)
-    expected = pd.Series([-1, -1, 0, -1], dtype="object")
-    backend.assert_series_equal(result, expected, check_names=False, check_dtype=False)
-
-
-@builtin_array
-@pytest.mark.notimpl(
-    ["dask", "impala", "mssql", "pandas", "polars"],
-    raises=com.OperationNotDefinedError,
+@pytest.mark.parametrize(
+    ("a"),
+    [
+        param(
+            [[3, 2], [], [42, 2], [2, 2], []],
+            id="including-empty-array",
+            marks=[
+                pytest.mark.notyet(
+                    ["flink"],
+                    raises=Py4JJavaError,
+                    reason="SQL validation failed; Flink does not support ARRAY[]",
+                )
+            ],
+        ),
+        param([[3, 2], [2], [42, 2], [2, 2], [2]], id="all-non-empty-arrays"),
+    ],
 )
-def test_array_remove(backend, con):
-    t = ibis.memtable({"a": [[3, 2], [], [42, 2], [2, 2], []]})
+def test_array_remove(con, a):
+    t = ibis.memtable({"a": a})
     expr = t.a.remove(2)
     result = con.execute(expr)
     expected = pd.Series([[3], [], [42], [], []], dtype="object")
-    backend.assert_series_equal(result, expected, check_names=False)
+    assert frozenset(map(tuple, result.values)) == frozenset(
+        map(tuple, expected.values)
+    )
 
 
 @builtin_array
@@ -512,6 +664,11 @@ def test_array_remove(backend, con):
     raises=(AssertionError, GoogleBadRequest),
     reason="bigquery doesn't support null elements in arrays",
 )
+@pytest.mark.broken(
+    ["risingwave"],
+    raises=AssertionError,
+    reason="TODO(Kexiang): seems a bug",
+)
 @pytest.mark.parametrize(
     ("input", "expected"),
     [
@@ -527,25 +684,36 @@ def test_array_remove(backend, con):
         ),
     ],
 )
-def test_array_unique(backend, con, input, expected):
+@pytest.mark.notimpl(
+    ["flink"], raises=NotImplementedError, reason="`from_ibis()` is not implemented"
+)
+def test_array_unique(con, input, expected):
     t = ibis.memtable(input)
     expr = t.a.unique()
-    result = con.execute(expr).map(set, na_action="ignore")
-    expected = pd.Series(expected, dtype="object")
-    backend.assert_series_equal(result, expected, check_names=False)
+    result = con.execute(expr).map(frozenset, na_action="ignore")
+    expected = pd.Series(expected, dtype="object").map(frozenset, na_action="ignore")
+    assert frozenset(result.values) == frozenset(expected.values)
 
 
 @builtin_array
 @pytest.mark.notimpl(
-    ["dask", "datafusion", "impala", "mssql", "pandas", "polars"],
+    ["dask", "datafusion", "flink", "impala", "mssql", "pandas", "polars"],
     raises=com.OperationNotDefinedError,
 )
-def test_array_sort(backend, con):
+@pytest.mark.broken(
+    ["risingwave"],
+    raises=AssertionError,
+    reason="Refer to https://github.com/risingwavelabs/risingwave/issues/14735",
+)
+def test_array_sort(con):
     t = ibis.memtable({"a": [[3, 2], [], [42, 42], []]})
     expr = t.a.sort()
     result = con.execute(expr)
     expected = pd.Series([[2, 3], [], [42, 42], []], dtype="object")
-    backend.assert_series_equal(result, expected, check_names=False)
+
+    assert frozenset(map(tuple, result.values)) == frozenset(
+        map(tuple, expected.values)
+    )
 
 
 @builtin_array
@@ -553,20 +721,44 @@ def test_array_sort(backend, con):
     ["dask", "datafusion", "impala", "mssql", "pandas", "polars"],
     raises=com.OperationNotDefinedError,
 )
-@pytest.mark.notyet(
-    ["bigquery"],
-    raises=GoogleBadRequest,
-    reason="BigQuery doesn't support arrays with null elements",
+@pytest.mark.parametrize(
+    ("a", "b", "expected_array"),
+    [
+        param(
+            [[3, 2], [], []],
+            [[1, 3], [None], [5]],
+            [{1, 2, 3}, {None}, {5}],
+            id="including-empty-array",
+            marks=[
+                pytest.mark.notyet(
+                    ["flink"],
+                    raises=Py4JJavaError,
+                    reason="SQL validation failed; Flink does not support ARRAY[]",
+                ),
+                pytest.mark.notyet(
+                    ["bigquery"],
+                    raises=GoogleBadRequest,
+                    reason="BigQuery doesn't support arrays with null elements",
+                ),
+            ],
+        ),
+        param(
+            [[3, 2], [1], [5]],
+            [[1, 3], [1], [5]],
+            [{1, 2, 3}, {1}, {5}],
+            id="all-non-empty-arrays",
+        ),
+    ],
 )
-def test_array_union(con):
-    t = ibis.memtable({"a": [[3, 2], [], []], "b": [[1, 3], [None], [5]]})
+def test_array_union(con, a, b, expected_array):
+    t = ibis.memtable({"a": a, "b": b})
     expr = t.a.union(t.b)
     result = con.execute(expr).map(set, na_action="ignore")
-    expected = pd.Series([{1, 2, 3}, {None}, {5}], dtype="object")
-    assert len(result) == len(expected)
+    expected = pd.Series(expected_array, dtype="object")
 
-    for i, (lhs, rhs) in enumerate(zip(result, expected)):
-        assert lhs == rhs, f"row {i:d} differs"
+    assert frozenset(map(tuple, result.values)) == frozenset(
+        map(tuple, expected.values)
+    )
 
 
 @pytest.mark.notimpl(
@@ -575,6 +767,11 @@ def test_array_union(con):
 )
 @pytest.mark.notimpl(
     ["sqlite"], raises=NotImplementedError, reason="Unsupported type: Array..."
+)
+@pytest.mark.broken(
+    ["risingwave"],
+    raises=AssertionError,
+    reason="TODO(Kexiang): seems a bug",
 )
 @pytest.mark.parametrize(
     "data",
@@ -603,8 +800,9 @@ def test_array_intersect(con, data):
     expected = pd.Series([{3}, set(), set()], dtype="object")
     assert len(result) == len(expected)
 
-    for i, (lhs, rhs) in enumerate(zip(result, expected)):
-        assert lhs == rhs, f"row {i:d} differs"
+    assert frozenset(map(tuple, result.values)) == frozenset(
+        map(tuple, expected.values)
+    )
 
 
 @builtin_array
@@ -613,8 +811,11 @@ def test_array_intersect(con, data):
     raises=ClickHouseDatabaseError,
     reason="ClickHouse won't accept dicts for struct type values",
 )
-@pytest.mark.notimpl(["postgres"], raises=sa.exc.ProgrammingError)
-@pytest.mark.notimpl(["datafusion"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["postgres", "risingwave"], raises=sa.exc.ProgrammingError)
+@pytest.mark.notimpl(
+    ["datafusion", "flink"],
+    raises=com.OperationNotDefinedError,
+)
 def test_unnest_struct(con):
     data = {"value": [[{"a": 1}, {"a": 2}], [{"a": 3}, {"a": 4}]]}
     t = ibis.memtable(data, schema=ibis.schema({"value": "!array<!struct<a: !int>>"}))
@@ -631,8 +832,23 @@ def test_unnest_struct(con):
     ["impala", "mssql"], raises=com.OperationNotDefinedError, reason="no array support"
 )
 @pytest.mark.notimpl(
-    ["dask", "datafusion", "druid", "oracle", "pandas", "polars", "postgres"],
+    [
+        "dask",
+        "datafusion",
+        "druid",
+        "flink",
+        "oracle",
+        "pandas",
+        "polars",
+        "postgres",
+        "risingwave",
+    ],
     raises=com.OperationNotDefinedError,
+)
+@pytest.mark.notimpl(
+    ["risingwave"],
+    raises=ValueError,
+    reason="Do not nest ARRAY types; ARRAY(basetype) handles multi-dimensional arrays of basetype",
 )
 def test_zip(backend):
     t = backend.array_types
@@ -658,8 +874,8 @@ def test_zip(backend):
     raises=ClickHouseDatabaseError,
     reason="https://github.com/ClickHouse/ClickHouse/issues/41112",
 )
-@pytest.mark.notimpl(["postgres"], raises=sa.exc.ProgrammingError)
-@pytest.mark.notimpl(["datafusion"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["postgres", "risingwave"], raises=sa.exc.ProgrammingError)
+@pytest.mark.notimpl(["datafusion", "flink"], raises=com.OperationNotDefinedError)
 @pytest.mark.notimpl(
     ["polars"],
     raises=com.OperationNotDefinedError,
@@ -713,7 +929,7 @@ def flatten_data():
     ["bigquery"], reason="BigQuery doesn't support arrays of arrays", raises=TypeError
 )
 @pytest.mark.notyet(
-    ["postgres"],
+    ["postgres", "risingwave"],
     reason="Postgres doesn't truly support arrays of arrays",
     raises=com.OperationNotDefinedError,
 )
@@ -750,8 +966,7 @@ def flatten_data():
         ),
     ],
 )
-@pytest.mark.notimpl(["flink"], raises=com.OperationNotDefinedError)
-@pytest.mark.notyet(["datafusion"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["datafusion", "flink"], raises=com.OperationNotDefinedError)
 def test_array_flatten(backend, flatten_data, column, expected):
     data = flatten_data[column]
     t = ibis.memtable(
@@ -784,6 +999,7 @@ def test_range_single_argument(con, n):
 @pytest.mark.notimpl(
     ["polars", "flink", "pandas", "dask"], raises=com.OperationNotDefinedError
 )
+@pytest.mark.skip("risingwave")
 def test_range_single_argument_unnest(backend, con, n):
     expr = ibis.range(n).unnest()
     result = con.execute(expr)
@@ -830,6 +1046,11 @@ def test_range_start_stop_step(con, start, stop, step):
     ["datafusion"], raises=com.OperationNotDefinedError, reason="not supported upstream"
 )
 @pytest.mark.notimpl(["flink", "pandas", "dask"], raises=com.OperationNotDefinedError)
+@pytest.mark.never(
+    ["risingwave"],
+    raises=sa.exc.InternalError,
+    reason="Invalid parameter step: step size cannot equal zero",
+)
 def test_range_start_stop_step_zero(con, start, stop):
     expr = ibis.range(start, stop, 0)
     result = con.execute(expr)
@@ -857,6 +1078,7 @@ def test_unnest_empty_array(con):
 @pytest.mark.notimpl(
     [
         "datafusion",
+        "flink",
         "impala",
         "mssql",
         "polars",
@@ -883,6 +1105,7 @@ def test_array_map_with_conflicting_names(backend, con):
 @pytest.mark.notimpl(
     [
         "datafusion",
+        "flink",
         "impala",
         "mssql",
         "polars",
@@ -956,6 +1179,11 @@ timestamp_range_tzinfos = pytest.mark.parametrize(
             ibis.interval(hours=1),
             "1H",
             id="pos",
+            marks=pytest.mark.notimpl(
+                ["risingwave"],
+                raises=sa.exc.InternalError,
+                reason="function make_interval() does not exist",
+            ),
         ),
         param(
             datetime(2017, 1, 2),
@@ -966,7 +1194,12 @@ timestamp_range_tzinfos = pytest.mark.parametrize(
             marks=[
                 pytest.mark.broken(
                     ["polars"], raises=AssertionError, reason="returns an empty array"
-                )
+                ),
+                pytest.mark.notimpl(
+                    ["risingwave"],
+                    raises=sa.exc.InternalError,
+                    reason="function neg(interval) does not exist",
+                ),
             ],
         ),
         param(
@@ -981,6 +1214,11 @@ timestamp_range_tzinfos = pytest.mark.parametrize(
                 pytest.mark.notyet(
                     ["clickhouse", "pyspark", "snowflake"],
                     raises=com.UnsupportedOperationError,
+                ),
+                pytest.mark.notimpl(
+                    ["risingwave"],
+                    raises=sa.exc.InternalError,
+                    reason="function neg(interval) does not exist",
                 ),
             ],
         ),
@@ -1007,7 +1245,14 @@ def test_timestamp_range(con, start, stop, step, freq, tzinfo):
             datetime(2017, 1, 2, tzinfo=pytz.UTC),
             ibis.interval(hours=0),
             id="pos",
-            marks=[pytest.mark.notyet(["polars"], raises=PolarsComputeError)],
+            marks=[
+                pytest.mark.notyet(["polars"], raises=PolarsComputeError),
+                pytest.mark.notyet(
+                    ["risingwave"],
+                    raises=sa.exc.InternalError,
+                    reason="function make_interval() does not exist",
+                ),
+            ],
         ),
         param(
             datetime(2017, 1, 1, tzinfo=pytz.UTC),
@@ -1020,6 +1265,11 @@ def test_timestamp_range(con, start, stop, step, freq, tzinfo):
                 pytest.mark.notyet(
                     ["clickhouse", "pyspark", "snowflake"],
                     raises=com.UnsupportedOperationError,
+                ),
+                pytest.mark.notyet(
+                    ["risingwave"],
+                    raises=sa.exc.InternalError,
+                    reason="function neg(interval) does not exist",
                 ),
             ],
         ),
@@ -1037,9 +1287,6 @@ def test_timestamp_range_zero_step(con, start, stop, step, tzinfo):
     assert list(result) == []
 
 
-@pytest.mark.notimpl(
-    ["flink"], raises=AssertionError, reason="arrays not yet implemented"
-)
 def test_repr_timestamp_array(con, monkeypatch):
     monkeypatch.setattr(ibis.options, "interactive", True)
     monkeypatch.setattr(ibis.options, "default_backend", con)
@@ -1053,6 +1300,11 @@ def test_repr_timestamp_array(con, monkeypatch):
     ["dask", "datafusion", "flink", "pandas", "polars"],
     raises=com.OperationNotDefinedError,
 )
+@pytest.mark.broken(
+    ["risingwave"],
+    raises=sa.exc.OperationalError,
+    reason="Refer to https://github.com/risingwavelabs/risingwave/issues/14734",
+)
 def test_unnest_range(con):
     expr = ibis.range(2).unnest().name("x").as_table().mutate({"y": 1.0})
     result = con.execute(expr)
@@ -1060,7 +1312,6 @@ def test_unnest_range(con):
     tm.assert_frame_equal(result, expected)
 
 
-@pytest.mark.notyet(["flink"], raises=com.OperationNotDefinedError)
 @pytest.mark.parametrize(
     ("input", "expected"),
     [

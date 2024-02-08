@@ -1,19 +1,19 @@
 from __future__ import annotations
 
-import collections
 import functools
-from typing import TYPE_CHECKING, Iterable, Literal, Sequence
+from typing import TYPE_CHECKING, Literal
 
 from public import public
 
 import ibis
 import ibis.expr.operations as ops
-from ibis import util
 from ibis.common.exceptions import IbisTypeError
 from ibis.expr.types.core import _binop
 from ibis.expr.types.generic import Column, Scalar, Value
 
 if TYPE_CHECKING:
+    from collections.abc import Iterable, Sequence
+
     import ibis.expr.types as ir
 
 
@@ -744,6 +744,30 @@ class NumericValue(Value):
         -------
         PointValue
             Points
+
+        Examples
+        --------
+        >>> import ibis
+        >>> ibis.options.interactive = True
+        >>> t = ibis.examples.zones.fetch()
+        >>> t.x_cent.point(t.y_cent)
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ GeoPoint(x_cent, y_cent)         ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ point                            │
+        ├──────────────────────────────────┤
+        │ <POINT (935996.821 191376.75)>   │
+        │ <POINT (1031085.719 164018.754)> │
+        │ <POINT (1026452.617 254265.479)> │
+        │ <POINT (990633.981 202959.782)>  │
+        │ <POINT (931871.37 140681.351)>   │
+        │ <POINT (964319.735 157998.936)>  │
+        │ <POINT (1006496.679 216719.218)> │
+        │ <POINT (1005551.571 222936.088)> │
+        │ <POINT (1043002.677 212969.849)> │
+        │ <POINT (1042223.605 186706.496)> │
+        │ …                                │
+        └──────────────────────────────────┘
         """
         return ops.GeoPoint(self, right).to_expr()
 
