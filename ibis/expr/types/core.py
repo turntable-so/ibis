@@ -3,7 +3,7 @@ from __future__ import annotations
 import contextlib
 import os
 import webbrowser
-from typing import TYPE_CHECKING, Any, Mapping, NoReturn, Tuple, Iterator
+from typing import TYPE_CHECKING, Any, Iterator, Mapping, NoReturn, Tuple
 
 from public import public
 from rich.jupyter import JupyterMixin
@@ -13,7 +13,8 @@ from ibis.common.annotations import ValidationError
 from ibis.common.exceptions import IbisError, TranslationError
 from ibis.common.grounds import Immutable
 from ibis.common.patterns import Coercible, CoercionError
-from ibis.config import _default_backend, options as opts
+from ibis.config import _default_backend
+from ibis.config import options as opts
 from ibis.util import experimental
 
 if TYPE_CHECKING:
@@ -286,6 +287,27 @@ class Expr(Immutable, Coercible):
                     "Expression depends on no backends, and found no default"
                 )
             return default
+
+        # backends_ls = [i.__dict__ for i in backends]
+        # dict1 = backends_ls[0]
+        # dict2 = backends_ls[1]
+
+        # # Find keys in dict1 but not in dict2
+        # unique_to_dict1 = {key: dict1[key] for key in dict1.keys() - dict2.keys()}
+
+        # # Find keys in dict2 but not in dict1
+        # unique_to_dict2 = {key: dict2[key] for key in dict2.keys() - dict1.keys()}
+
+        # # Find keys in both with different values
+        # common_with_diff_values = {
+        #     key: (dict1[key], dict2[key])
+        #     for key in dict1.keys() & dict2.keys()
+        #     if dict1[key] != dict2[key]
+        # }
+
+        # print("Unique to dict1:", unique_to_dict1)
+        # print("Unique to dict2:", unique_to_dict2)
+        # print("Common but different values:", common_with_diff_values)
 
         if len(backends) > 1:
             raise IbisError("Multiple backends found for this expression")
@@ -589,8 +611,8 @@ class Expr(Immutable, Coercible):
 
     def unbind(self) -> ir.Table:
         """Return an expression built on `UnboundTable` instead of backend-specific objects."""
-        from ibis.expr.analysis import p, c
         from ibis.common.deferred import _
+        from ibis.expr.analysis import c, p
 
         rule = p.DatabaseTable >> c.UnboundTable(name=_.name, schema=_.schema)
         return self.op().replace(rule).to_expr()

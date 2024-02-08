@@ -478,7 +478,6 @@ def _timestamp_binary(func):
             )
 
         if unit.is_date():
-            print(offset.value, offset.dtype)
             try:
                 offset = offset.to_expr().to_unit("h").op()
             except ValueError as e:
