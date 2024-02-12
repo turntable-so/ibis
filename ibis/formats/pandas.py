@@ -199,7 +199,7 @@ class PandasData(DataMapper):
             s = s.dt.tz_convert("UTC").dt.tz_localize(None)
         try:
             return s.astype(pandas_type).dt.date
-        except (TypeError, pd._libs.tslibs.OutOfBoundsDatetime):
+        except (TypeError, ValueError, pd._libs.tslibs.OutOfBoundsDatetime):
 
             def try_date(v):
                 if isinstance(v, datetime.datetime):
