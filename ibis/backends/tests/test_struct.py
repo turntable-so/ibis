@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import pandas.testing as tm
 import pytest
+from pytest import param
 
 import ibis
 import ibis.expr.datatypes as dt
@@ -17,20 +18,31 @@ pytestmark = [
 ]
 
 
-@pytest.mark.notimpl(["dask", "snowflake"])
-@pytest.mark.parametrize("field", ["a", "b", "c"])
-def test_single_field(backend, struct, struct_df, field):
-    expr = struct.abc[field]
-    result = expr.execute().sort_values().reset_index(drop=True)
-    expected = (
-        struct_df.abc.map(
-            lambda value: value[field] if isinstance(value, dict) else value
-        )
-        .rename(field)
-        .sort_values()
-        .reset_index(drop=True)
-    )
-    backend.assert_series_equal(result, expected)
+@pytest.mark.notimpl(["dask"])
+@pytest.mark.parametrize(
+    ("field", "expected"),
+    [
+        param(
+            "a",
+            [1.0, 2.0, 2.0, 3.0, 3.0, np.nan, np.nan],
+            id="a",
+            marks=pytest.mark.notimpl(["snowflake"]),
+        ),
+        param(
+            "b", ["apple", "banana", "banana", "orange", "orange", None, None], id="b"
+        ),
+        param(
+            "c",
+            [2, 2, 3, 3, 4, np.nan, np.nan],
+            id="c",
+            marks=pytest.mark.notimpl(["snowflake"]),
+        ),
+    ],
+)
+def test_single_field(struct, field, expected):
+    expr = struct.select(field=lambda t: t.abc[field]).order_by("field")
+    result = expr.execute()
+    tm.assert_series_equal(result.field, pd.Series(expected, name="field"))
 
 
 @pytest.mark.notimpl(["dask"])
@@ -67,7 +79,7 @@ def test_literal(backend, con, field):
     backend.assert_series_equal(result, expected.astype(dtype))
 
 
-@pytest.mark.notimpl(["postgres", "risingwave"])
+@pytest.mark.notimpl(["postgres"])
 @pytest.mark.parametrize("field", ["a", "b", "c"])
 @pytest.mark.notyet(
     ["clickhouse"], reason="clickhouse doesn't support nullable nested types"

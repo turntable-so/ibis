@@ -9,11 +9,11 @@ import pytest
 from pytest import param
 
 import ibis
+from ibis.conftest import LINUX, MACOS, SANDBOXED
 
 gpd = pytest.importorskip("geopandas")
 gtm = pytest.importorskip("geopandas.testing")
 shapely = pytest.importorskip("shapely")
-pytest.importorskip("geoalchemy2")
 
 
 def test_geospatial_point(zones, zones_gdf):
@@ -251,16 +251,10 @@ point = ibis.literal((1, 0), type="point").name("p")
 point_geom = ibis.literal((1, 0), type="point:geometry").name("p")
 
 
-@pytest.mark.parametrize(
-    ("expr", "expected"),
-    [
-        (point, "'POINT (1.0 0.0)'"),
-        (point_geom, "'POINT (1.0 0.0)'::geometry"),
-    ],
-)
-def test_literal_geospatial_explicit(con, expr, expected):
+@pytest.mark.parametrize("expr", [point, point_geom])
+def test_literal_geospatial_explicit(con, expr, snapshot):
     result = str(con.compile(expr))
-    assert result == f"SELECT {expected} AS p"
+    snapshot.assert_match(result, "out.sql")
 
 
 # test input data with shapely geometries
@@ -290,8 +284,18 @@ shp_multipolygon_0 = shapely.MultiPolygon([shp_polygon_0])
         (shp_multipoint_0, "(0 0, 1 1, 2 2)"),
     ],
 )
-def test_literal_geospatial_inferred(con, shp, expected):
+def test_literal_geospatial_inferred(con, shp, expected, snapshot):
     result = str(con.compile(ibis.literal(shp).name("result")))
     name = type(shp).__name__.upper()
     pair = f"{name} {expected}"
-    assert result == f"SELECT {pair!r} AS result"
+    assert pair in result
+    snapshot.assert_match(result, "out.sql")
+
+
+@pytest.mark.skipif(
+    (LINUX or MACOS) and SANDBOXED,
+    reason="nix on linux cannot download duckdb extensions or data due to sandboxing",
+)
+def test_load_geo_example(con):
+    t = ibis.examples.zones.fetch(backend=con)
+    assert t.geom.type().is_geospatial()

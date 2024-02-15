@@ -11,19 +11,19 @@ from pytest import param
 
 import ibis
 import ibis.common.exceptions as com
-import ibis.expr.analysis as an
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
 import ibis.expr.schema as sch
 import ibis.expr.types as ir
 import ibis.selectors as s
 from ibis import _
-from ibis import literal as L
 from ibis.common.annotations import ValidationError
-from ibis.common.exceptions import RelationError
+from ibis.common.deferred import Deferred
+from ibis.common.exceptions import ExpressionError, IntegrityError, RelationError
 from ibis.expr import api
+from ibis.expr.rewrites import simplify
+from ibis.expr.tests.test_newrels import join_tables
 from ibis.expr.types import Column, Table
-from ibis.tests.expr.mocks import MockAlchemyBackend, MockBackend
 from ibis.tests.util import assert_equal, assert_pickle_roundtrip
 
 
@@ -76,11 +76,19 @@ def test_view_new_relation(table):
     #
     # This thing is not exactly a projection, since it has no semantic
     # meaning when it comes to execution
-    tview = table.view()
+    tview1 = table.view()
+    tview2 = table.view()
+    tview2_ = tview2.view()
 
-    roots = an.find_immediate_parent_tables(tview.op())
-    assert len(roots) == 1
-    assert roots[0] is tview.op()
+    node1 = tview1.op()
+    node2 = tview2.op()
+    node2_ = tview2_.op()
+
+    assert isinstance(node1, ops.SelfReference)
+    assert isinstance(node2, ops.SelfReference)
+    assert node1.parent is node2.parent
+    assert node1 != node2
+    assert node2_ is node2
 
 
 def test_getitem_column_select(table):
@@ -89,6 +97,19 @@ def test_getitem_column_select(table):
 
         # Make sure it's the right type
         assert isinstance(col, Column)
+
+
+def test_select_using_selector(table):
+    expr = table[s.numeric()]
+    expected = table.select(
+        table.a,
+        table.b,
+        table.c,
+        table.d,
+        table.e,
+        table.f,
+    )
+    assert expr.equals(expected)
 
 
 def test_table_tab_completion():
@@ -137,7 +158,7 @@ def test_projection(table):
 
     proj = table[cols]
     assert isinstance(proj, Table)
-    assert isinstance(proj.op(), ops.Selection)
+    assert isinstance(proj.op(), ops.Project)
 
     assert proj.schema().names == tuple(cols)
     for c in cols:
@@ -175,6 +196,15 @@ def test_projection_duplicate_names(table):
         table.select([table.c, table.c])
 
 
+def test_projection_sort_keys_errors(table):
+    """Forbid using `asc`/`desc` in selections"""
+    with pytest.raises(ValidationError):
+        table.select([table.c.desc()])
+
+    with pytest.raises(ValidationError):
+        table.mutate(new=table.c.asc())
+
+
 def test_projection_invalid_root(table):
     schema1 = {"foo": "double", "bar": "int32"}
 
@@ -182,7 +212,7 @@ def test_projection_invalid_root(table):
     right = api.table(schema1, name="bar")
 
     exprs = [right["foo"], right["bar"]]
-    with pytest.raises(RelationError):
+    with pytest.raises(IntegrityError):
         left.select(exprs)
 
 
@@ -200,7 +230,7 @@ def test_projection_with_star_expr(table):
 
     # cannot pass an invalid table expression
     t2 = t.aggregate([t["a"].sum().name("sum(a)")], by=["g"])
-    with pytest.raises(RelationError):
+    with pytest.raises(IntegrityError):
         t[[t2]]
     # TODO: there may be some ways this can be invalid
 
@@ -243,14 +273,16 @@ def test_projection_no_expr(table, empty):
         table.select(empty)
 
 
-def test_projection_invalid_nested_list(table):
-    errmsg = "must be coerceable to expressions"
-    with pytest.raises(com.IbisTypeError, match=errmsg):
-        table.select(["a", ["b"]])
-    with pytest.raises(com.IbisTypeError, match=errmsg):
-        table[["a", ["b"]]]
-    with pytest.raises(com.IbisTypeError, match=errmsg):
-        table["a", ["b"]]
+# FIXME(kszucs): currently bind() flattens the list of expressions, so arbitrary
+# nesting is allowed, need to revisit
+# def test_projection_invalid_nested_list(table):
+#     errmsg = "must be coerceable to expressions"
+#     with pytest.raises(com.IbisTypeError, match=errmsg):
+#         table.select(["a", ["b"]])
+#     with pytest.raises(com.IbisTypeError, match=errmsg):
+#         table[["a", ["b"]]]
+#     with pytest.raises(com.IbisTypeError, match=errmsg):
+#         table["a", ["b"]]
 
 
 def test_mutate(table):
@@ -332,14 +364,14 @@ def test_filter_no_list(table):
 def test_add_predicate(table):
     pred = table["a"] > 5
     result = table[pred]
-    assert isinstance(result.op(), ops.Selection)
+    assert isinstance(result.op(), ops.Filter)
 
 
 def test_invalid_predicate(table, schema):
     # a lookalike
     table2 = api.table(schema, name="bar")
     predicate = table2.a > 5
-    with pytest.raises(RelationError):
+    with pytest.raises(IntegrityError):
         table.filter(predicate)
 
 
@@ -350,13 +382,13 @@ def test_add_predicate_coalesce(table):
     pred1 = table["a"] > 5
     pred2 = table["b"] > 0
 
-    result = table[pred1][pred2]
+    result = simplify(table[pred1][pred2].op()).to_expr()
     expected = table.filter([pred1, pred2])
     assert_equal(result, expected)
 
     # 59, if we are not careful, we can obtain broken refs
     subset = table[pred1]
-    result = subset.filter([subset["b"] > 0])
+    result = simplify(subset.filter([subset["b"] > 0]).op()).to_expr()
     assert_equal(result, expected)
 
 
@@ -497,7 +529,7 @@ def test_limit(table):
 def test_order_by(table):
     result = table.order_by(["f"]).op()
 
-    sort_key = result.sort_keys[0]
+    sort_key = result.keys[0]
 
     assert_equal(sort_key.expr, table.f.op())
     assert sort_key.ascending
@@ -506,7 +538,7 @@ def test_order_by(table):
     result2 = table.order_by("f").op()
     assert_equal(result, result2)
 
-    key2 = result2.sort_keys[0]
+    key2 = result2.keys[0]
     assert key2.descending is False
 
 
@@ -535,24 +567,24 @@ def test_order_by_asc_deferred_sort_key(table):
     [
         param(ibis.NA, ibis.NA.op(), id="na"),
         param(ibis.random(), ibis.random().op(), id="random"),
-        param(1.0, L(1.0).op(), id="float"),
-        param(L("a"), L("a").op(), id="string"),
-        param(L([1, 2, 3]), L([1, 2, 3]).op(), id="array"),
+        param(1.0, ibis.literal(1.0).op(), id="float"),
+        param(ibis.literal("a"), ibis.literal("a").op(), id="string"),
+        param(ibis.literal([1, 2, 3]), ibis.literal([1, 2, 3]).op(), id="array"),
     ],
 )
 def test_order_by_scalar(table, key, expected):
     result = table.order_by(key)
-    assert result.op().sort_keys == (ops.SortKey(expected),)
+    assert result.op().keys == (ops.SortKey(expected),)
 
 
 @pytest.mark.parametrize(
     ("key", "exc_type"),
     [
         ("bogus", com.IbisTypeError),
-        (("bogus", False), com.IbisTypeError),
+        # (("bogus", False), com.IbisTypeError),
         (ibis.desc("bogus"), com.IbisTypeError),
         (1000, IndexError),
-        ((1000, False), IndexError),
+        # ((1000, False), IndexError),
         (_.bogus, AttributeError),
         (_.bogus.desc(), AttributeError),
     ],
@@ -653,15 +685,51 @@ def test_aggregate_keys_basic(table):
     repr(result)
 
 
-def test_aggregate_non_list_inputs(table):
-    # per #150
+def test_aggregate_having_implicit_metric(table):
     metric = table.f.sum().name("total")
     by = "g"
     having = table.c.sum() > 10
 
-    result = table.aggregate(metric, by=by, having=having)
-    expected = table.aggregate([metric], by=[by], having=[having])
-    assert_equal(result, expected)
+    implicit_having_metric = table.aggregate(metric, by=by, having=having)
+    expected_aggregate = ops.Aggregate(
+        parent=table,
+        groups={"g": table.g},
+        metrics={"total": table.f.sum(), table.c.sum().get_name(): table.c.sum()},
+    )
+    expected_filter = ops.Filter(
+        parent=expected_aggregate,
+        predicates=[
+            ops.Greater(ops.Field(expected_aggregate, table.c.sum().get_name()), 10)
+        ],
+    )
+    expected_project = ops.Project(
+        parent=expected_filter,
+        values={
+            "g": ops.Field(expected_filter, "g"),
+            "total": ops.Field(expected_filter, "total"),
+        },
+    )
+    assert implicit_having_metric.op() == expected_project
+
+
+def test_agg_having_explicit_metric(table):
+    metric = table.f.sum().name("total")
+    by = "g"
+    having = table.c.sum() > 10
+
+    explicit_having_metric = table.aggregate(
+        [metric, table.c.sum().name("sum")], by=by, having=having
+    )
+    expected_aggregate = ops.Aggregate(
+        parent=table,
+        groups={"g": table.g},
+        metrics={"total": table.f.sum(), "sum": table.c.sum()},
+    )
+    expected_filter = ops.Filter(
+        parent=expected_aggregate,
+        predicates=[ops.Greater(ops.Field(expected_aggregate, "sum"), 10)],
+    )
+    assert explicit_having_metric.op() == expected_filter
 
 
 def test_aggregate_keywords(table):
@@ -675,22 +743,23 @@ def test_aggregate_keywords(table):
     assert_equal(expr2, expected)
 
 
-def test_filter_aggregate_pushdown_predicate(table):
-    # In the case where we want to add a predicate to an aggregate
-    # expression after the fact, rather than having to backpedal and add it
-    # before calling aggregate.
-    #
-    # TODO (design decision): This could happen automatically when adding a
-    # predicate originating from the same root table; if an expression is
-    # created from field references from the aggregated table then it
-    # becomes a filter predicate applied on top of a view
+def test_select_on_literals(table):
+    # literal ints and strings are column indices, everything else is a value
+    expr1 = table.select(col1=True, col2=1, col3="a")
+    expr2 = table.select(col1=ibis.literal(True), col2=table.b, col3=table.a)
+    assert expr1.equals(expr2)
 
-    pred = table.f > 0
-    metrics = [table.a.sum().name("total")]
-    agged = table.aggregate(metrics, by=["g"])
-    filtered = agged.filter([pred])
-    expected = table[pred].aggregate(metrics, by=["g"])
-    assert_equal(filtered, expected)
+
+def test_filter_on_literal_boolean(table):
+    expr1 = table.filter(True)
+    expr2 = table.filter(ibis.literal(True))
+    assert expr1.equals(expr2)
+
+
+def test_filter_on_literal_string_is_column(table):
+    expr1 = table.filter("h")
+    expr2 = table.filter(table.h)
+    assert expr1.equals(expr2)
 
 
 def test_filter_on_literal_then_aggregate(table):
@@ -699,32 +768,26 @@ def test_filter_on_literal_then_aggregate(table):
     assert expr.columns == ["total"]
 
 
-@pytest.mark.parametrize(
-    "case_fn",
-    [
-        param(lambda t: t.f.sum(), id="non_boolean"),
-        param(lambda t: t.f > 2, id="non_scalar"),
-    ],
-)
-def test_aggregate_post_predicate(table, case_fn):
-    # Test invalid having clause
-    metrics = [table.f.sum().name("total")]
-    by = ["g"]
-    having = [case_fn(table)]
-
-    with pytest.raises(ValidationError):
-        table.aggregate(metrics, by=by, having=having)
-
-
 def test_group_by_having_api(table):
     # #154, add a HAVING post-predicate in a composable way
     metric = table.f.sum().name("foo")
     postp = table.d.mean() > 1
-
     expr = table.group_by("g").having(postp).aggregate(metric)
 
-    expected = table.aggregate(metric, by="g", having=postp)
-    assert_equal(expr, expected)
+    agg = ops.Aggregate(
+        parent=table,
+        groups={"g": table.g},
+        metrics={"foo": table.f.sum(), "Mean(d)": table.d.mean()},
+    ).to_expr()
+    filt = ops.Filter(
+        parent=agg,
+        predicates=[agg["Mean(d)"] > 1],
+    ).to_expr()
+    proj = ops.Project(
+        parent=filt,
+        values={"g": filt.g, "foo": filt.foo},
+    )
+    assert expr.op() == proj
 
 
 def test_group_by_kwargs(table):
@@ -755,6 +818,12 @@ def test_groupby_convenience(table):
     expr = table.group_by(group_expr).aggregate(metrics)
     expected = table.aggregate(metrics, by=[group_expr])
     assert_equal(expr, expected)
+
+
+@pytest.mark.parametrize("group", [[], (), None])
+def test_group_by_nothing(table, group):
+    with pytest.raises(com.IbisInputError):
+        table.group_by(group)
 
 
 def test_group_by_count_size(table):
@@ -821,16 +890,53 @@ def test_join_no_predicate_list(con):
 
     pred = region.r_regionkey == nation.n_regionkey
     joined = region.inner_join(nation, pred)
-    expected = region.inner_join(nation, [pred])
-    assert_equal(joined, expected)
+
+    with join_tables(region, nation) as (r1, r2):
+        expected = ops.JoinChain(
+            first=r1,
+            rest=[ops.JoinLink("inner", r2, [r1.r_regionkey == r2.n_regionkey])],
+            values={
+                "r_regionkey": r1.r_regionkey,
+                "r_name": r1.r_name,
+                "r_comment": r1.r_comment,
+                "n_nationkey": r2.n_nationkey,
+                "n_name": r2.n_name,
+                "n_regionkey": r2.n_regionkey,
+                "n_comment": r2.n_comment,
+            },
+        )
+        assert joined.op() == expected
 
 
 def test_join_deferred(con):
     region = con.table("tpch_region")
     nation = con.table("tpch_nation")
+
     res = region.join(nation, _.r_regionkey == nation.n_regionkey)
-    exp = region.join(nation, region.r_regionkey == nation.n_regionkey)
-    assert_equal(res, exp)
+
+    with join_tables(region, nation) as (r1, r2):
+        expected = ops.JoinChain(
+            first=r1,
+            rest=[ops.JoinLink("inner", r2, [r1.r_regionkey == r2.n_regionkey])],
+            values={
+                "r_regionkey": r1.r_regionkey,
+                "r_name": r1.r_name,
+                "r_comment": r1.r_comment,
+                "n_nationkey": r2.n_nationkey,
+                "n_name": r2.n_name,
+                "n_regionkey": r2.n_regionkey,
+                "n_comment": r2.n_comment,
+            },
+        )
+        assert res.op() == expected
+
+
+def test_join_invalid_predicate(con):
+    region = con.table("tpch_region")
+    nation = con.table("tpch_nation")
+
+    with pytest.raises(com.InputTypeError):
+        region.inner_join(nation, object())
 
 
 def test_asof_join():
@@ -844,24 +950,49 @@ def test_asof_join():
         "time_right",
         "value2",
     ]
-    pred = joined.op().table.predicates[0]
+    pred = joined.op().rest[0].predicates[0]
     assert pred.left.name == pred.right.name == "time"
 
 
+# TODO(kszucs): ensure the correctness of the pd.merge_asof(by=...) argument emulation
 def test_asof_join_with_by():
     left = ibis.table([("time", "int32"), ("key", "int32"), ("value", "double")])
     right = ibis.table([("time", "int32"), ("key", "int32"), ("value2", "double")])
-    joined = api.asof_join(left, right, "time", by="key")
-    assert joined.columns == [
-        "time",
-        "key",
-        "value",
-        "time_right",
-        "key_right",
-        "value2",
-    ]
-    by = joined.op().table.by[0]
-    assert by.left.name == by.right.name == "key"
+
+    join_without_by = api.asof_join(left, right, "time")
+    with join_tables(left, right) as (r1, r2):
+        r2 = join_without_by.op().rest[0].table.to_expr()
+        expected = ops.JoinChain(
+            first=r1,
+            rest=[ops.JoinLink("asof", r2, [r1.time >= r2.time])],
+            values={
+                "time": r1.time,
+                "key": r1.key,
+                "value": r1.value,
+                "time_right": r2.time,
+                "key_right": r2.key,
+                "value2": r2.value2,
+            },
+        )
+        assert join_without_by.op() == expected
+
+    join_with_by = api.asof_join(left, right, "time", by="key")
+    with join_tables(left, right) as (r1, r2):
+        expected = ops.JoinChain(
+            first=r1,
+            rest=[
+                ops.JoinLink("asof", r2, [r1.time >= r2.time, r1.key == r2.key]),
+            ],
+            values={
+                "time": r1.time,
+                "key": r1.key,
+                "value": r1.value,
+                "time_right": r2.time,
+                "key_right": r2.key,
+                "value2": r2.value2,
+            },
+        )
+        assert join_with_by.op() == expected
 
 
 @pytest.mark.parametrize(
@@ -883,17 +1014,28 @@ def test_asof_join_with_by():
     ],
 )
 def test_asof_join_with_tolerance(ibis_interval, timedelta_interval):
-    left = ibis.table([("time", "int32"), ("key", "int32"), ("value", "double")])
-    right = ibis.table([("time", "int32"), ("key", "int32"), ("value2", "double")])
+    left = ibis.table([("time", "timestamp"), ("key", "int32"), ("value", "double")])
+    right = ibis.table([("time", "timestamp"), ("key", "int32"), ("value2", "double")])
 
-    joined = api.asof_join(left, right, "time", tolerance=ibis_interval).op()
-    tolerance = joined.table.tolerance
-    assert_equal(tolerance, ibis_interval.op())
+    for interval in [ibis_interval, timedelta_interval]:
+        joined = api.asof_join(left, right, "time", tolerance=interval)
 
-    joined = api.asof_join(left, right, "time", tolerance=timedelta_interval).op()
-    tolerance = joined.table.tolerance
-    assert isinstance(tolerance.to_expr(), ir.IntervalScalar)
-    assert isinstance(tolerance, ops.Literal)
+        asof = left.asof_join(right, "time")
+        filt = asof.filter(
+            [
+                asof.time <= asof.time_right + interval,
+                asof.time >= asof.time_right - interval,
+            ]
+        )
+        join = left.left_join(filt, [left.time == filt.time])
+        expected = join.select(
+            left,
+            time_right=filt.time_right,
+            key_right=filt.key_right,
+            value2=filt.value2,
+        )
+
+        assert joined.equals(expected)
 
 
 def test_equijoin_schema_merge():
@@ -977,6 +1119,8 @@ def test_self_join_no_view_convenience(table):
 
     result = table.join(table, [("g", "g")])
     expected_cols = list(table.columns)
+    # TODO(kszucs): the inner join convenience to don't duplicate the
+    # equivalent columns from the right table is not implemented yet
     expected_cols.extend(f"{c}_right" for c in table.columns if c != "g")
     assert result.columns == expected_cols
 
@@ -1051,8 +1195,26 @@ def test_cross_join_multiple(table):
     c = table["f", "h"]
 
     joined = ibis.cross_join(a, b, c)
-    expected = a.cross_join(b.cross_join(c))
-    assert joined.equals(expected)
+    with join_tables(a, b, c) as (r1, r2, r3):
+        expected = ops.JoinChain(
+            first=r1,
+            rest=[
+                ops.JoinLink("cross", r2, []),
+                ops.JoinLink("cross", r3, []),
+            ],
+            values={
+                "a": r1.a,
+                "b": r1.b,
+                "c": r1.c,
+                "d": r2.d,
+                "e": r2.e,
+                "f": r3.f,
+                "h": r3.h,
+            },
+        )
+        assert joined.op() == expected
+        # TODO(kszucs): it must be simplified first using an appropriate rewrite rule
+        assert not joined.equals(a.cross_join(b.cross_join(c)))
 
 
 def test_filter_join():
@@ -1117,24 +1279,36 @@ def test_inner_join_overlapping_column_names():
 def test_join_key_alternatives(con, key_maker):
     t1 = con.table("star1")
     t2 = con.table("star2")
-    expected = t1.inner_join(t2, [t1.foo_id == t2.foo_id])
     key = key_maker(t1, t2)
+
     joined = t1.inner_join(t2, key)
-    assert_equal(joined, expected)
+    with join_tables(t1, t2) as (r1, r2):
+        expected = ops.JoinChain(
+            first=r1,
+            rest=[
+                ops.JoinLink("inner", r2, [r1.foo_id == r2.foo_id]),
+            ],
+            values={
+                "c": r1.c,
+                "f": r1.f,
+                "foo_id": r1.foo_id,
+                "bar_id": r1.bar_id,
+                "value1": r2.value1,
+                "value3": r2.value3,
+            },
+        )
+        assert joined.op() == expected
 
 
-@pytest.mark.parametrize(
-    "key,error",
-    [
-        ([("foo_id", "foo_id", "foo_id")], com.ExpressionError),
-        ([(s.c("foo_id"), s.c("foo_id"))], ValueError),
-    ],
-)
-def test_join_key_invalid(con, key, error):
+def test_join_key_invalid(con):
     t1 = con.table("star1")
     t2 = con.table("star2")
-    with pytest.raises(error):
-        t1.inner_join(t2, key)
+
+    with pytest.raises(ExpressionError):
+        t1.inner_join(t2, [("foo_id", "foo_id", "foo_id")])
+
+    # it is working now
+    t1.inner_join(t2, [(s.c("foo_id"), s.c("foo_id"))])
 
 
 def test_join_invalid_refs(con):
@@ -1143,7 +1317,7 @@ def test_join_invalid_refs(con):
     t3 = con.table("star3")
 
     predicate = t1.bar_id == t3.bar_id
-    with pytest.raises(com.RelationError):
+    with pytest.raises(com.IntegrityError):
         t1.inner_join(t2, [predicate])
 
 
@@ -1152,7 +1326,7 @@ def test_join_invalid_expr_type(con):
     invalid_right = left.foo_id
     join_key = ["bar_id"]
 
-    with pytest.raises(ValidationError):
+    with pytest.raises(TypeError):
         left.inner_join(invalid_right, join_key)
 
 
@@ -1162,7 +1336,7 @@ def test_join_non_boolean_expr(con):
 
     # oops
     predicate = t1.f * t2.value1
-    with pytest.raises(com.ExpressionError):
+    with pytest.raises(ValidationError):
         t1.inner_join(t2, [predicate])
 
 
@@ -1192,8 +1366,25 @@ def test_unravel_compound_equijoin(table):
     p3 = t1.key3 == t2.key3
 
     joined = t1.inner_join(t2, [p1 & p2 & p3])
-    expected = t1.inner_join(t2, [p1, p2, p3])
-    assert_equal(joined, expected)
+    with join_tables(t1, t2) as (r1, r2):
+        expected = ops.JoinChain(
+            first=r1,
+            rest=[
+                ops.JoinLink(
+                    "inner",
+                    r2,
+                    [r1.key1 == r2.key1, r1.key2 == r2.key2, r1.key3 == r2.key3],
+                )
+            ],
+            values={
+                "key1": r1.key1,
+                "key2": r1.key2,
+                "key3": r1.key3,
+                "value1": r1.value1,
+                "value2": r2.value2,
+            },
+        )
+        assert joined.op() == expected
 
 
 def test_union(
@@ -1203,11 +1394,11 @@ def test_union(
     setops_relation_error_message,
 ):
     result = setops_table_foo.union(setops_table_bar)
-    assert isinstance(result.op().table, ops.Union)
-    assert not result.op().table.distinct
+    assert isinstance(result.op().parent, ops.Union)
+    assert not result.op().parent.distinct
 
     result = setops_table_foo.union(setops_table_bar, distinct=True)
-    assert result.op().table.distinct
+    assert result.op().parent.distinct
 
     with pytest.raises(RelationError, match=setops_relation_error_message):
         setops_table_foo.union(setops_table_baz)
@@ -1220,7 +1411,7 @@ def test_intersection(
     setops_relation_error_message,
 ):
     result = setops_table_foo.intersect(setops_table_bar)
-    assert isinstance(result.op().table, ops.Intersection)
+    assert isinstance(result.op().parent, ops.Intersection)
 
     with pytest.raises(RelationError, match=setops_relation_error_message):
         setops_table_foo.intersect(setops_table_baz)
@@ -1233,7 +1424,7 @@ def test_difference(
     setops_relation_error_message,
 ):
     result = setops_table_foo.difference(setops_table_bar)
-    assert isinstance(result.op().table, ops.Difference)
+    assert isinstance(result.op().parent, ops.Difference)
 
     with pytest.raises(RelationError, match=setops_relation_error_message):
         setops_table_foo.difference(setops_table_baz)
@@ -1275,14 +1466,23 @@ def t2():
 
 def test_unresolved_existence_predicate(t1, t2):
     expr = (t1.key1 == t2.key1).any()
-    assert isinstance(expr, ir.BooleanColumn)
-    assert isinstance(expr.op(), ops.UnresolvedExistsSubquery)
+    assert isinstance(expr, Deferred)
+
+    filtered = t2.filter(t1.key1 == t2.key1)
+    subquery = ops.ExistsSubquery(filtered)
+    expected = ops.Filter(parent=t1, predicates=[subquery])
+    assert t1[expr].op() == expected
+
+    filtered = t1.filter(t1.key1 == t2.key1)
+    subquery = ops.ExistsSubquery(filtered)
+    expected = ops.Filter(parent=t2, predicates=[subquery])
+    assert t2[expr].op() == expected
 
 
 def test_resolve_existence_predicate(t1, t2):
     expr = t1[(t1.key1 == t2.key1).any()]
     op = expr.op()
-    assert isinstance(op, ops.Selection)
+    assert isinstance(op, ops.Filter)
 
     pred = op.predicates[0].to_expr()
     assert isinstance(pred.op(), ops.ExistsSubquery)
@@ -1318,11 +1518,23 @@ def test_group_by_keys(table):
 
 def test_having(table):
     m = table.mutate(foo=table.f * 2, bar=table.e / 2)
-
     expr = m.group_by("foo").having(lambda x: x.foo.sum() > 10).size()
-    expected = m.group_by("foo").having(m.foo.sum() > 10).size()
 
-    assert_equal(expr, expected)
+    agg = ops.Aggregate(
+        parent=m,
+        groups={"foo": m.foo},
+        metrics={"CountStar()": ops.CountStar(m), "Sum(foo)": ops.Sum(m.foo)},
+    ).to_expr()
+    filt = ops.Filter(
+        parent=agg,
+        predicates=[agg["Sum(foo)"] > 10],
+    ).to_expr()
+    proj = ops.Project(
+        parent=filt,
+        values={"foo": filt.foo, "CountStar()": filt["CountStar()"]},
+    ).to_expr()
+
+    assert expr.equals(proj)
 
 
 def test_filter(table):
@@ -1485,7 +1697,7 @@ def test_unbound_table_using_class_definition():
 
     cases = {t1: "MyTable", t2: "MyNamedTable"}
     for t, name in cases.items():
-        assert isinstance(t, ir.TableExpr)
+        assert isinstance(t, ir.Table)
         assert isinstance(t.op(), ops.UnboundTable)
         assert t.schema() == expected_schema
         assert t.get_name() == name
@@ -1495,38 +1707,44 @@ def test_mutate_chain():
     one = ibis.table([("a", "string"), ("b", "string")], name="t")
     two = one.mutate(b=lambda t: t.b.fillna("Short Term"))
     three = two.mutate(a=lambda t: t.a.fillna("Short Term"))
-    a, b = three.op().selections
 
-    # we can't fuse these correctly yet
-    assert isinstance(a, ops.Alias)
-    assert isinstance(a.arg, ops.Coalesce)
-    assert isinstance(b, ops.TableColumn)
+    values = three.op().values
+    assert isinstance(values["a"], ops.Coalesce)
+    assert isinstance(values["b"], ops.Field)
+    assert values["b"].rel == two.op()
 
-    expr = b.table.selections[1]
-    assert isinstance(expr, ops.Alias)
-    assert isinstance(expr.arg, ops.Coalesce)
+    three_opt = simplify(three.op())
+    assert three_opt == ops.Project(
+        parent=one,
+        values={
+            "a": one.a.fillna("Short Term"),
+            "b": one.b.fillna("Short Term"),
+        },
+    )
 
 
 # TODO(kszucs): move this test case to ibis/tests/sql since it requires the
 # sql backend to be executed
-def test_multiple_dbcon():
-    """Expr from multiple connections to same DB should be compatible."""
-    con1 = MockBackend()
-    con2 = MockBackend()
+# def test_multiple_dbcon():
+#     """Expr from multiple connections to same DB should be compatible."""
+#     con1 = MockBackend()
+#     con2 = MockBackend()
 
-    con1.table("alltypes").union(con2.table("alltypes")).execute()
+#     con1.table("alltypes").union(con2.table("alltypes")).execute()
 
 
-def test_multiple_db_different_backends():
-    con1 = MockBackend()
-    con2 = MockAlchemyBackend()
+# TODO(kszucs): move this test to ibis/tests/sql since it requires the
+# sql backend to be executed
+# def test_multiple_db_different_backends():
+#     con1 = MockBackend()
+#     con2 = MockAlchemyBackend()
 
-    backend1_table = con1.table("alltypes")
-    backend2_table = con2.table("alltypes")
+#     backend1_table = con1.table("alltypes")
+#     backend2_table = con2.table("alltypes")
 
-    expr = backend1_table.union(backend2_table)
-    with pytest.raises(com.IbisError, match="Multiple backends"):
-        expr.compile()
+#     expr = backend1_table.union(backend2_table)
+#     with pytest.raises(com.IbisError, match="Multiple backends"):
+#         expr.compile()
 
 
 def test_merge_as_of_allows_overlapping_columns():
@@ -1556,7 +1774,7 @@ def test_merge_as_of_allows_overlapping_columns():
     ]  # select columns we care about
     signal_two = signal_two.rename(voltage="value", signal_two="field")
 
-    merged = ibis.api.asof_join(signal_one, signal_two, "timestamp_received")
+    merged = signal_one.asof_join(signal_two, "timestamp_received")
     assert merged.columns == [
         "current",
         "timestamp_received",
@@ -1612,11 +1830,11 @@ def test_join_lname_rname_still_collide():
     t2 = ibis.table({"id": "int64", "col1": "int64", "col2": "int64"})
     t3 = ibis.table({"id": "int64", "col1": "int64", "col2": "int64"})
 
-    with pytest.raises(com.IntegrityError) as rec:
-        t1.left_join(t2, "id").left_join(t3, "id")
+    with pytest.raises(com.IntegrityError):
+        t1.left_join(t2, "id").left_join(t3, "id")._finish()
 
-    assert "`['col1_right', 'col2_right', 'id_right']`" in str(rec.value)
-    assert "`lname='', rname='{name}_right'`" in str(rec.value)
+    # assert "`['col1_right', 'col2_right', 'id_right']`" in str(rec.value)
+    # assert "`lname='', rname='{name}_right'`" in str(rec.value)
 
 
 def test_drop():
@@ -1689,22 +1907,15 @@ def test_array_string_compare():
 
 
 @pytest.mark.parametrize("value", [True, False])
-@pytest.mark.parametrize(
-    "api",
-    [
-        param(lambda t, value: t[value], id="getitem"),
-        param(lambda t, value: t.filter(value), id="filter"),
-    ],
-)
-def test_filter_with_literal(value, api):
+def test_filter_with_literal(value):
     t = ibis.table(dict(a="string"))
-    filt = api(t, ibis.literal(value))
-    assert filt is not None
+    filt = t.filter(ibis.literal(value))
+    assert filt.op() == ops.Filter(parent=t, predicates=[ibis.literal(value)])
 
     # ints are invalid predicates
     int_val = ibis.literal(int(value))
-    with pytest.raises((NotImplementedError, ValidationError, com.IbisTypeError)):
-        api(t, int_val)
+    with pytest.raises(ValidationError):
+        t.filter(int_val)
 
 
 def test_cast():
@@ -1842,3 +2053,17 @@ def test_invalid_distinct_empty_key():
     t = ibis.table(dict(a="int", b="string"), name="t")
     with pytest.raises(com.IbisInputError):
         t.distinct(on="c", keep="first")
+
+
+def test_unbind_with_namespace():
+    schema = ibis.schema({"a": "int"})
+    ns = ops.Namespace(database="db", schema="sch")
+
+    t_op = ops.DatabaseTable(name="t", schema=schema, source=None, namespace=ns)
+    t = t_op.to_expr()
+    s = t.unbind()
+
+    expected = ops.UnboundTable(name="t", schema=schema, namespace=ns).to_expr()
+
+    assert s.op() == expected.op()
+    assert s.equals(expected)

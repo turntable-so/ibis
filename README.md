@@ -16,7 +16,7 @@ Ibis has three primary components:
 
 1. **A dataframe API for Python**.
    Python users can write Ibis code to manipulate tabular data.
-2. **Interfaces to 15+ query engines.**
+2. **Interfaces to 20+ query engines.**
    Wherever data is stored, people can use Ibis as their API of choice to communicate with any of those query engines.
 3. **Deferred execution**.
    Ibis uses deferred execution, so execution of code is pushed to the query engine.
@@ -31,7 +31,7 @@ Ibis aims to be a future-proof solution to interacting with data using Python an
 - **Deferred execution**: Ibis pushes code execution to the query engine and only moves required data into memory when necessary.
   Analytics workflows are faster and more efficient
 - **Interactive mode**: Ibis provides an interactive mode in which users can quickly diagnose problems, explore data, and mock up workflows and pipelines locally.
-- **10+ supported backends**: Ibis supports multiple query engines and DataFrame APIs.
+- **20+ supported backends**: Ibis supports multiple query engines and DataFrame APIs.
   Use one interface to transform with your data wherever it lives: from DataFrames in pandas to Parquet files through DuckDB to tables in BigQuery.
 - **Minimize rewrites**: Teams can often keep their Ibis code the same regardless of backend changes, like increasing or decreasing computing power, changing the number or size of their databases, or switching backends entirely.
 - **Flexibility when you need it**: When Ibis doesn't support something, it provides a way to jump directly into SQL.
@@ -123,7 +123,7 @@ Download the SQLite database from the `ibis-tutorial-data` GCS (Google Cloud
 Storage) bucket, then connect to it using ibis.
 
 ```bash
-curl -LsS -o geography.db 'https://storage.googleapis.com/ibis-tutorial-data/geography.db'
+curl -LsSO 'https://storage.googleapis.com/ibis-tutorial-data/geography.duckdb'
 ```
 
 Connect to the database and show the available tables
@@ -132,7 +132,7 @@ Connect to the database and show the available tables
 >>> import ibis
 >>> from ibis import _
 >>> ibis.options.interactive = True
->>> con = ibis.sqlite.connect("geography.db")
+>>> con = ibis.duckdb.connect("geography.duckdb")
 >>> con.tables
 Tables
 ------
@@ -149,7 +149,7 @@ Choose the `countries` table and preview its first few rows
 ┏━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━━━┳━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━━━┓
 ┃ iso_alpha2 ┃ iso_alpha3 ┃ iso_numeric ┃ fips   ┃ name                 ┃ capital          ┃ area_km2 ┃ population ┃ continent ┃
 ┡━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━━━╇━━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━━━┩
-│ string     │ string     │ int32       │ string │ string               │ string           │ float64  │ int32      │ string    │
+│ string     │ string     │ int64       │ string │ string               │ string           │ float64  │ int64      │ string    │
 ├────────────┼────────────┼─────────────┼────────┼──────────────────────┼──────────────────┼──────────┼────────────┼───────────┤
 │ AD         │ AND        │          20 │ AN     │ Andorra              │ Andorra la Vella │    468.0 │      84000 │ EU        │
 │ AE         │ ARE        │         784 │ AE     │ United Arab Emirates │ Abu Dhabi        │  82880.0 │    4975593 │ AS        │
@@ -172,7 +172,7 @@ Show the 5 least populous countries in Asia
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┓
 ┃ name                           ┃ population ┃
 ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━┩
-│ string                         │ int32      │
+│ string                         │ int64      │
 ├────────────────────────────────┼────────────┤
 │ Cocos [Keeling] Islands        │        628 │
 │ British Indian Ocean Territory │       4000 │

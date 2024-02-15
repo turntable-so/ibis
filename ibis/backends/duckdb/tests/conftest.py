@@ -7,7 +7,7 @@ import pytest
 import ibis
 from ibis.backends.conftest import TEST_TABLES
 from ibis.backends.tests.base import BackendTest
-from ibis.conftest import SANDBOXED
+from ibis.conftest import SANDBOXED, WINDOWS
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -36,9 +36,10 @@ TEST_TABLES_GEO = {
 
 class TestConf(BackendTest):
     supports_map = True
-    deps = "duckdb", "duckdb_engine"
+    deps = ("duckdb",)
     stateful = False
     supports_tpch = True
+    driver_supports_multiple_statements = True
 
     def preload(self):
         if not SANDBOXED:
@@ -48,8 +49,6 @@ class TestConf(BackendTest):
 
     @property
     def ddl_script(self) -> Iterator[str]:
-        from ibis.backends.base.sql.alchemy.geospatial import geospatial_supported
-
         parquet_dir = self.data_dir / "parquet"
         geojson_dir = self.data_dir / "geojson"
         for table in TEST_TABLES:
@@ -59,7 +58,7 @@ class TestConf(BackendTest):
                 SELECT * FROM read_parquet('{parquet_dir / f'{table}.parquet'}')
                 """
             )
-        if geospatial_supported and not SANDBOXED:
+        if not SANDBOXED:
             for table in TEST_TABLES_GEO:
                 yield (
                     f"""
@@ -81,14 +80,20 @@ class TestConf(BackendTest):
     @staticmethod
     def connect(*, tmpdir, worker_id, **kw) -> BaseBackend:
         # use an extension directory per test worker to prevent simultaneous
-        # downloads
-        extension_directory = tmpdir.getbasetemp().joinpath("duckdb_extensions")
-        extension_directory.mkdir(exist_ok=True)
-        return ibis.duckdb.connect(extension_directory=extension_directory, **kw)
+        # downloads on windows
+        #
+        # avoid enabling on linux because this adds a lot of time to parallel
+        # test runs due to each worker getting its own extensions directory
+        if WINDOWS:
+            extension_directory = tmpdir.getbasetemp().joinpath("duckdb_extensions")
+            extension_directory.mkdir(exist_ok=True)
+            kw["extension_directory"] = extension_directory
+        return ibis.duckdb.connect(**kw)
 
     def load_tpch(self) -> None:
-        with self.connection.begin() as con:
-            con.exec_driver_sql("CALL dbgen(sf=0.1)")
+        """Load the TPC-H dataset."""
+        with self.connection._safe_raw_sql("CALL dbgen(sf=0.17)"):
+            pass
 
 
 @pytest.fixture(scope="session")
@@ -99,7 +104,6 @@ def con(data_dir, tmp_path_factory, worker_id):
 @pytest.fixture(scope="session")
 def gpd():
     pytest.importorskip("shapely")
-    pytest.importorskip("geoalchemy2")
     return pytest.importorskip("geopandas")
 
 

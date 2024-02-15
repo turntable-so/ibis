@@ -36,6 +36,7 @@ def highest_precedence_dtype(nodes):
     -------
     dtype: DataType
       The highest precedence datatype
+
     """
     return dt.highest_precedence(node.dtype for node in nodes)
 
@@ -47,7 +48,7 @@ def castable(source, target):
     Based on the underlying datatypes and the value in case of Literals
     """
     value = getattr(source, "value", None)
-    return dt.castable(source.dtype, target.dtype, value=value)
+    return source.dtype.castable(target.dtype, value=value)
 
 
 @public
@@ -87,8 +88,6 @@ def shape_like(name):
 
 
 def _promote_integral_binop(exprs, op):
-    import ibis.expr.operations as ops
-
     bounds, dtypes = [], []
     for arg in exprs:
         dtypes.append(arg.dtype)
@@ -132,9 +131,7 @@ def _promote_interval_resolution(units: list[IntervalUnit]) -> IntervalUnit:
 
 
 def _arg_type_error_format(op):
-    from ibis.expr.operations.generic import Literal
-
-    if isinstance(op, Literal):
+    if isinstance(op, ops.Literal):
         return f"Literal({op.value}):{op.dtype}"
     else:
         return f"{op.name}:{op.dtype}"
@@ -151,6 +148,7 @@ class ValueOf(Concrete, Pattern):
     ----------
     dtype : DataType | None
         The datatype the constructed Value instance should conform to.
+
     """
 
     dtype: Optional[dt.DataType] = None

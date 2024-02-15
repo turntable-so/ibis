@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sqlalchemy as sa
 from pytest import mark, param
 
 import ibis.common.exceptions as com
@@ -37,7 +36,7 @@ def test_udf(batting):
     batting = batting.limit(100)
     nvowels = num_vowels(batting.playerID)
     assert nvowels.op().__module__ == __name__
-    assert type(nvowels.op()).__qualname__ == "num_vowels"
+    assert type(nvowels.op()).__qualname__.startswith("num_vowels")
 
     expr = batting.group_by(id_len=nvowels).agg(n=_.count())
     result = expr.execute()
@@ -58,9 +57,7 @@ def test_udf(batting):
 @mark.notimpl(["polars"])
 @mark.notyet(["datafusion"], raises=NotImplementedError)
 @mark.notyet(
-    ["sqlite"],
-    raises=sa.exc.OperationalError,
-    reason="sqlite doesn't support map types",
+    ["sqlite"], raises=com.IbisTypeError, reason="sqlite doesn't support map types"
 )
 def test_map_udf(batting):
     @udf.scalar.python

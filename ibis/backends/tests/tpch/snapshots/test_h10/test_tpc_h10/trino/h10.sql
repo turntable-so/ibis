@@ -1,26 +1,164 @@
-WITH t0 AS (
+SELECT
+  "t14"."c_custkey",
+  "t14"."c_name",
+  "t14"."revenue",
+  "t14"."c_acctbal",
+  "t14"."n_name",
+  "t14"."c_address",
+  "t14"."c_phone",
+  "t14"."c_comment"
+FROM (
   SELECT
-    t2.c_custkey AS c_custkey,
-    t2.c_name AS c_name,
-    t2.c_acctbal AS c_acctbal,
-    t5.n_name AS n_name,
-    t2.c_address AS c_address,
-    t2.c_phone AS c_phone,
-    t2.c_comment AS c_comment,
-    SUM(t4.l_extendedprice * (
-      1 - t4.l_discount
-    )) AS revenue
-  FROM hive.ibis_sf1.customer AS t2
-  JOIN hive.ibis_sf1.orders AS t3
-    ON t2.c_custkey = t3.o_custkey
-  JOIN hive.ibis_sf1.lineitem AS t4
-    ON t4.l_orderkey = t3.o_orderkey
-  JOIN hive.ibis_sf1.nation AS t5
-    ON t2.c_nationkey = t5.n_nationkey
-  WHERE
-    t3.o_orderdate >= FROM_ISO8601_DATE('1993-10-01')
-    AND t3.o_orderdate < FROM_ISO8601_DATE('1994-01-01')
-    AND t4.l_returnflag = 'R'
+    "t13"."c_custkey",
+    "t13"."c_name",
+    "t13"."c_acctbal",
+    "t13"."n_name",
+    "t13"."c_address",
+    "t13"."c_phone",
+    "t13"."c_comment",
+    SUM("t13"."l_extendedprice" * (
+      1 - "t13"."l_discount"
+    )) AS "revenue"
+  FROM (
+    SELECT
+      "t12"."c_custkey",
+      "t12"."c_name",
+      "t12"."c_address",
+      "t12"."c_nationkey",
+      "t12"."c_phone",
+      "t12"."c_acctbal",
+      "t12"."c_mktsegment",
+      "t12"."c_comment",
+      "t12"."o_orderkey",
+      "t12"."o_custkey",
+      "t12"."o_orderstatus",
+      "t12"."o_totalprice",
+      "t12"."o_orderdate",
+      "t12"."o_orderpriority",
+      "t12"."o_clerk",
+      "t12"."o_shippriority",
+      "t12"."o_comment",
+      "t12"."l_orderkey",
+      "t12"."l_partkey",
+      "t12"."l_suppkey",
+      "t12"."l_linenumber",
+      "t12"."l_quantity",
+      "t12"."l_extendedprice",
+      "t12"."l_discount",
+      "t12"."l_tax",
+      "t12"."l_returnflag",
+      "t12"."l_linestatus",
+      "t12"."l_shipdate",
+      "t12"."l_commitdate",
+      "t12"."l_receiptdate",
+      "t12"."l_shipinstruct",
+      "t12"."l_shipmode",
+      "t12"."l_comment",
+      "t12"."n_nationkey",
+      "t12"."n_name",
+      "t12"."n_regionkey",
+      "t12"."n_comment"
+    FROM (
+      SELECT
+        "t9"."c_custkey",
+        "t9"."c_name",
+        "t9"."c_address",
+        "t9"."c_nationkey",
+        "t9"."c_phone",
+        "t9"."c_acctbal",
+        "t9"."c_mktsegment",
+        "t9"."c_comment",
+        "t10"."o_orderkey",
+        "t10"."o_custkey",
+        "t10"."o_orderstatus",
+        "t10"."o_totalprice",
+        "t10"."o_orderdate",
+        "t10"."o_orderpriority",
+        "t10"."o_clerk",
+        "t10"."o_shippriority",
+        "t10"."o_comment",
+        "t11"."l_orderkey",
+        "t11"."l_partkey",
+        "t11"."l_suppkey",
+        "t11"."l_linenumber",
+        "t11"."l_quantity",
+        "t11"."l_extendedprice",
+        "t11"."l_discount",
+        "t11"."l_tax",
+        "t11"."l_returnflag",
+        "t11"."l_linestatus",
+        "t11"."l_shipdate",
+        "t11"."l_commitdate",
+        "t11"."l_receiptdate",
+        "t11"."l_shipinstruct",
+        "t11"."l_shipmode",
+        "t11"."l_comment",
+        "t8"."n_nationkey",
+        "t8"."n_name",
+        "t8"."n_regionkey",
+        "t8"."n_comment"
+      FROM (
+        SELECT
+          "t0"."c_custkey",
+          "t0"."c_name",
+          "t0"."c_address",
+          "t0"."c_nationkey",
+          "t0"."c_phone",
+          CAST("t0"."c_acctbal" AS DECIMAL(15, 2)) AS "c_acctbal",
+          "t0"."c_mktsegment",
+          "t0"."c_comment"
+        FROM "hive"."ibis_sf1"."customer" AS "t0"
+      ) AS "t9"
+      INNER JOIN (
+        SELECT
+          "t1"."o_orderkey",
+          "t1"."o_custkey",
+          "t1"."o_orderstatus",
+          CAST("t1"."o_totalprice" AS DECIMAL(15, 2)) AS "o_totalprice",
+          "t1"."o_orderdate",
+          "t1"."o_orderpriority",
+          "t1"."o_clerk",
+          "t1"."o_shippriority",
+          "t1"."o_comment"
+        FROM "hive"."ibis_sf1"."orders" AS "t1"
+      ) AS "t10"
+        ON "t9"."c_custkey" = "t10"."o_custkey"
+      INNER JOIN (
+        SELECT
+          "t2"."l_orderkey",
+          "t2"."l_partkey",
+          "t2"."l_suppkey",
+          "t2"."l_linenumber",
+          CAST("t2"."l_quantity" AS DECIMAL(15, 2)) AS "l_quantity",
+          CAST("t2"."l_extendedprice" AS DECIMAL(15, 2)) AS "l_extendedprice",
+          CAST("t2"."l_discount" AS DECIMAL(15, 2)) AS "l_discount",
+          CAST("t2"."l_tax" AS DECIMAL(15, 2)) AS "l_tax",
+          "t2"."l_returnflag",
+          "t2"."l_linestatus",
+          "t2"."l_shipdate",
+          "t2"."l_commitdate",
+          "t2"."l_receiptdate",
+          "t2"."l_shipinstruct",
+          "t2"."l_shipmode",
+          "t2"."l_comment"
+        FROM "hive"."ibis_sf1"."lineitem" AS "t2"
+      ) AS "t11"
+        ON "t11"."l_orderkey" = "t10"."o_orderkey"
+      INNER JOIN (
+        SELECT
+          "t3"."n_nationkey",
+          "t3"."n_name",
+          "t3"."n_regionkey",
+          "t3"."n_comment"
+        FROM "hive"."ibis_sf1"."nation" AS "t3"
+      ) AS "t8"
+        ON "t9"."c_nationkey" = "t8"."n_nationkey"
+    ) AS "t12"
+    WHERE
+      "t12"."o_orderdate" >= FROM_ISO8601_DATE('1993-10-01')
+      AND "t12"."o_orderdate" < FROM_ISO8601_DATE('1994-01-01')
+      AND "t12"."l_returnflag" = 'R'
+  ) AS "t13"
   GROUP BY
     1,
     2,
@@ -29,28 +167,7 @@ WITH t0 AS (
     5,
     6,
     7
-)
-SELECT
-  t1.c_custkey,
-  t1.c_name,
-  t1.revenue,
-  t1.c_acctbal,
-  t1.n_name,
-  t1.c_address,
-  t1.c_phone,
-  t1.c_comment
-FROM (
-  SELECT
-    t0.c_custkey AS c_custkey,
-    t0.c_name AS c_name,
-    t0.revenue AS revenue,
-    t0.c_acctbal AS c_acctbal,
-    t0.n_name AS n_name,
-    t0.c_address AS c_address,
-    t0.c_phone AS c_phone,
-    t0.c_comment AS c_comment
-  FROM t0
-) AS t1
+) AS "t14"
 ORDER BY
-  t1.revenue DESC
+  "t14"."revenue" DESC
 LIMIT 20

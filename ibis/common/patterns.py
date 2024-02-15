@@ -31,7 +31,6 @@ from ibis.common.deferred import (
     _,  # noqa: F401
     resolver,
 )
-from ibis.common.dispatch import lazy_singledispatch
 from ibis.common.typing import (
     Coercible,
     CoercionError,
@@ -42,7 +41,7 @@ from ibis.common.typing import (
     get_bound_typevars,
     get_type_params,
 )
-from ibis.util import is_iterable, promote_tuple
+from ibis.util import import_object, is_iterable, unalias_package
 
 T_co = TypeVar("T_co", covariant=True)
 
@@ -83,6 +82,7 @@ class Pattern(Hashable):
         Returns
         -------
         A pattern that matches the given type annotation.
+
         """
         # TODO(kszucs): cache the result of this function
         # TODO(kszucs): explore issubclass(typ, SupportsInt) etc.
@@ -212,6 +212,7 @@ class Pattern(Hashable):
         -------
         The result of the pattern matching. If the pattern doesn't match
         the value, then it must return the `NoMatch` sentinel value.
+
         """
         ...
 
@@ -237,6 +238,7 @@ class Pattern(Hashable):
         Returns
         -------
         New pattern that matches if either of the patterns match.
+
         """
         return AnyOf(self, other)
 
@@ -251,6 +253,7 @@ class Pattern(Hashable):
         Returns
         -------
         New pattern that matches if both of the patterns match.
+
         """
         return AllOf(self, other)
 
@@ -265,6 +268,7 @@ class Pattern(Hashable):
         Returns
         -------
         New replace pattern.
+
         """
         return Replace(self, other)
 
@@ -279,6 +283,7 @@ class Pattern(Hashable):
         Returns
         -------
         New capture pattern.
+
         """
         return Capture(name, self)
 
@@ -293,6 +298,7 @@ class Is(Slotted, Pattern):
     ----------
     value
         The reference value to match against.
+
     """
 
     __slots__ = ("value",)
@@ -331,6 +337,7 @@ class Capture(Slotted, Pattern):
         The pattern to match against.
     key
         The key to use in the context if the pattern matches.
+
     """
 
     __slots__ = ("key", "pattern")
@@ -363,6 +370,7 @@ class Replace(Slotted, Pattern):
         The pattern to match against.
     replacer
         The deferred to use as a replacement.
+
     """
 
     __slots__ = ("matcher", "replacer")
@@ -398,6 +406,7 @@ class Check(Slotted, Pattern):
     ----------
     predicate
         The predicate to use.
+
     """
 
     __slots__ = ("predicate",)
@@ -455,6 +464,7 @@ class Custom(Slotted, Pattern):
     ----------
     func
         The function to apply.
+
     """
 
     __slots__ = ("func",)
@@ -475,6 +485,7 @@ class EqualTo(Slotted, Pattern):
     ----------
     value
         The value to check against.
+
     """
 
     __slots__ = ("value",)
@@ -507,6 +518,7 @@ class DeferredEqualTo(Slotted, Pattern):
     ----------
     value
         The value to check against.
+
     """
 
     __slots__ = ("resolver",)
@@ -533,6 +545,7 @@ class Option(Slotted, Pattern):
     ----------
     pattern
         The inner pattern to use.
+
     """
 
     __slots__ = ("pattern", "default")
@@ -600,6 +613,7 @@ class SubclassOf(Slotted, Pattern):
     ----------
     type
         The type to check against.
+
     """
 
     __slots__ = ("type",)
@@ -627,6 +641,7 @@ class InstanceOf(Slotted, Singleton, Pattern):
     ----------
     types
         The type to check against.
+
     """
 
     __slots__ = ("type",)
@@ -673,6 +688,7 @@ class GenericInstanceOf(Slotted, Pattern):
     >>> p = GenericInstanceOf(MyNumber[float])
     >>> assert p.match(MyNumber(1.0), {}) == MyNumber(1.0)
     >>> assert p.match(MyNumber(1), {}) is NoMatch
+
     """
 
     __slots__ = ("type", "origin", "fields")
@@ -717,23 +733,31 @@ class LazyInstanceOf(Slotted, Pattern):
     ----------
     types
         The types to check against.
+
     """
 
-    __slots__ = ("types", "check")
-    types: tuple[type, ...]
-    check: Callable
+    __fields__ = ("qualname", "package")
+    __slots__ = ("qualname", "package", "loaded")
+    qualname: str
+    package: str
+    loaded: type
 
-    def __init__(self, types):
-        types = promote_tuple(types)
-        check = lazy_singledispatch(lambda x: False)
-        check.register(types, lambda x: True)
-        super().__init__(types=types, check=check)
+    def __init__(self, qualname):
+        package = unalias_package(qualname.split(".", 1)[0])
+        super().__init__(qualname=qualname, package=package)
 
     def match(self, value, context):
-        if self.check(value):
-            return value
-        else:
-            return NoMatch
+        if hasattr(self, "loaded"):
+            return value if isinstance(value, self.loaded) else NoMatch
+
+        for klass in type(value).__mro__:
+            package = klass.__module__.split(".", 1)[0]
+            if package == self.package:
+                typ = import_object(self.qualname)
+                object.__setattr__(self, "loaded", typ)
+                return value if isinstance(value, typ) else NoMatch
+
+        return NoMatch
 
 
 class CoercedTo(Slotted, Pattern, Generic[T_co]):
@@ -747,6 +771,7 @@ class CoercedTo(Slotted, Pattern, Generic[T_co]):
     ----------
     type
         The type to coerce to.
+
     """
 
     __slots__ = ("type", "func")
@@ -816,6 +841,7 @@ class GenericCoercedTo(Slotted, Pattern):
     >>> p = GenericCoercedTo(MyNumber[float])
     >>> assert p.match(3.14, {}) == MyNumber(3.14)
     >>> assert p.match("15", {}) == MyNumber(15.0)
+
     """
 
     __slots__ = ("origin", "params", "checker")
@@ -854,6 +880,7 @@ class Not(Slotted, Pattern):
     ----------
     pattern
         The pattern which the value should not match.
+
     """
 
     __slots__ = ("pattern",)
@@ -883,6 +910,7 @@ class AnyOf(Slotted, Pattern):
     patterns
         The patterns to match against. The first pattern that matches will be
         returned.
+
     """
 
     __slots__ = ("patterns",)
@@ -915,6 +943,7 @@ class AllOf(Slotted, Pattern):
         The patterns to match against. The value will be passed through each
         pattern in order. The changes applied to the value propagate through the
         patterns.
+
     """
 
     __slots__ = ("patterns",)
@@ -950,6 +979,7 @@ class Length(Slotted, Pattern):
         The minimum length of the value.
     at_most
         The maximum length of the value.
+
     """
 
     __slots__ = ("at_least", "at_most")
@@ -1000,6 +1030,7 @@ class Between(Slotted, Pattern):
         The lower bound.
     upper
         The upper bound.
+
     """
 
     __slots__ = ("lower", "upper")
@@ -1023,6 +1054,7 @@ class Contains(Slotted, Pattern):
     ----------
     needle
         The item that the passed value should contain.
+
     """
 
     __slots__ = ("needle",)
@@ -1048,6 +1080,7 @@ class IsIn(Slotted, Pattern):
     ----------
     haystack
         The set of values that the passed value should be in.
+
     """
 
     __slots__ = ("haystack",)
@@ -1079,6 +1112,7 @@ class SequenceOf(Slotted, Pattern):
         The pattern to match against each item in the sequence.
     type
         The type to coerce the sequence to. Defaults to tuple.
+
     """
 
     __slots__ = ("item", "type")
@@ -1126,6 +1160,7 @@ class GenericSequenceOf(Slotted, Pattern):
         The minimum length of the sequence.
     at_most
         The maximum length of the sequence.
+
     """
 
     __slots__ = ("item", "type", "length")
@@ -1179,6 +1214,7 @@ class GenericMappingOf(Slotted, Pattern):
         The pattern to match the values against.
     type
         The type to coerce the mapping to. Defaults to dict.
+
     """
 
     __slots__ = ("key", "value", "type")
@@ -1245,6 +1281,7 @@ class Object(Slotted, Pattern):
         The positional arguments to match against the attributes of the object.
     **kwargs
         The keyword arguments to match against the attributes of the object.
+
     """
 
     __slots__ = ("type", "args", "kwargs")
@@ -1258,17 +1295,26 @@ class Object(Slotted, Pattern):
             return InstanceOf(type)
         return super().__create__(type, *args, **kwargs)
 
-    def __init__(self, type, *args, **kwargs):
-        type = pattern(type)
+    def __init__(self, typ, *args, **kwargs):
+        if isinstance(typ, type) and len(typ.__match_args__) < len(args):
+            raise ValueError(
+                "The type to match has fewer `__match_args__` than the number "
+                "of positional arguments in the pattern"
+            )
+        typ = pattern(typ)
         args = tuple(map(pattern, args))
         kwargs = frozendict(toolz.valmap(pattern, kwargs))
-        super().__init__(type=type, args=args, kwargs=kwargs)
+        super().__init__(type=typ, args=args, kwargs=kwargs)
 
     def match(self, value, context):
         if self.type.match(value, context) is NoMatch:
             return NoMatch
 
-        patterns = {**dict(zip(value.__match_args__, self.args)), **self.kwargs}
+        # the pattern requirest more positional arguments than the object has
+        if len(value.__match_args__) < len(self.args):
+            return NoMatch
+        patterns = dict(zip(value.__match_args__, self.args))
+        patterns.update(self.kwargs)
 
         fields = {}
         changed = False
@@ -1424,6 +1470,7 @@ class PatternList(Slotted, Pattern):
     ----------
     fields
         The patterns to match the respective items in the tuple.
+
     """
 
     __slots__ = ("patterns", "type")
@@ -1583,6 +1630,7 @@ def pattern(obj: AnyType) -> Pattern:
     Returns
     -------
     The constructed pattern.
+
     """
     if obj is Ellipsis:
         return _any
@@ -1638,6 +1686,7 @@ def match(
     ...     2,
     ...     "three",
     ... ]
+
     """
     if context is None:
         context = {}

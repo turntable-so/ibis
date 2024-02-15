@@ -39,7 +39,6 @@ classifiers = [
 python = "^3.9"
 atpublic = ">=2.3,<5"
 bidict = ">=0.22.1,<1"
-multipledispatch = ">=0.6,<2"
 numpy = ">=1,<2"
 pandas = ">=1.2.5,<3"
 parsy = ">=2,<3"
@@ -65,8 +64,6 @@ datafusion = { version = ">=0.6,<36", optional = true }
 db-dtypes = { version = ">=0.3,<2", optional = true }
 deltalake = { version = ">=0.9.0,<1", optional = true }
 duckdb = { version = ">=0.8.1,<1", optional = true }
-duckdb-engine = { version = ">=0.1.8,<1", optional = true }
-geoalchemy2 = { version = ">=0.6.3,<1", optional = true }
 geopandas = { version = ">=0.6,<1", optional = true }
 google-cloud-bigquery = { version = ">=3,<4", optional = true }
 google-cloud-bigquery-storage = { version = ">=2,<3", optional = true }
@@ -78,25 +75,20 @@ pins = { version = ">=0.8.3,<1", extras = ["gcs"], optional = true }
 polars = { version = ">=0.19.3,<1", optional = true }
 psycopg2 = { version = ">=2.8.4,<3", optional = true }
 pydata-google-auth = { version = ">=1.4.0,<2", optional = true }
+# we don't use sqlalchemy, but pydruid inadvertently requires it,
+# see https://github.com/druid-io/pydruid/issues/313
 pydruid = { version = ">=0.6.5,<1", optional = true, extras = ["sqlalchemy"] }
+pyexasol = { version = ">=0.25.2,<1", optional = true, extras = ["pandas"] }
 pymysql = { version = ">=1,<2", optional = true }
 pyodbc = { version = ">=4.0.39,<6", optional = true }
-pyspark = { version = ">=3,<3.4", optional = true } # pyspark is heavily broken by numpy >=1.24 and pandas >=2
+pyspark = { version = ">=3,<4", optional = true }
 # used to support posix regexen in the pandas, dask and sqlite backends
 regex = { version = ">=2021.7.6", optional = true }
 shapely = { version = ">=2,<3", optional = true }
-# include an explicit dependency on `snowflake-connector-python` because the
-# lack of lower bound on this dependency as specified in `snowflake-sqlalchemy`
-# appears to cause poetry's solver to get stuck
-#
-# also, we don't support arbitrarily old versions of this library
+# we don't support arbitrarily old versions of this library due to security
+# issues with versions <3.0.2
 snowflake-connector-python = { version = ">=3.0.2,<4,!=3.3.0b1", optional = true }
-snowflake-sqlalchemy = { version = ">=1.4.1,<2", optional = true }
-sqlalchemy = { version = ">=1.4,<3", optional = true }
-sqlalchemy-exasol = { version = ">=4.6.0", optional = true }
-sqlalchemy-views = { version = ">=0.3.1,<1", optional = true }
-sqlalchemy-risingwave = { version = ">=1.0.0,<2", optional = true }
-trino = { version = ">=0.321,<1", optional = true, extras = ["sqlalchemy"] }
+trino = { version = ">=0.321,<1", optional = true }
 
 [tool.poetry.group.dev.dependencies]
 codespell = { version = ">=2.2.6,<3", extras = [
@@ -128,7 +120,6 @@ pytest-repeat = ">=0.9.1,<0.10"
 pytest-snapshot = ">=0.9.0,<1"
 pytest-xdist = ">=2.3.0,<4"
 requests = ">=2,<3"
-sqlalchemy = ">=1.4,<3"
 
 [tool.poetry.group.docs.dependencies]
 altair = { version = ">=5.0.1,<6", python = ">=3.10,<3.13" }
@@ -154,10 +145,8 @@ all = [
   "dask",
   "datafusion",
   "db-dtypes",
-  "duckdb",
-  "duckdb-engine",
   "deltalake",
-  "geoalchemy2",
+  "duckdb",
   "geopandas",
   "google-cloud-bigquery",
   "google-cloud-bigquery-storage",
@@ -170,17 +159,13 @@ all = [
   "psycopg2",
   "pydata-google-auth",
   "pydruid",
+  "pyexasol",
   "pymysql",
   "pyodbc",
   "pyspark",
   "regex",
   "shapely",
   "snowflake-connector-python",
-  "snowflake-sqlalchemy",
-  "sqlalchemy",
-  "sqlalchemy-exasol",
-  "sqlalchemy-views",
-  "sqlalchemy-risingwave",
   "trino",
 ]
 bigquery = [
@@ -189,36 +174,26 @@ bigquery = [
   "google-cloud-bigquery-storage",
   "pydata-google-auth",
 ]
-clickhouse = ["clickhouse-connect", "sqlalchemy"]
+clickhouse = ["clickhouse-connect"]
 dask = ["dask", "regex"]
 datafusion = ["datafusion"]
-druid = ["pydruid", "sqlalchemy"]
-duckdb = ["duckdb", "duckdb-engine", "sqlalchemy", "sqlalchemy-views"]
-exasol = ["sqlalchemy", "sqlalchemy-exasol", "sqlalchemy-views"]
+druid = ["pydruid"]
+duckdb = ["duckdb"]
+exasol = ["pyexasol"]
 flink = []
-geospatial = ["geoalchemy2", "geopandas", "shapely"]
-impala = ["impyla", "sqlalchemy"]
-mssql = ["sqlalchemy", "pyodbc", "sqlalchemy-views"]
-mysql = ["sqlalchemy", "pymysql", "sqlalchemy-views"]
-oracle = ["sqlalchemy", "oracledb", "packaging", "sqlalchemy-views"]
+geospatial = ["geopandas", "shapely"]
+impala = ["impyla"]
+mssql = ["pyodbc"]
+mysql = ["pymysql"]
+oracle = ["oracledb", "packaging"]
 pandas = ["regex"]
 polars = ["polars", "packaging"]
-postgres = ["psycopg2", "sqlalchemy", "sqlalchemy-views"]
-risingwave = [
-  "psycopg2",
-  "sqlalchemy",
-  "sqlalchemy-views",
-  "sqlalchemy-risingwave",
-]
-pyspark = ["pyspark", "sqlalchemy", "packaging"]
-snowflake = [
-  "snowflake-connector-python",
-  "snowflake-sqlalchemy",
-  "sqlalchemy-views",
-  "packaging",
-]
-sqlite = ["regex", "sqlalchemy", "sqlalchemy-views"]
-trino = ["trino", "sqlalchemy", "sqlalchemy-views"]
+postgres = ["psycopg2"]
+pyspark = ["pyspark", "packaging"]
+snowflake = ["snowflake-connector-python", "packaging"]
+sqlite = ["regex"]
+risingwave = ["psycopg2"]
+trino = ["trino"]
 # non-backend extras
 visualization = ["graphviz"]
 decompiler = ["black"]
@@ -282,14 +257,19 @@ norecursedirs = [
 filterwarnings = [
   # fail on any warnings that are not explicitly matched below
   "error",
+  # pyspark uses a deprecated pandas API
+  "ignore:is_datetime64tz_dtype is deprecated and will be removed in a future version:DeprecationWarning",
   # pyspark and impala leave sockets open
   "ignore:Exception ignored in:",
   # dask
+  "ignore:Using the ``in`` operator to test for membership in Series is deprecated:FutureWarning",
+  "ignore:In a future version of pandas, a length 1 tuple will be returned when iterating over a groupby:FutureWarning",
   "ignore:index is deprecated and will be removed in a future release:FutureWarning",
   "ignore:`meta` is not specified:UserWarning",
   "ignore:Concatenating dataframes with unknown divisions:UserWarning",
   "ignore:Possible nested set at position:FutureWarning",
   'ignore:\s+You did not provide metadata:UserWarning',
+  "ignore:Minimal version of pyarrow will soon be increased:FutureWarning",
   # numpy by way of dask
   'ignore:np\.find_common_type is deprecated:DeprecationWarning',
   # pandas
@@ -305,9 +285,8 @@ filterwarnings = [
   'ignore:`np\.bool` is a deprecated alias for the builtin `bool`:DeprecationWarning',
   # numpy, coming from a pandas call
   'ignore:In the future `np\.bool` will be defined as the corresponding NumPy scalar:FutureWarning',
-  # duckdb-engine
-  'ignore:Dialect .+ does \*not\* support Decimal:',
-  "ignore:duckdb-engine doesn't yet support reflection on indices:",
+  # pandas by way of polars when comparing arrays
+  'ignore:The truth value of an empty array is ambiguous.:DeprecationWarning',
   # druid
   'ignore:Dialect druid.rest will not make use of SQL compilation caching:',
   # ibis
@@ -319,9 +298,6 @@ filterwarnings = [
   "ignore:`np.object` is a deprecated alias for the builtin `object`:DeprecationWarning",
   # windows
   "ignore:getargs.* The 'u' format is deprecated:DeprecationWarning",
-  # sqlalchemy
-  "ignore:Class ST_.+ will not make use of SQL compilation caching:",
-  "ignore:UserDefinedType Geometry:",
   # google
   "ignore:Deprecated call to `pkg_resources\\.declare_namespace\\('.*'\\):DeprecationWarning",
   # pyspark on python 3.11
@@ -330,10 +306,6 @@ filterwarnings = [
   "ignore:'cgi' is deprecated and slated for removal in Python 3\\.13:DeprecationWarning",
   # warnings from google's use of pkg_resources
   "ignore:pkg_resources is deprecated as an API:DeprecationWarning",
-  # sqlalchemy warns about mysql's inability to cast to bool;
-  # this has no effect on ibis's output because we convert types after
-  # execution
-  "ignore:Datatype BOOL does not support CAST on MySQL/MariaDB; the cast will be skipped:sqlalchemy.exc.SAWarning",
   # snowflake vendors an older version requests
   "ignore:'urllib3\\.contrib\\.pyopenssl' module is deprecated and will be removed in a future release of urllib3:DeprecationWarning",
   # apache-beam
@@ -361,7 +333,6 @@ markers = [
   "notyet: for functionality that isn't implemented in a backend",
   "never: tests for functionality that a backend is likely to never implement",
   "broken: test has exposed existing broken functionality",
-  "sqlalchemy_only: tests for SQLAlchemy based backends",
   "bigquery: BigQuery tests",
   "clickhouse: ClickHouse tests",
   "dask: Dask tests",

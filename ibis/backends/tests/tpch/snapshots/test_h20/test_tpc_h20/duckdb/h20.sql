@@ -1,73 +1,68 @@
-WITH t0 AS (
-  SELECT
-    t2.s_suppkey AS s_suppkey,
-    t2.s_name AS s_name,
-    t2.s_address AS s_address,
-    t2.s_nationkey AS s_nationkey,
-    t2.s_phone AS s_phone,
-    t2.s_acctbal AS s_acctbal,
-    t2.s_comment AS s_comment,
-    t3.n_nationkey AS n_nationkey,
-    t3.n_name AS n_name,
-    t3.n_regionkey AS n_regionkey,
-    t3.n_comment AS n_comment
-  FROM main.supplier AS t2
-  JOIN main.nation AS t3
-    ON t2.s_nationkey = t3.n_nationkey
-  WHERE
-    t3.n_name = 'CANADA'
-    AND t2.s_suppkey IN (
-      SELECT
-        t4.ps_suppkey
-      FROM (
-        SELECT
-          t5.ps_partkey AS ps_partkey,
-          t5.ps_suppkey AS ps_suppkey,
-          t5.ps_availqty AS ps_availqty,
-          t5.ps_supplycost AS ps_supplycost,
-          t5.ps_comment AS ps_comment
-        FROM main.partsupp AS t5
-        WHERE
-          t5.ps_partkey IN (
-            SELECT
-              t6.p_partkey
-            FROM (
-              SELECT
-                t7.p_partkey AS p_partkey,
-                t7.p_name AS p_name,
-                t7.p_mfgr AS p_mfgr,
-                t7.p_brand AS p_brand,
-                t7.p_type AS p_type,
-                t7.p_size AS p_size,
-                t7.p_container AS p_container,
-                t7.p_retailprice AS p_retailprice,
-                t7.p_comment AS p_comment
-              FROM main.part AS t7
-              WHERE
-                t7.p_name LIKE 'forest%'
-            ) AS t6
-          )
-          AND t5.ps_availqty > (
-            SELECT
-              SUM(t6.l_quantity) AS "Sum(l_quantity)"
-            FROM main.lineitem AS t6
-            WHERE
-              t6.l_partkey = t5.ps_partkey
-              AND t6.l_suppkey = t5.ps_suppkey
-              AND t6.l_shipdate >= MAKE_DATE(1994, 1, 1)
-              AND t6.l_shipdate < MAKE_DATE(1995, 1, 1)
-          ) * CAST(0.5 AS DOUBLE)
-      ) AS t4
-    )
-)
 SELECT
-  t1.s_name,
-  t1.s_address
+  "t9"."s_name",
+  "t9"."s_address"
 FROM (
   SELECT
-    t0.s_name AS s_name,
-    t0.s_address AS s_address
-  FROM t0
-) AS t1
+    "t5"."s_suppkey",
+    "t5"."s_name",
+    "t5"."s_address",
+    "t5"."s_nationkey",
+    "t5"."s_phone",
+    "t5"."s_acctbal",
+    "t5"."s_comment",
+    "t6"."n_nationkey",
+    "t6"."n_name",
+    "t6"."n_regionkey",
+    "t6"."n_comment"
+  FROM "supplier" AS "t5"
+  INNER JOIN "nation" AS "t6"
+    ON "t5"."s_nationkey" = "t6"."n_nationkey"
+) AS "t9"
+WHERE
+  "t9"."n_name" = 'CANADA'
+  AND "t9"."s_suppkey" IN (
+    SELECT
+      "t1"."ps_suppkey"
+    FROM "partsupp" AS "t1"
+    WHERE
+      "t1"."ps_partkey" IN (
+        SELECT
+          "t3"."p_partkey"
+        FROM "part" AS "t3"
+        WHERE
+          "t3"."p_name" LIKE 'forest%'
+      )
+      AND "t1"."ps_availqty" > (
+        (
+          SELECT
+            SUM("t8"."l_quantity") AS "Sum(l_quantity)"
+          FROM (
+            SELECT
+              "t4"."l_orderkey",
+              "t4"."l_partkey",
+              "t4"."l_suppkey",
+              "t4"."l_linenumber",
+              "t4"."l_quantity",
+              "t4"."l_extendedprice",
+              "t4"."l_discount",
+              "t4"."l_tax",
+              "t4"."l_returnflag",
+              "t4"."l_linestatus",
+              "t4"."l_shipdate",
+              "t4"."l_commitdate",
+              "t4"."l_receiptdate",
+              "t4"."l_shipinstruct",
+              "t4"."l_shipmode",
+              "t4"."l_comment"
+            FROM "lineitem" AS "t4"
+            WHERE
+              "t4"."l_partkey" = "t1"."ps_partkey"
+              AND "t4"."l_suppkey" = "t1"."ps_suppkey"
+              AND "t4"."l_shipdate" >= MAKE_DATE(1994, 1, 1)
+              AND "t4"."l_shipdate" < MAKE_DATE(1995, 1, 1)
+          ) AS "t8"
+        ) * CAST(0.5 AS DOUBLE)
+      )
+  )
 ORDER BY
-  t1.s_name ASC
+  "t9"."s_name" ASC

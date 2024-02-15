@@ -18,8 +18,7 @@ S = TypeVar("S")
 
 
 class TypeMapper(Generic[T]):
-    # `T` is the format-specific type object, e.g. pyarrow.DataType or
-    # sqlalchemy.types.TypeEngine
+    # `T` is the format-specific type object, e.g. pyarrow.DataType
 
     @classmethod
     def from_ibis(cls, dtype: DataType) -> T:
@@ -33,6 +32,7 @@ class TypeMapper(Generic[T]):
         Returns
         -------
         Format-specific type object.
+
         """
         raise NotImplementedError
 
@@ -50,6 +50,7 @@ class TypeMapper(Generic[T]):
         Returns
         -------
         Ibis DataType.
+
         """
         raise NotImplementedError
 
@@ -67,6 +68,7 @@ class TypeMapper(Generic[T]):
         Returns
         -------
         Ibis DataType.
+
         """
         raise NotImplementedError
 
@@ -82,6 +84,7 @@ class TypeMapper(Generic[T]):
         Returns
         -------
         Backend-specific string representation.
+
         """
         raise NotImplementedError
 
@@ -101,6 +104,7 @@ class SchemaMapper(Generic[S]):
         Returns
         -------
         Format-specific schema object.
+
         """
         raise NotImplementedError
 
@@ -116,6 +120,7 @@ class SchemaMapper(Generic[S]):
         Returns
         -------
         Ibis Schema.
+
         """
         raise NotImplementedError
 
@@ -139,6 +144,7 @@ class DataMapper(Generic[S, C, T]):
         Returns
         -------
         Format specific scalar corresponding to the given Ibis datatype.
+
         """
         raise NotImplementedError
 
@@ -156,6 +162,7 @@ class DataMapper(Generic[S, C, T]):
         Returns
         -------
         Format specific column corresponding to the given Ibis datatype.
+
         """
         raise NotImplementedError
 
@@ -173,6 +180,7 @@ class DataMapper(Generic[S, C, T]):
         Returns
         -------
         Format specific table-like object corresponding to the given Ibis schema.
+
         """
         raise NotImplementedError
 
@@ -188,6 +196,7 @@ class DataMapper(Generic[S, C, T]):
         Returns
         -------
         Ibis datatype corresponding to the given format-specific scalar.
+
         """
         raise NotImplementedError
 
@@ -203,6 +212,7 @@ class DataMapper(Generic[S, C, T]):
         Returns
         -------
         Ibis datatype corresponding to the given format-specific column.
+
         """
         raise NotImplementedError
 
@@ -218,6 +228,7 @@ class DataMapper(Generic[S, C, T]):
         Returns
         -------
         Ibis schema corresponding to the given format-specific table.
+
         """
         raise NotImplementedError
 

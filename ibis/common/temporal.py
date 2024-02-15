@@ -166,6 +166,7 @@ def normalize_timedelta(
     3000
     >>> normalize_timedelta(timedelta(seconds=3), IntervalUnit.MICROSECOND)
     3000000
+
     """
     if isinstance(value, datetime.timedelta):
         # datetime.timedelta only stores days, seconds, and microseconds internally
@@ -216,7 +217,10 @@ def _from_str(value):
     elif lower == "today":
         return datetime.datetime.today()
 
-    value = dateutil.parser.parse(value)
+    try:
+        value = dateutil.parser.parse(value)
+    except dateutil.parser.ParserError:
+        raise TypeError(f"Unable to normalize {value} to timestamp")
     return value.replace(tzinfo=normalize_timezone(value.tzinfo))
 
 

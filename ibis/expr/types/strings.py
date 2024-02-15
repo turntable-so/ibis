@@ -388,7 +388,10 @@ class StringValue(Value):
         return ops.RStrip(self).to_expr()
 
     def capitalize(self) -> StringValue:
-        """Capitalize the input string.
+        """Uppercase the first letter, lowercase the rest.
+
+        This API matches the semantics of the Python [](`str.capitalize`)
+        method.
 
         Returns
         -------
@@ -399,7 +402,7 @@ class StringValue(Value):
         --------
         >>> import ibis
         >>> ibis.options.interactive = True
-        >>> t = ibis.memtable({"s": ["abc", "def", "ghi"]})
+        >>> t = ibis.memtable({"s": ["aBC", " abc", "ab cd", None]})
         >>> t.s.capitalize()
         ┏━━━━━━━━━━━━━━━┓
         ┃ Capitalize(s) ┃
@@ -407,13 +410,21 @@ class StringValue(Value):
         │ string        │
         ├───────────────┤
         │ Abc           │
-        │ Def           │
-        │ Ghi           │
+        │  abc          │
+        │ Ab cd         │
+        │ NULL          │
         └───────────────┘
         """
         return ops.Capitalize(self).to_expr()
 
     initcap = capitalize
+
+    @util.deprecated(
+        instead="use the `capitalize` method", as_of="9.0", removed_in="10.0"
+    )
+    def initcap(self) -> StringValue:
+        """Deprecated. Use `capitalize` instead."""
+        return self.capitalize()
 
     def __contains__(self, *_: Any) -> bool:
         raise TypeError("Use string_expr.contains(arg)")
@@ -844,7 +855,7 @@ class StringValue(Value):
         └──────────────────────┘
         >>> ibis.literal("|").join(t.arr)
         ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayStringJoin('|', arr) ┃
+        ┃ ArrayStringJoin(arr, '|') ┃
         ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
         │ string                    │
         ├───────────────────────────┤
@@ -864,7 +875,7 @@ class StringValue(Value):
             cls = ops.ArrayStringJoin
         else:
             cls = ops.StringJoin
-        return cls(self, strings).to_expr()
+        return cls(strings, sep=self).to_expr()
 
     def startswith(self, start: str | StringValue) -> ir.BooleanValue:
         """Determine whether `self` starts with `end`.
@@ -1490,6 +1501,8 @@ class StringValue(Value):
     def concat(self, other: str | StringValue, *args: str | StringValue) -> StringValue:
         """Concatenate strings.
 
+        NULLs are propagated. This methods is equivalent to using the `+` operator.
+
         Parameters
         ----------
         other
@@ -1506,16 +1519,24 @@ class StringValue(Value):
         --------
         >>> import ibis
         >>> ibis.options.interactive = True
-        >>> t = ibis.memtable({"s": ["abc", "bac", "bca"]})
-        >>> t.s.concat("xyz")
+        >>> t = ibis.memtable({"s": ["abc", None]})
+        >>> t.s.concat("xyz", "123")
+        ┏━━━━━━━━━━━━━━━━┓
+        ┃ StringConcat() ┃
+        ┡━━━━━━━━━━━━━━━━┩
+        │ string         │
+        ├────────────────┤
+        │ abcxyz123      │
+        │ NULL           │
+        └────────────────┘
+        >>> t.s + "xyz"
         ┏━━━━━━━━━━━━━━━━┓
         ┃ StringConcat() ┃
         ┡━━━━━━━━━━━━━━━━┩
         │ string         │
         ├────────────────┤
         │ abcxyz         │
-        │ bacxyz         │
-        │ bcaxyz         │
+        │ NULL           │
         └────────────────┘
         """
         return ops.StringConcat((self, other, *args)).to_expr()

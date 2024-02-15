@@ -49,6 +49,7 @@ def __getattr__(name: str) -> BaseBackend:
     is called, and a backend with the `sqlite` name is tried to load from
     the `ibis.backends` entrypoints. If successful, the `ibis.sqlite`
     attribute is "cached", so this function is only called the first time.
+
     """
     entry_points = {ep for ep in util.backend_entry_points() if ep.name == name}
 
@@ -96,7 +97,6 @@ def __getattr__(name: str) -> BaseBackend:
     # - add_operation
     # - _from_url
     # - _to_sql
-    # - _sqlglot_dialect (if defined)
     #
     # We also copy over the docstring from `do_connect` to the proxy `connect`
     # method, since that's where all the backend-specific kwargs are currently
@@ -119,8 +119,6 @@ def __getattr__(name: str) -> BaseBackend:
     proxy.name = name
     proxy._from_url = backend._from_url
     proxy._to_sql = backend._to_sql
-    if (dialect := getattr(backend, "_sqlglot_dialect", None)) is not None:
-        proxy._sqlglot_dialect = dialect
     # Add any additional methods that should be exposed at the top level
     for name in getattr(backend, "_top_level_methods", ()):
         setattr(proxy, name, getattr(backend, name))

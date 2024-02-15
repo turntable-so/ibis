@@ -190,13 +190,13 @@ def test_raw_sql(con):
 
 def test_parted_column_rename(parted_alltypes):
     assert "PARTITIONTIME" in parted_alltypes.columns
-    assert "_PARTITIONTIME" in parted_alltypes.op().table.schema.names
+    assert "_PARTITIONTIME" in parted_alltypes.op().parent.schema.names
 
 
 def test_scalar_param_partition_time(parted_alltypes):
     assert "PARTITIONTIME" in parted_alltypes.columns
     assert "PARTITIONTIME" in parted_alltypes.schema()
-    param = ibis.param("timestamp").name("time_param")
+    param = ibis.param("timestamp('UTC')")
     expr = parted_alltypes[param > parted_alltypes.PARTITIONTIME]
     df = expr.execute(params={param: "2017-01-01"})
     assert df.empty
@@ -328,6 +328,8 @@ def test_create_table_bignumeric(con, temp_table):
 
 
 def test_geography_table(con, temp_table):
+    pytest.importorskip("geopandas")
+
     schema = ibis.schema({"col1": dt.GeoSpatial(geotype="geography", srid=4326)})
     temporary_table = con.create_table(temp_table, schema=schema)
     con.raw_sql(

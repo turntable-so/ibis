@@ -1,3 +1,3 @@
 SELECT
-  ST_ASTEXT(t0.`geog`) AS `tmp`
-FROM t AS t0
+  st_astext(`t0`.`geog`) AS `tmp`
+FROM `t` AS `t0`

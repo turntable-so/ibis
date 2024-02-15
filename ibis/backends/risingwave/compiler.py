@@ -1,34 +1,87 @@
 from __future__ import annotations
 
+import sqlglot.expressions as sge
+from public import public
+
+import ibis.common.exceptions as com
+import ibis.expr.datashape as ds
+import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
-from ibis.backends.base.sql.alchemy import AlchemyCompiler, AlchemyExprTranslator
-from ibis.backends.risingwave.datatypes import RisingwaveType
-from ibis.backends.risingwave.registry import operation_registry
-from ibis.expr.rewrites import rewrite_sample
+from ibis.backends.base.sqlglot.compiler import ALL_OPERATIONS
+from ibis.backends.base.sqlglot.datatypes import RisingWaveType
+from ibis.backends.base.sqlglot.dialects import RisingWave
+from ibis.backends.postgres.compiler import PostgresCompiler
 
 
-class RisingwaveExprTranslator(AlchemyExprTranslator):
-    _registry = operation_registry.copy()
-    _rewrites = AlchemyExprTranslator._rewrites.copy()
-    _has_reduction_filter_syntax = True
-    _supports_tuple_syntax = True
-    _dialect_name = "risingwave"
+@public
+class RisingwaveCompiler(PostgresCompiler):
+    __slots__ = ()
 
-    # it does support it, but we can't use it because of support for pivot
-    supports_unnest_in_select = False
+    dialect = RisingWave
+    type_mapper = RisingWaveType
 
-    type_mapper = RisingwaveType
+    UNSUPPORTED_OPERATIONS = frozenset(
+        (
+            ops.DateFromYMD,
+            ops.Mode,
+            *(
+                op
+                for op in ALL_OPERATIONS
+                if issubclass(
+                    op, (ops.GeoSpatialUnOp, ops.GeoSpatialBinOp, ops.GeoUnaryUnion)
+                )
+            ),
+        )
+    )
 
+    SIMPLE_OPS = {
+        ops.First: "first_value",
+        ops.Last: "last_value",
+    }
 
-rewrites = RisingwaveExprTranslator.rewrites
+    def visit_Correlation(self, op, *, left, right, how, where):
+        if how == "sample":
+            raise com.UnsupportedOperationError(
+                "RisingWave only implements `pop` correlation coefficient"
+            )
+        return super().visit_Correlation(
+            op, left=left, right=right, how=how, where=where
+        )
 
+    def visit_TimestampTruncate(self, op, *, arg, unit):
+        unit_mapping = {
+            "Y": "year",
+            "Q": "quarter",
+            "M": "month",
+            "W": "week",
+            "D": "day",
+            "h": "hour",
+            "m": "minute",
+            "s": "second",
+            "ms": "milliseconds",
+            "us": "microseconds",
+        }
 
-@rewrites(ops.Any)
-@rewrites(ops.All)
-def _any_all_no_op(expr):
-    return expr
+        if (unit := unit_mapping.get(unit.short)) is None:
+            raise com.UnsupportedOperationError(f"Unsupported truncate unit {unit}")
 
+        return self.f.date_trunc(unit, arg)
 
-class RisingwaveCompiler(AlchemyCompiler):
-    translator_class = RisingwaveExprTranslator
-    rewrites = AlchemyCompiler.rewrites | rewrite_sample
+    visit_TimeTruncate = visit_DateTruncate = visit_TimestampTruncate
+
+    def visit_IntervalFromInteger(self, op, *, arg, unit):
+        if op.arg.shape == ds.scalar:
+            return sge.Interval(this=arg, unit=self.v[unit.name])
+        elif op.arg.shape == ds.columnar:
+            return arg * sge.Interval(this=sge.convert(1), unit=self.v[unit.name])
+        else:
+            raise ValueError("Invalid shape for converting to interval")
+
+    def visit_NonNullLiteral(self, op, *, value, dtype):
+        if dtype.is_binary():
+            return self.cast("".join(map(r"\x{:0>2x}".format, value)), dt.binary)
+        elif dtype.is_date():
+            return self.cast(value.isoformat(), dtype)
+        elif dtype.is_json():
+            return sge.convert(str(value))
+        return None

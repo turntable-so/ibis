@@ -1,39 +1,49 @@
-WITH t0 AS (
-  SELECT
-    t2.l_extendedprice * (
-      CAST(1 AS TINYINT) - t2.l_discount
-    ) - t4.ps_supplycost * t2.l_quantity AS amount,
-    CAST(EXTRACT(year FROM t6.o_orderdate) AS SMALLINT) AS o_year,
-    t7.n_name AS nation,
-    t5.p_name AS p_name
-  FROM main.lineitem AS t2
-  JOIN main.supplier AS t3
-    ON t3.s_suppkey = t2.l_suppkey
-  JOIN main.partsupp AS t4
-    ON t4.ps_suppkey = t2.l_suppkey AND t4.ps_partkey = t2.l_partkey
-  JOIN main.part AS t5
-    ON t5.p_partkey = t2.l_partkey
-  JOIN main.orders AS t6
-    ON t6.o_orderkey = t2.l_orderkey
-  JOIN main.nation AS t7
-    ON t3.s_nationkey = t7.n_nationkey
-  WHERE
-    t5.p_name LIKE '%green%'
-)
 SELECT
-  t1.nation,
-  t1.o_year,
-  t1.sum_profit
+  "t14"."nation",
+  "t14"."o_year",
+  "t14"."sum_profit"
 FROM (
   SELECT
-    t0.nation AS nation,
-    t0.o_year AS o_year,
-    SUM(t0.amount) AS sum_profit
-  FROM t0
+    "t13"."nation",
+    "t13"."o_year",
+    SUM("t13"."amount") AS "sum_profit"
+  FROM (
+    SELECT
+      "t12"."amount",
+      "t12"."o_year",
+      "t12"."nation",
+      "t12"."p_name"
+    FROM (
+      SELECT
+        (
+          "t6"."l_extendedprice" * (
+            CAST(1 AS TINYINT) - "t6"."l_discount"
+          )
+        ) - (
+          "t8"."ps_supplycost" * "t6"."l_quantity"
+        ) AS "amount",
+        EXTRACT(year FROM "t10"."o_orderdate") AS "o_year",
+        "t11"."n_name" AS "nation",
+        "t9"."p_name"
+      FROM "lineitem" AS "t6"
+      INNER JOIN "supplier" AS "t7"
+        ON "t7"."s_suppkey" = "t6"."l_suppkey"
+      INNER JOIN "partsupp" AS "t8"
+        ON "t8"."ps_suppkey" = "t6"."l_suppkey" AND "t8"."ps_partkey" = "t6"."l_partkey"
+      INNER JOIN "part" AS "t9"
+        ON "t9"."p_partkey" = "t6"."l_partkey"
+      INNER JOIN "orders" AS "t10"
+        ON "t10"."o_orderkey" = "t6"."l_orderkey"
+      INNER JOIN "nation" AS "t11"
+        ON "t7"."s_nationkey" = "t11"."n_nationkey"
+    ) AS "t12"
+    WHERE
+      "t12"."p_name" LIKE '%green%'
+  ) AS "t13"
   GROUP BY
     1,
     2
-) AS t1
+) AS "t14"
 ORDER BY
-  t1.nation ASC,
-  t1.o_year DESC
+  "t14"."nation" ASC,
+  "t14"."o_year" DESC

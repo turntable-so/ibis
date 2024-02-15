@@ -6,7 +6,6 @@ from operator import methodcaller
 import numpy as np
 import pandas as pd
 import pytest
-import sqlalchemy as sa
 from pytest import param
 
 import ibis
@@ -14,21 +13,24 @@ import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 from ibis.backends.tests.errors import (
     ClickHouseDatabaseError,
+    ExaQueryError,
     GoogleBadRequest,
     ImpalaHiveServer2Error,
+    MySQLOperationalError,
+    OracleDatabaseError,
+    PsycoPg2InternalError,
     Py4JJavaError,
-    PySparkAnalysisException,
+    PyDruidProgrammingError,
+    PyODBCProgrammingError,
+    SnowflakeProgrammingError,
 )
 from ibis.legacy.udf.vectorized import analytic, reduction
 
-pytestmark = pytest.mark.notimpl(
-    ["druid", "exasol"],
-    raises=(
-        sa.exc.ProgrammingError,
-        sa.exc.NoSuchTableError,
-        com.OperationNotDefinedError,
-    ),
-)
+pytestmark = [
+    pytest.mark.notimpl(
+        ["druid"], raises=(com.OperationNotDefinedError, PyDruidProgrammingError)
+    )
+]
 
 
 # adapted from https://gist.github.com/xmnlab/2c1f93df1a6c6bde4e32c8579117e9cc
@@ -86,19 +88,6 @@ def calc_zscore(s):
             lambda t, win: t.float_col.lag().over(win),
             lambda t: t.float_col.shift(1),
             id="lag",
-            marks=[
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
-                pytest.mark.broken(
-                    ["datafusion"],
-                    raises=Exception,
-                    reason="Exception: Internal error: Expects default value to have Int64 type.",
-                ),
-                pytest.mark.notimpl(
-                    ["flink"],
-                    raises=Py4JJavaError,
-                    reason="CalciteContextException: ROW/RANGE not allowed with RANK, DENSE_RANK or ROW_NUMBER functions",
-                ),
-            ],
         ),
         param(
             lambda t, win: t.float_col.lead().over(win),
@@ -110,34 +99,17 @@ def calc_zscore(s):
                     reason="upstream is broken; returns all nulls",
                     raises=AssertionError,
                 ),
-                pytest.mark.broken(
-                    ["datafusion"],
-                    reason="Exception: Internal error: Expects default value to have Int64 type.",
-                    raises=BaseException,
-                ),
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
-                pytest.mark.notimpl(
-                    ["flink"],
-                    raises=Py4JJavaError,
-                    reason="CalciteContextException: ROW/RANGE not allowed with RANK, DENSE_RANK or ROW_NUMBER functions",
-                ),
             ],
         ),
         param(
             lambda t, win: t.id.rank().over(win),
             lambda t: t.id.rank(method="min").astype("int64") - 1,
             id="rank",
-            marks=[
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
-            ],
         ),
         param(
             lambda t, win: t.id.dense_rank().over(win),
             lambda t: t.id.rank(method="dense").astype("int64") - 1,
             id="dense_rank",
-            marks=[
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
-            ],
         ),
         param(
             lambda t, win: t.id.percent_rank().over(win),
@@ -153,10 +125,9 @@ def calc_zscore(s):
                     reason="clickhouse doesn't implement percent_rank",
                     raises=com.OperationNotDefinedError,
                 ),
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
                 pytest.mark.notimpl(
                     ["risingwave"],
-                    raises=sa.exc.InternalError,
+                    raises=PsycoPg2InternalError,
                     reason="Feature is not yet implemented: Unrecognized window function: percent_rank",
                 ),
             ],
@@ -166,13 +137,12 @@ def calc_zscore(s):
             lambda t: t.id.rank(method="min") / t.id.transform(len),
             id="cume_dist",
             marks=[
-                pytest.mark.notimpl(["pyspark"], raises=com.UnsupportedOperationError),
-                pytest.mark.notyet(["clickhouse"], raises=com.OperationNotDefinedError),
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
+                pytest.mark.notyet(
+                    ["clickhouse", "exasol"], raises=com.OperationNotDefinedError
+                ),
                 pytest.mark.notimpl(
                     ["risingwave"],
-                    raises=sa.exc.InternalError,
+                    raises=PsycoPg2InternalError,
                     reason="Feature is not yet implemented: Unrecognized window function: cume_dist",
                 ),
             ],
@@ -186,11 +156,6 @@ def calc_zscore(s):
                     ["dask", "pandas", "polars"],
                     raises=com.OperationNotDefinedError,
                 ),
-                pytest.mark.notyet(
-                    ["clickhouse"],
-                    raises=ClickHouseDatabaseError,
-                    reason="ClickHouse requires a specific window frame: unbounded preceding and unbounded following ONLY",
-                ),
                 pytest.mark.broken(
                     ["impala"],
                     raises=AssertionError,
@@ -201,14 +166,9 @@ def calc_zscore(s):
                     raises=AssertionError,
                     reason="Results are shifted + 1",
                 ),
-                pytest.mark.broken(
-                    ["flink"],
-                    raises=com.UnsupportedOperationError,
-                    reason="Windows in Flink can only be ordered by a single time column",
-                ),
                 pytest.mark.notimpl(
                     ["risingwave"],
-                    raises=sa.exc.InternalError,
+                    raises=PsycoPg2InternalError,
                     reason="Feature is not yet implemented: Unrecognized window function: ntile",
                 ),
             ],
@@ -217,13 +177,17 @@ def calc_zscore(s):
             lambda t, win: t.float_col.first().over(win),
             lambda t: t.float_col.transform("first"),
             id="first",
-            marks=pytest.mark.notimpl(["dask"], raises=NotImplementedError),
+            marks=[
+                pytest.mark.notimpl(["exasol"], raises=com.OperationNotDefinedError),
+            ],
         ),
         param(
             lambda t, win: t.float_col.last().over(win),
             lambda t: t.float_col.transform("last"),
             id="last",
-            marks=pytest.mark.notimpl(["dask"], raises=NotImplementedError),
+            marks=[
+                pytest.mark.notimpl(["exasol"], raises=com.OperationNotDefinedError),
+            ],
         ),
         param(
             lambda t, win: t.double_col.nth(3).over(win),
@@ -241,47 +205,40 @@ def calc_zscore(s):
                 pytest.mark.notyet(
                     ["impala", "mssql"], raises=com.OperationNotDefinedError
                 ),
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
-                pytest.mark.notimpl(
-                    ["flink"],
-                    raises=com.OperationNotDefinedError,
-                    reason="No translation rule for <class 'ibis.expr.operations.analytic.NthValue'>",
+                pytest.mark.notimpl(["dask"], raises=com.OperationNotDefinedError),
+                pytest.mark.notimpl(["flink"], raises=com.OperationNotDefinedError),
+                pytest.mark.notimpl(["risingwave"], raises=PsycoPg2InternalError),
+                pytest.mark.broken(
+                    ["snowflake"],
+                    raises=AssertionError,
+                    reason="behavior of windows with nth_value has changed; unclear whether that is in ibis or in snowflake itself",
                 ),
-                pytest.mark.notimpl(["risingwave"], raises=sa.exc.InternalError),
             ],
         ),
         param(
             lambda _, win: ibis.row_number().over(win),
             lambda t: t.cumcount(),
             id="row_number",
-            marks=[
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
-                pytest.mark.notimpl(["pandas"], raises=com.OperationNotDefinedError),
-            ],
         ),
         param(
             lambda t, win: t.double_col.cumsum().over(win),
             lambda t: t.double_col.cumsum(),
             id="cumsum",
-            marks=pytest.mark.notimpl(["dask"], raises=NotImplementedError),
         ),
         param(
             lambda t, win: t.double_col.cummean().over(win),
             lambda t: (t.double_col.expanding().mean().reset_index(drop=True, level=0)),
             id="cummean",
-            marks=pytest.mark.notimpl(["dask"], raises=NotImplementedError),
         ),
         param(
             lambda t, win: t.float_col.cummin().over(win),
             lambda t: t.float_col.cummin(),
             id="cummin",
-            marks=pytest.mark.notimpl(["dask"], raises=NotImplementedError),
         ),
         param(
             lambda t, win: t.float_col.cummax().over(win),
             lambda t: t.float_col.cummax(),
             id="cummax",
-            marks=pytest.mark.notimpl(["dask"], raises=NotImplementedError),
         ),
         param(
             lambda t, win: (t.double_col == 0).any().over(win),
@@ -292,10 +249,7 @@ def calc_zscore(s):
                 .astype(bool)
             ),
             id="cumany",
-            marks=[
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
-                pytest.mark.broken(["oracle"], raises=sa.exc.DatabaseError),
-            ],
+            marks=[pytest.mark.broken(["mssql"], raises=com.OperationNotDefinedError)],
         ),
         param(
             lambda t, win: (t.double_col == 0).notany().over(win),
@@ -307,8 +261,8 @@ def calc_zscore(s):
             ),
             id="cumnotany",
             marks=[
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
-                pytest.mark.broken(["oracle"], raises=sa.exc.DatabaseError),
+                pytest.mark.broken(["oracle"], raises=OracleDatabaseError),
+                pytest.mark.broken(["mssql"], raises=com.OperationNotDefinedError),
             ],
         ),
         param(
@@ -320,10 +274,7 @@ def calc_zscore(s):
                 .astype(bool)
             ),
             id="cumall",
-            marks=[
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
-                pytest.mark.broken(["oracle"], raises=sa.exc.DatabaseError),
-            ],
+            marks=[pytest.mark.broken(["mssql"], raises=com.OperationNotDefinedError)],
         ),
         param(
             lambda t, win: (t.double_col == 0).notall().over(win),
@@ -335,15 +286,14 @@ def calc_zscore(s):
             ),
             id="cumnotall",
             marks=[
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
-                pytest.mark.broken(["oracle"], raises=sa.exc.DatabaseError),
+                pytest.mark.broken(["oracle"], raises=OracleDatabaseError),
+                pytest.mark.broken(["mssql"], raises=com.OperationNotDefinedError),
             ],
         ),
         param(
             lambda t, win: t.double_col.sum().over(win),
             lambda gb: gb.double_col.cumsum(),
             id="sum",
-            marks=pytest.mark.notimpl(["dask"], raises=NotImplementedError),
         ),
         param(
             lambda t, win: t.double_col.mean().over(win),
@@ -351,19 +301,16 @@ def calc_zscore(s):
                 gb.double_col.expanding().mean().reset_index(drop=True, level=0)
             ),
             id="mean",
-            marks=pytest.mark.notimpl(["dask"], raises=NotImplementedError),
         ),
         param(
             lambda t, win: t.float_col.min().over(win),
             lambda gb: gb.float_col.cummin(),
             id="min",
-            marks=pytest.mark.notimpl(["dask"], raises=NotImplementedError),
         ),
         param(
             lambda t, win: t.float_col.max().over(win),
             lambda gb: gb.float_col.cummax(),
             id="max",
-            marks=pytest.mark.notimpl(["dask"], raises=NotImplementedError),
         ),
         param(
             lambda t, win: t.double_col.count().over(win),
@@ -371,7 +318,6 @@ def calc_zscore(s):
             # that we must, so we add one to the pandas result
             lambda gb: gb.double_col.cumcount() + 1,
             id="count",
-            marks=pytest.mark.notimpl(["dask"], raises=NotImplementedError),
         ),
     ],
 )
@@ -409,10 +355,9 @@ def test_grouped_bounded_expanding_window(
             lambda df: (df.double_col.expanding().mean()),
             id="mean",
             marks=[
-                pytest.mark.notimpl(["dask"], raises=NotImplementedError),
                 pytest.mark.notimpl(
                     ["risingwave"],
-                    raises=sa.exc.InternalError,
+                    raises=PsycoPg2InternalError,
                     reason="Feature is not yet implemented: Window function with empty PARTITION BY is not supported yet",
                 ),
             ],
@@ -440,10 +385,10 @@ def test_grouped_bounded_expanding_window(
                         "snowflake",
                         "datafusion",
                         "trino",
+                        "exasol",
                     ],
                     raises=com.OperationNotDefinedError,
                 ),
-                pytest.mark.broken(["dask"], raises=ValueError),
             ],
         ),
     ],
@@ -477,13 +422,6 @@ def test_ungrouped_bounded_expanding_window(
     ],
 )
 @pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
-@pytest.mark.notimpl(["dask"], raises=NotImplementedError)
-@pytest.mark.notimpl(["pandas"], raises=AssertionError)
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=com.UnsupportedOperationError,
-    reason="OVER RANGE FOLLOWING windows are not supported in Flink yet",
-)
 def test_grouped_bounded_following_window(backend, alltypes, df, preceding, following):
     window = ibis.window(
         preceding=preceding,
@@ -548,7 +486,6 @@ def test_grouped_bounded_following_window(backend, alltypes, df, preceding, foll
     ],
 )
 @pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
-@pytest.mark.notimpl(["dask"], raises=NotImplementedError)
 def test_grouped_bounded_preceding_window(backend, alltypes, df, window_fn):
     window = window_fn(alltypes)
     expr = alltypes.mutate(val=alltypes.double_col.sum().over(window))
@@ -600,6 +537,7 @@ def test_grouped_bounded_preceding_window(backend, alltypes, df, window_fn):
                         "snowflake",
                         "trino",
                         "datafusion",
+                        "exasol",
                     ],
                     raises=com.OperationNotDefinedError,
                 ),
@@ -611,14 +549,15 @@ def test_grouped_bounded_preceding_window(backend, alltypes, df, window_fn):
     ("ordered"),
     [
         param(
-            True,
-            id="ordered",
-            marks=pytest.mark.notimpl(["dask"], raises=NotImplementedError),
-        ),
-        param(
             False,
             id="unordered",
-            marks=pytest.mark.notimpl(["flink"], raises=com.UnsupportedOperationError),
+            marks=[
+                pytest.mark.broken(
+                    ["mssql"],
+                    raises=PyODBCProgrammingError,
+                    reason="unbounded window frames are not supported",
+                ),
+            ],
         ),
     ],
 )
@@ -661,16 +600,12 @@ def test_grouped_unbounded_window(
     ],
 )
 @pytest.mark.broken(["snowflake"], raises=AssertionError)
-@pytest.mark.broken(["dask", "pandas", "mssql"], raises=AssertionError)
+@pytest.mark.broken(["dask"], raises=AssertionError)
+@pytest.mark.notyet(["mssql"], raises=PyODBCProgrammingError)
 @pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
 @pytest.mark.notimpl(
-    ["flink"],
-    raises=com.UnsupportedOperationError,
-    reason="OVER RANGE FOLLOWING windows are not supported in Flink yet",
-)
-@pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="Feature is not yet implemented: Window function with empty PARTITION BY is not supported yet",
 )
 def test_simple_ungrouped_unbound_following_window(
@@ -688,18 +623,8 @@ def test_simple_ungrouped_unbound_following_window(
 
 @pytest.mark.notimpl(
     ["flink"],
-    raises=com.UnsupportedOperationError,
-    reason="OVER RANGE FOLLOWING windows are not supported in Flink yet",
-)
-@pytest.mark.notimpl(
-    ["pandas", "dask"],
-    raises=NotImplementedError,
-    reason="support scalar sorting keys are not yet implemented",
-)
-@pytest.mark.broken(
-    ["pyspark"],
-    raises=PySparkAnalysisException,
-    reason="pyspark tries to locate None column",
+    raises=Py4JJavaError,
+    reason="flink doesn't allow order by NULL without casting the null to a specific type",
 )
 @pytest.mark.never(
     ["mssql"], raises=Exception, reason="order by constant is not supported"
@@ -707,7 +632,7 @@ def test_simple_ungrouped_unbound_following_window(
 @pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="Feature is not yet implemented: Window function with empty PARTITION BY is not supported yet",
 )
 @pytest.mark.xfail_version(datafusion=["datafusion==35"])
@@ -729,20 +654,14 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
             True,
             id="ordered-mean",
             marks=[
-                pytest.mark.broken(["pandas"], raises=AssertionError),
-                pytest.mark.notimpl(
-                    ["dask"],
-                    raises=NotImplementedError,
-                    reason="Window operations are unsupported in the dask backend",
-                ),
                 pytest.mark.broken(
-                    ["bigquery", "flink", "impala"],
+                    ["impala"],
                     reason="default window semantics are different",
                     raises=AssertionError,
                 ),
                 pytest.mark.notimpl(
                     ["risingwave"],
-                    raises=sa.exc.InternalError,
+                    raises=PsycoPg2InternalError,
                     reason="Feature is not yet implemented: Window function with empty PARTITION BY is not supported yet",
                 ),
             ],
@@ -753,10 +672,10 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
             False,
             id="unordered-mean",
             marks=[
-                pytest.mark.notimpl(
-                    ["flink"],
-                    raises=com.UnsupportedOperationError,
-                    reason="Flink engine does not support generic window clause with no order by",
+                pytest.mark.broken(
+                    ["mssql"],
+                    raises=PyODBCProgrammingError,
+                    reason="unbounded window frames are not supported",
                 ),
             ],
         ),
@@ -769,14 +688,9 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
                 pytest.mark.notimpl(
                     ["pandas", "dask"], raises=com.OperationNotDefinedError
                 ),
-                pytest.mark.notyet(
-                    ["pyspark"],
-                    raises=PySparkAnalysisException,
-                    reason="pyspark requires CURRENT ROW",
-                ),
                 pytest.mark.notimpl(
                     ["risingwave"],
-                    raises=sa.exc.InternalError,
+                    raises=PsycoPg2InternalError,
                     reason="Feature is not yet implemented: Unrecognized window function: ntile",
                 ),
             ],
@@ -803,14 +717,9 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
                         "snowflake",
                         "trino",
                         "datafusion",
+                        "exasol",
                     ],
                     raises=com.OperationNotDefinedError,
-                ),
-                pytest.mark.broken(["pandas"], raises=AssertionError),
-                pytest.mark.broken(
-                    ["dask"],
-                    raises=ValueError,
-                    reason="Dask windowing order_by not yet implemented",
                 ),
             ],
         ),
@@ -835,13 +744,10 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
                         "snowflake",
                         "trino",
                         "datafusion",
+                        "exasol",
+                        "flink",
                     ],
                     raises=com.OperationNotDefinedError,
-                ),
-                pytest.mark.notimpl(
-                    ["flink"],
-                    raises=com.UnsupportedOperationError,
-                    reason="Flink engine does not support generic window clause with no order by",
                 ),
             ],
         ),
@@ -852,14 +758,9 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
             True,
             id="ordered-lag",
             marks=[
-                pytest.mark.broken(
-                    ["datafusion"],
-                    raises=Exception,
-                    reason="Exception: Internal error: Expects default value to have Int64 type.",
-                ),
                 pytest.mark.notimpl(
                     ["risingwave"],
-                    raises=sa.exc.InternalError,
+                    raises=PsycoPg2InternalError,
                     reason="Feature is not yet implemented: Window function with empty PARTITION BY is not supported yet",
                 ),
             ],
@@ -871,36 +772,21 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
             id="unordered-lag",
             marks=[
                 pytest.mark.broken(
-                    ["trino"],
+                    ["trino", "exasol"],
                     reason="this isn't actually broken: the backend result is equal up to ordering",
                     raises=AssertionError,
+                    strict=False,  # sometimes it passes
                 ),
-                pytest.mark.broken(["oracle"], raises=AssertionError),
-                pytest.mark.broken(
-                    ["datafusion"],
-                    raises=Exception,
-                    reason="Exception: Internal error: Expects default value to have Int64 type.",
-                ),
-                pytest.mark.notimpl(
-                    ["pyspark"],
-                    raises=PySparkAnalysisException,
-                    reason="pyspark requires ORDER BY",
-                ),
-                pytest.mark.notimpl(
-                    ["flink"],
-                    raises=com.UnsupportedOperationError,
-                    reason="Flink engine does not support generic window clause with no order by",
-                ),
-                pytest.mark.broken(["mysql"], raises=sa.exc.OperationalError),
-                pytest.mark.broken(["mssql"], raises=sa.exc.ProgrammingError),
+                pytest.mark.notyet(["flink"], raises=Py4JJavaError),
+                pytest.mark.broken(["mssql"], raises=PyODBCProgrammingError),
                 pytest.mark.notyet(
                     ["snowflake"],
-                    reason="backend requires ordering",
-                    raises=sa.exc.ProgrammingError,
+                    reason="backend supports this functionality but requires meaningful ordering",
+                    raises=AssertionError,
                 ),
                 pytest.mark.notimpl(
                     ["risingwave"],
-                    raises=sa.exc.InternalError,
+                    raises=PsycoPg2InternalError,
                     reason="Feature is not yet implemented: Window function with empty PARTITION BY is not supported yet",
                 ),
             ],
@@ -911,14 +797,9 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
             True,
             id="ordered-lead",
             marks=[
-                pytest.mark.broken(
-                    ["datafusion"],
-                    raises=Exception,
-                    reason="Exception: Internal error: Expects default value to have Int64 type.",
-                ),
                 pytest.mark.notimpl(
                     ["risingwave"],
-                    raises=sa.exc.InternalError,
+                    raises=PsycoPg2InternalError,
                     reason="Feature is not yet implemented: Window function with empty PARTITION BY is not supported yet",
                 ),
             ],
@@ -936,33 +817,18 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
                         "result is equal up to ordering"
                     ),
                     raises=AssertionError,
+                    strict=False,  # sometimes it passes
                 ),
-                pytest.mark.broken(
-                    ["datafusion"],
-                    raises=Exception,
-                    reason="Exception: Internal error: Expects default value to have Int64 type.",
-                ),
-                pytest.mark.broken(["oracle"], raises=AssertionError),
-                pytest.mark.notimpl(
-                    ["pyspark"],
-                    raises=PySparkAnalysisException,
-                    reason="pyspark requires ORDER BY",
-                ),
-                pytest.mark.notimpl(
-                    ["flink"],
-                    raises=com.UnsupportedOperationError,
-                    reason="Flink engine does not support generic window clause with no order by",
-                ),
-                pytest.mark.broken(["mysql"], raises=sa.exc.OperationalError),
-                pytest.mark.broken(["mssql"], raises=sa.exc.ProgrammingError),
+                pytest.mark.notyet(["flink"], raises=Py4JJavaError),
+                pytest.mark.broken(["mssql"], raises=PyODBCProgrammingError),
                 pytest.mark.notyet(
                     ["snowflake"],
-                    reason="backend requires ordering",
-                    raises=sa.exc.ProgrammingError,
+                    reason="backend supports this functionality but requires meaningful ordering",
+                    raises=AssertionError,
                 ),
                 pytest.mark.notimpl(
                     ["risingwave"],
-                    raises=sa.exc.InternalError,
+                    raises=PsycoPg2InternalError,
                     reason="Feature is not yet implemented: Window function with empty PARTITION BY is not supported yet",
                 ),
             ],
@@ -990,18 +856,9 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
                         "snowflake",
                         "trino",
                         "datafusion",
+                        "exasol",
                     ],
                     raises=com.OperationNotDefinedError,
-                ),
-                pytest.mark.notimpl(
-                    ["pandas"],
-                    raises=RuntimeWarning,
-                    reason="invalid value encountered in divide",
-                ),
-                pytest.mark.broken(
-                    ["dask"],
-                    raises=ValueError,
-                    reason="Dask windowing order_by not yet implemented",
                 ),
             ],
         ),
@@ -1027,13 +884,10 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
                         "snowflake",
                         "trino",
                         "datafusion",
+                        "exasol",
+                        "flink",
                     ],
                     raises=com.OperationNotDefinedError,
-                ),
-                pytest.mark.notimpl(
-                    ["flink"],
-                    raises=com.UnsupportedOperationError,
-                    reason="Flink engine does not support generic window clause with no order by",
                 ),
             ],
         ),
@@ -1067,32 +921,26 @@ def test_ungrouped_unbounded_window(
 
 
 @pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
-@pytest.mark.notimpl(["snowflake"], raises=sa.exc.ProgrammingError)
+@pytest.mark.notimpl(["snowflake"], raises=SnowflakeProgrammingError)
 @pytest.mark.notimpl(
     ["impala"], raises=ImpalaHiveServer2Error, reason="limited RANGE support"
-)
-@pytest.mark.notimpl(["dask"], raises=NotImplementedError)
-@pytest.mark.notimpl(
-    ["pandas"],
-    raises=NotImplementedError,
-    reason="The pandas backend only implements range windows with temporal ordering keys",
-)
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=com.UnsupportedOperationError,
-    reason="Data Type mismatch between ORDER BY and RANGE clause",
 )
 @pytest.mark.notyet(
     ["clickhouse"],
     reason="RANGE OFFSET frame for 'DB::ColumnNullable' ORDER BY column is not implemented",
     raises=ClickHouseDatabaseError,
 )
+@pytest.mark.notyet(["mssql"], raises=PyODBCProgrammingError)
+@pytest.mark.broken(
+    ["mysql"],
+    raises=MySQLOperationalError,
+    reason="https://github.com/tobymao/sqlglot/issues/2779",
+)
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="Feature is not yet implemented: window frame in `RANGE` mode is not supported yet",
 )
-@pytest.mark.notyet(["mssql"], raises=sa.exc.ProgrammingError)
 def test_grouped_bounded_range_window(backend, alltypes, df):
     # Explanation of the range window spec below:
     #
@@ -1142,8 +990,6 @@ def test_grouped_bounded_range_window(backend, alltypes, df):
 
 
 @pytest.mark.notimpl(["clickhouse", "polars"], raises=com.OperationNotDefinedError)
-@pytest.mark.notimpl(["dask"], raises=AttributeError)
-@pytest.mark.notimpl(["pyspark"], raises=PySparkAnalysisException)
 @pytest.mark.notyet(
     ["clickhouse"],
     reason="clickhouse doesn't implement percent_rank",
@@ -1151,7 +997,7 @@ def test_grouped_bounded_range_window(backend, alltypes, df):
 )
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="Feature is not yet implemented: Unrecognized window function: percent_rank",
 )
 def test_percent_rank_whole_table_no_order_by(backend, alltypes, df):
@@ -1165,15 +1011,6 @@ def test_percent_rank_whole_table_no_order_by(backend, alltypes, df):
 
 
 @pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
-@pytest.mark.notimpl(["dask"], raises=NotImplementedError)
-@pytest.mark.broken(
-    ["pandas"], reason="pandas returns incorrect results", raises=AssertionError
-)
-@pytest.mark.broken(
-    ["datafusion"],
-    reason="Exception: External error: Internal error: Expects default value to have Int64 type",
-    raises=Exception,
-)
 def test_grouped_ordered_window_coalesce(backend, alltypes, df):
     t = alltypes
     expr = (
@@ -1208,14 +1045,9 @@ def test_grouped_ordered_window_coalesce(backend, alltypes, df):
 
 
 @pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
-@pytest.mark.broken(
-    ["datafusion"],
-    raises=Exception,
-    reason="Exception: Internal error: Expects default value to have Int64 type.",
-)
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="Feature is not yet implemented: Window function with empty PARTITION BY is not supported yet",
 )
 def test_mutate_window_filter(backend, alltypes):
@@ -1232,18 +1064,7 @@ def test_mutate_window_filter(backend, alltypes):
     backend.assert_frame_equal(res, sol, check_dtype=False)
 
 
-@pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
-@pytest.mark.broken(
-    ["impala"],
-    reason="the database returns incorrect results",
-    raises=AssertionError,
-)
-@pytest.mark.notimpl(["dask"], raises=NotImplementedError)
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=com.UnsupportedOperationError,
-    reason="Windows in Flink can only be ordered by a single time column",
-)
+@pytest.mark.notimpl(["polars", "exasol"], raises=com.OperationNotDefinedError)
 def test_first_last(backend):
     t = backend.win
     w = ibis.window(group_by=t.g, order_by=[t.x, t.y], preceding=1, following=0)
@@ -1281,17 +1102,25 @@ def test_first_last(backend):
     ["impala"], raises=ImpalaHiveServer2Error, reason="not supported by Impala"
 )
 @pytest.mark.notyet(
-    ["mysql"], raises=sa.exc.ProgrammingError, reason="not supported by MySQL"
+    ["mysql"], raises=MySQLOperationalError, reason="not supported by MySQL"
 )
 @pytest.mark.notyet(
-    ["mssql", "oracle", "polars", "snowflake", "sqlite"],
+    ["polars", "snowflake", "sqlite"],
     raises=com.OperationNotDefinedError,
     reason="not support by the backend",
 )
+@pytest.mark.notyet(
+    ["mssql"], raises=PyODBCProgrammingError, reason="not support by the backend"
+)
 @pytest.mark.broken(["flink"], raises=Py4JJavaError, reason="bug in Flink")
 @pytest.mark.broken(
+    ["exasol"],
+    raises=ExaQueryError,
+    reason="database can't handle UTC timestamps in DataFrames",
+)
+@pytest.mark.broken(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="sql parser error: Expected literal int, found: INTERVAL at line:1, column:99",
 )
 def test_range_expression_bounds(backend):
@@ -1329,26 +1158,21 @@ def test_range_expression_bounds(backend):
     assert len(result) == con.execute(t.count())
 
 
-@pytest.mark.notimpl(["polars", "dask"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
 @pytest.mark.notyet(
     ["clickhouse"],
     reason="clickhouse doesn't implement percent_rank",
     raises=com.OperationNotDefinedError,
 )
 @pytest.mark.broken(
-    ["pandas"], reason="missing column during execution", raises=KeyError
-)
-@pytest.mark.broken(
-    ["mssql"], reason="lack of support for booleans", raises=sa.exc.ProgrammingError
-)
-@pytest.mark.broken(
-    ["pyspark"], reason="pyspark requires CURRENT ROW", raises=PySparkAnalysisException
+    ["mssql"], reason="lack of support for booleans", raises=PyODBCProgrammingError
 )
 @pytest.mark.broken(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="Feature is not yet implemented: Unrecognized window function: percent_rank",
 )
+@pytest.mark.broken(["dask"], reason="different result ordering", raises=AssertionError)
 def test_rank_followed_by_over_call_merge_frames(backend, alltypes, df):
     # GH #7631
     t = alltypes
@@ -1368,26 +1192,17 @@ def test_rank_followed_by_over_call_merge_frames(backend, alltypes, df):
 
 
 @pytest.mark.notyet(
-    ["pandas", "dask"],
-    reason="multiple ordering keys in a window function not supported for ranking",
-    raises=ValueError,
-)
-@pytest.mark.notyet(
     ["mssql"],
     reason="IS NULL not valid syntax for mssql",
-    raises=sa.exc.ProgrammingError,
+    raises=PyODBCProgrammingError,
 )
 @pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
-@pytest.mark.notyet(["flink"], raises=com.UnsupportedOperationError)
-@pytest.mark.broken(
-    ["pyspark"], reason="pyspark requires CURRENT ROW", raises=PySparkAnalysisException
-)
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="Feature is not yet implemented: Window function with empty PARTITION BY is not supported yet",
 )
-def test_ordering_order(con):
+def test_windowed_order_by_sequence_is_preserved(con):
     table = ibis.memtable({"bool_col": [True, False, False, None, True]})
     window = ibis.window(
         order_by=[

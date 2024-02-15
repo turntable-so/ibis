@@ -6,13 +6,12 @@ from collections import OrderedDict
 import numpy as np
 import pandas as pd
 import pytest
-import sqlalchemy as sa
 from pytest import param
 
 import ibis
 import ibis.expr.datatypes as dt
 from ibis import _
-from ibis.backends.tests.errors import GoogleBadRequest, Py4JJavaError
+from ibis.backends.tests.errors import OracleDatabaseError, PsycoPg2InternalError
 
 
 @pytest.mark.parametrize(
@@ -37,13 +36,8 @@ def test_floating_scalar_parameter(backend, alltypes, df, column, raw_value):
     ("start_string", "end_string"),
     [("2009-03-01", "2010-07-03"), ("2014-12-01", "2017-01-05")],
 )
-@pytest.mark.notimpl(["datafusion", "mssql", "trino", "druid"])
-@pytest.mark.broken(["oracle"], raises=sa.exc.DatabaseError)
-@pytest.mark.notimpl(
-    ["risingwave"],
-    raises=sa.exc.InternalError,
-    reason="function make_date(integer, integer, integer) does not exist",
-)
+@pytest.mark.notimpl(["trino", "druid"])
+@pytest.mark.broken(["oracle"], raises=OracleDatabaseError)
 def test_date_scalar_parameter(backend, alltypes, start_string, end_string):
     start, end = ibis.param(dt.date), ibis.param(dt.date)
 
@@ -65,7 +59,7 @@ def test_timestamp_accepts_date_literals(alltypes):
     assert expr.compile(params=params) is not None
 
 
-@pytest.mark.notimpl(["impala", "pyspark", "druid", "oracle", "exasol"])
+@pytest.mark.notimpl(["impala", "druid", "oracle", "exasol"])
 @pytest.mark.never(
     ["mysql", "sqlite", "mssql"], reason="backend will never implement array types"
 )
@@ -82,7 +76,6 @@ def test_scalar_param_array(con):
         "impala",
         "postgres",
         "risingwave",
-        "pyspark",
         "druid",
         "oracle",
         "exasol",
@@ -100,26 +93,15 @@ def test_scalar_param_struct(con):
     assert result == value["a"]
 
 
-@pytest.mark.notimpl(
-    ["datafusion", "impala", "pyspark", "polars", "druid", "oracle", "exasol"]
-)
+@pytest.mark.notimpl(["datafusion", "impala", "polars", "druid", "oracle", "exasol"])
 @pytest.mark.never(
     ["mysql", "sqlite", "mssql"],
     reason="mysql and sqlite will never implement map types",
 )
 @pytest.mark.notyet(["bigquery"])
 @pytest.mark.notimpl(
-    ["flink"],
-    "WIP",
-    raises=Py4JJavaError,
-    reason=(
-        "SqlParseException: Expecting alias, found character literal"
-        "sql= SELECT MAP_FROM_ARRAYS(ARRAY['a', 'b', 'c'], ARRAY['ghi', 'def', 'abc']) '[' 'b' ']' AS `MapGet(param_0, 'b', None)`"
-    ),
-)
-@pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="function make_date(integer, integer, integer) does not exist",
 )
 def test_scalar_param_map(con):
@@ -147,42 +129,21 @@ def test_scalar_param_map(con):
             "timestamp",
             "timestamp_col",
             id="string_timestamp",
-            marks=[
-                pytest.mark.notimpl(["druid"]),
-                pytest.mark.broken(
-                    ["bigquery"],
-                    raises=GoogleBadRequest,
-                    reason="No matching for operator = for argument types: DATETIME, TIMESTAMP",
-                ),
-            ],
+            marks=[pytest.mark.notimpl(["druid"])],
         ),
         param(
             datetime.date(2009, 1, 20),
             "timestamp",
             "timestamp_col",
             id="date_timestamp",
-            marks=[
-                pytest.mark.notimpl(["druid"]),
-                pytest.mark.broken(
-                    ["bigquery"],
-                    raises=GoogleBadRequest,
-                    reason="No matching for operator = for argument types: DATETIME, TIMESTAMP",
-                ),
-            ],
+            marks=[pytest.mark.notimpl(["druid"])],
         ),
         param(
             datetime.datetime(2009, 1, 20, 1, 2, 3),
             "timestamp",
             "timestamp_col",
             id="datetime_timestamp",
-            marks=[
-                pytest.mark.notimpl(["druid"]),
-                pytest.mark.broken(
-                    ["bigquery"],
-                    raises=GoogleBadRequest,
-                    reason="No matching for operator = for argument types: DATETIME, TIMESTAMP",
-                ),
-            ],
+            marks=[pytest.mark.notimpl(["druid"])],
         ),
     ],
 )
@@ -203,11 +164,6 @@ def test_scalar_param(backend, alltypes, df, value, dtype, col):
     ids=["string", "date", "datetime"],
 )
 @pytest.mark.notimpl(["druid", "oracle"])
-@pytest.mark.notimpl(
-    ["risingwave"],
-    raises=sa.exc.InternalError,
-    reason="function make_date(integer, integer, integer) does not exist",
-)
 def test_scalar_param_date(backend, alltypes, value):
     param = ibis.param("date")
     ds_col = alltypes.date_string_col
@@ -247,12 +203,9 @@ def test_scalar_param_date(backend, alltypes, value):
         "datafusion",
         "clickhouse",
         "polars",
-        "duckdb",
         "sqlite",
-        "snowflake",
         "impala",
         "oracle",
-        "pyspark",
         "mssql",
         "druid",
         "exasol",

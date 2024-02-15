@@ -24,7 +24,7 @@ def schema_from_bigquery_table(table):
         partition_field = partition_info.field or NATIVE_PARTITION_COL
         # Only add a new column if it's not already a column in the schema
         if partition_field not in schema:
-            schema |= {partition_field: dt.timestamp}
+            schema |= {partition_field: dt.Timestamp(timezone="UTC")}
 
     return schema
 
@@ -192,6 +192,7 @@ def parse_project_and_dataset(project: str, dataset: str = "") -> tuple[str, str
     >>> data_project, billing_project, _dataset = parse_project_and_dataset("ibis-gbq")
     >>> data_project
     'ibis-gbq'
+
     """
     if dataset.count(".") > 1:
         raise ValueError(

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -11,24 +12,27 @@ import ibis.common.exceptions as com
 import ibis.expr.operations as ops
 import ibis.expr.schema as sch
 import ibis.expr.types as ir
-from ibis.backends.base import BaseBackend, Database
+from ibis.backends.base import BaseBackend, Database, NoUrl
+from ibis.backends.base.sqlglot.dialects import Polars
+from ibis.backends.pandas.rewrites import (
+    bind_unbound_table,
+    replace_parameter,
+    rewrite_join,
+)
 from ibis.backends.polars.compiler import translate
 from ibis.backends.polars.datatypes import dtype_to_polars, schema_from_polars
-from ibis.common.patterns import Replace
 from ibis.util import gen_name, normalize_filename
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Mapping, MutableMapping
+    from collections.abc import Iterable
 
     import pandas as pd
     import pyarrow as pa
 
 
-class Backend(BaseBackend):
+class Backend(BaseBackend, NoUrl):
     name = "polars"
-    builder = None
-
-    _sqlglot_dialect = "postgres"
+    dialect = Polars
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
@@ -36,7 +40,7 @@ class Backend(BaseBackend):
         self._context = pl.SQLContext()
 
     def do_connect(
-        self, tables: MutableMapping[str, pl.LazyFrame | pl.DataFrame] | None = None
+        self, tables: Mapping[str, pl.LazyFrame | pl.DataFrame] | None = None
     ) -> None:
         """Construct a client from a dictionary of polars `LazyFrame`s and/or `DataFrame`s.
 
@@ -44,9 +48,19 @@ class Backend(BaseBackend):
         ----------
         tables
             An optional mapping of string table names to polars LazyFrames.
+
         """
+        if tables is not None and not isinstance(tables, Mapping):
+            raise TypeError("Input to ibis.polars.connect must be a mapping")
+
+        # tables are emphemeral
+        self._tables.clear()
+
         for name, table in (tables or {}).items():
             self._add_table(name, table)
+
+    def disconnect(self) -> None:
+        pass
 
     @property
     def version(self) -> str:
@@ -86,6 +100,7 @@ class Backend(BaseBackend):
         -------
         ir.Table
             The just-registered table
+
         """
 
         if isinstance(source, (str, Path)):
@@ -162,6 +177,7 @@ class Backend(BaseBackend):
         -------
         ir.Table
             The just-registered table
+
         """
         path = normalize_filename(path)
         table_name = table_name or gen_name("read_csv")
@@ -193,6 +209,7 @@ class Backend(BaseBackend):
         -------
         ir.Table
             The just-registered table
+
         """
         path = normalize_filename(path)
         table_name = table_name or gen_name("read_json")
@@ -224,6 +241,7 @@ class Backend(BaseBackend):
         -------
         ir.Table
             The just-registered table
+
         """
         try:
             import deltalake  # noqa: F401
@@ -259,6 +277,7 @@ class Backend(BaseBackend):
         -------
         ir.Table
             The just-registered table
+
         """
         table_name = table_name or gen_name("read_in_memory")
         self._add_table(table_name, pl.from_pandas(source, **kwargs).lazy())
@@ -290,6 +309,7 @@ class Backend(BaseBackend):
         -------
         ir.Table
             The just-registered table
+
         """
         table_name = table_name or gen_name("read_parquet")
         if not isinstance(path, (str, Path)) and len(path) == 1:
@@ -336,10 +356,10 @@ class Backend(BaseBackend):
                 "effect: Polars cannot set a database."
             )
 
-        if temp is not None:
+        if temp is False:
             raise com.IbisError(
-                "Passing `temp=True` to the Polars backend create_table method has no "
-                "effect: all tables are in memory and temporary. "
+                "Passing `temp=False` to the Polars backend create_table method is not "
+                "supported: all tables are in memory and temporary."
             )
 
         if not overwrite and name in self._tables:
@@ -362,37 +382,38 @@ class Backend(BaseBackend):
     @classmethod
     @lru_cache
     def _get_operations(cls):
-        return frozenset(op for op in translate.registry if issubclass(op, ops.Value))
+        return tuple(op for op in translate.registry if issubclass(op, ops.Value))
 
     @classmethod
     def has_operation(cls, operation: type[ops.Value]) -> bool:
         # Polars doesn't support geospatial ops, but the dispatcher implements
         # a common base class that makes it appear that it does. Explicitly
         # exclude these operations.
-        if issubclass(operation, (ops.GeoSpatialUnOp, ops.GeoSpatialBinOp)):
+        if issubclass(
+            operation, (ops.GeoSpatialUnOp, ops.GeoSpatialBinOp, ops.GeoUnaryUnion)
+        ):
             return False
         op_classes = cls._get_operations()
-        return operation in op_classes or any(
-            issubclass(operation, op_impl) for op_impl in op_classes
-        )
+        return operation in op_classes or issubclass(operation, op_classes)
 
     def compile(
         self, expr: ir.Expr, params: Mapping[ir.Expr, object] | None = None, **_: Any
     ):
-        node = expr.op()
-        ctx = self._context
-
-        if params:
+        if params is None:
+            params = dict()
+        else:
             params = {param.op(): value for param, value in params.items()}
-            rule = Replace(
-                ops.ScalarParameter,
-                lambda _: ops.Literal(value=params[_], dtype=_.dtype),
-            )
-            node = node.replace(rule)
-            expr = node.to_expr()
 
         node = expr.as_table().op()
-        return translate(node, ctx=ctx)
+        node = node.replace(
+            rewrite_join | replace_parameter | bind_unbound_table,
+            context={"params": params, "backend": self},
+        )
+
+        return translate(node, ctx=self._context)
+
+    def _get_sql_string_view_schema(self, name, table, query) -> sch.Schema:
+        raise NotImplementedError("table.sql() not yet supported in polars")
 
     def _get_schema_using_query(self, query: str) -> sch.Schema:
         return schema_from_polars(self._context.execute(query).schema)

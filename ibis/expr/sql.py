@@ -125,18 +125,23 @@ def convert_join(join, catalog):
 
     left_name = join.name
     left_table = catalog[left_name]
+
     for right_name, desc in join.joins.items():
         right_table = catalog[right_name]
         join_kind = _join_types[desc["side"]]
 
-        predicate = None
-        for left_key, right_key in zip(desc["source_key"], desc["join_key"]):
-            left_key = convert(left_key, catalog=catalog)
-            right_key = convert(right_key, catalog=catalog)
-            if predicate is None:
-                predicate = left_key == right_key
-            else:
-                predicate &= left_key == right_key
+        if desc["join_key"]:
+            predicate = None
+            for left_key, right_key in zip(desc["source_key"], desc["join_key"]):
+                left_key = convert(left_key, catalog=catalog)
+                right_key = convert(right_key, catalog=catalog)
+                if predicate is None:
+                    predicate = left_key == right_key
+                else:
+                    predicate &= left_key == right_key
+        else:
+            condition = desc["condition"]
+            predicate = convert(condition, catalog=catalog)
 
         left_table = left_table.join(right_table, predicates=predicate, how=join_kind)
 
@@ -177,6 +182,11 @@ def convert_literal(literal, catalog):
     elif literal.is_number:
         value = float(value)
     return ibis.literal(value)
+
+
+@convert.register(sge.Boolean)
+def convert_boolean(boolean, catalog):
+    return ibis.literal(boolean.this)
 
 
 @convert.register(sge.Alias)
@@ -284,6 +294,7 @@ def parse_sql(sqlstring, catalog, dialect=None):
     Returns
     -------
     expr : ir.Expr
+
     """
     catalog = Catalog(
         {name: ibis.table(schema, name=name) for name, schema in catalog.items()}
@@ -345,6 +356,7 @@ def to_sql(expr: ir.Expr, dialect: str | None = None, **kwargs) -> SQLString:
     -------
     str
         Formatted SQL string
+
     """
     # try to infer from a non-str expression or if not possible fallback to
     # the default pretty dialect for expressions
@@ -352,21 +364,21 @@ def to_sql(expr: ir.Expr, dialect: str | None = None, **kwargs) -> SQLString:
         try:
             backend = expr._find_backend()
         except com.IbisError:
-            # default to duckdb for sqlalchemy compilation because it supports
-            # the widest array of ibis features for SQL backends
+            # default to duckdb for SQL compilation because it supports the
+            # widest array of ibis features for SQL backends
             backend = ibis.duckdb
             read = "duckdb"
             write = ibis.options.sql.default_dialect
         else:
-            read = write = getattr(backend, "_sqlglot_dialect", backend.name)
+            read = write = backend.dialect
     else:
         try:
             backend = getattr(ibis, dialect)
         except AttributeError:
             raise ValueError(f"Unknown dialect {dialect}")
         else:
-            read = write = getattr(backend, "_sqlglot_dialect", dialect)
+            read = write = getattr(backend, "dialect", dialect)
 
-    sql = backend._to_sql(expr, **kwargs)
+    sql = backend._to_sql(expr.unbind(), **kwargs)
     (pretty,) = sg.transpile(sql, read=read, write=write, pretty=True)
     return SQLString(pretty)

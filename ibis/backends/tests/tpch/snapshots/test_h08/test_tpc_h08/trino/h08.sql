@@ -1,64 +1,130 @@
-WITH t0 AS (
+WITH "t8" AS (
   SELECT
-    CAST(EXTRACT(year FROM t7.o_orderdate) AS SMALLINT) AS o_year,
-    t5.l_extendedprice * (
-      1 - t5.l_discount
-    ) AS volume,
-    t11.n_name AS nation,
-    t10.r_name AS r_name,
-    t7.o_orderdate AS o_orderdate,
-    t4.p_type AS p_type
-  FROM hive.ibis_sf1.part AS t4
-  JOIN hive.ibis_sf1.lineitem AS t5
-    ON t4.p_partkey = t5.l_partkey
-  JOIN hive.ibis_sf1.supplier AS t6
-    ON t6.s_suppkey = t5.l_suppkey
-  JOIN hive.ibis_sf1.orders AS t7
-    ON t5.l_orderkey = t7.o_orderkey
-  JOIN hive.ibis_sf1.customer AS t8
-    ON t7.o_custkey = t8.c_custkey
-  JOIN hive.ibis_sf1.nation AS t9
-    ON t8.c_nationkey = t9.n_nationkey
-  JOIN hive.ibis_sf1.region AS t10
-    ON t9.n_regionkey = t10.r_regionkey
-  JOIN hive.ibis_sf1.nation AS t11
-    ON t6.s_nationkey = t11.n_nationkey
-), t1 AS (
-  SELECT
-    t0.o_year AS o_year,
-    t0.volume AS volume,
-    t0.nation AS nation,
-    t0.r_name AS r_name,
-    t0.o_orderdate AS o_orderdate,
-    t0.p_type AS p_type
-  FROM t0
-  WHERE
-    t0.r_name = 'AMERICA'
-    AND t0.o_orderdate BETWEEN FROM_ISO8601_DATE('1995-01-01') AND FROM_ISO8601_DATE('1996-12-31')
-    AND t0.p_type = 'ECONOMY ANODIZED STEEL'
-), t2 AS (
-  SELECT
-    t1.o_year AS o_year,
-    t1.volume AS volume,
-    t1.nation AS nation,
-    t1.r_name AS r_name,
-    t1.o_orderdate AS o_orderdate,
-    t1.p_type AS p_type,
-    CASE WHEN (
-      t1.nation = 'BRAZIL'
-    ) THEN t1.volume ELSE 0 END AS nation_volume
-  FROM t1
+    "t6"."n_nationkey",
+    "t6"."n_name",
+    "t6"."n_regionkey",
+    "t6"."n_comment"
+  FROM "hive"."ibis_sf1"."nation" AS "t6"
 )
 SELECT
-  t3.o_year,
-  t3.mkt_share
+  "t26"."o_year",
+  "t26"."mkt_share"
 FROM (
   SELECT
-    t2.o_year AS o_year,
-    SUM(t2.nation_volume) / SUM(t2.volume) AS mkt_share
-  FROM t2
+    "t25"."o_year",
+    CAST(SUM("t25"."nation_volume") AS DOUBLE) / SUM("t25"."volume") AS "mkt_share"
+  FROM (
+    SELECT
+      "t24"."o_year",
+      "t24"."volume",
+      "t24"."nation",
+      "t24"."r_name",
+      "t24"."o_orderdate",
+      "t24"."p_type",
+      CASE WHEN "t24"."nation" = 'BRAZIL' THEN "t24"."volume" ELSE 0 END AS "nation_volume"
+    FROM (
+      SELECT
+        EXTRACT(year FROM "t19"."o_orderdate") AS "o_year",
+        "t17"."l_extendedprice" * (
+          1 - "t17"."l_discount"
+        ) AS "volume",
+        "t23"."n_name" AS "nation",
+        "t14"."r_name",
+        "t19"."o_orderdate",
+        "t16"."p_type"
+      FROM (
+        SELECT
+          "t0"."p_partkey",
+          "t0"."p_name",
+          "t0"."p_mfgr",
+          "t0"."p_brand",
+          "t0"."p_type",
+          "t0"."p_size",
+          "t0"."p_container",
+          CAST("t0"."p_retailprice" AS DECIMAL(15, 2)) AS "p_retailprice",
+          "t0"."p_comment"
+        FROM "hive"."ibis_sf1"."part" AS "t0"
+      ) AS "t16"
+      INNER JOIN (
+        SELECT
+          "t1"."l_orderkey",
+          "t1"."l_partkey",
+          "t1"."l_suppkey",
+          "t1"."l_linenumber",
+          CAST("t1"."l_quantity" AS DECIMAL(15, 2)) AS "l_quantity",
+          CAST("t1"."l_extendedprice" AS DECIMAL(15, 2)) AS "l_extendedprice",
+          CAST("t1"."l_discount" AS DECIMAL(15, 2)) AS "l_discount",
+          CAST("t1"."l_tax" AS DECIMAL(15, 2)) AS "l_tax",
+          "t1"."l_returnflag",
+          "t1"."l_linestatus",
+          "t1"."l_shipdate",
+          "t1"."l_commitdate",
+          "t1"."l_receiptdate",
+          "t1"."l_shipinstruct",
+          "t1"."l_shipmode",
+          "t1"."l_comment"
+        FROM "hive"."ibis_sf1"."lineitem" AS "t1"
+      ) AS "t17"
+        ON "t16"."p_partkey" = "t17"."l_partkey"
+      INNER JOIN (
+        SELECT
+          "t2"."s_suppkey",
+          "t2"."s_name",
+          "t2"."s_address",
+          "t2"."s_nationkey",
+          "t2"."s_phone",
+          CAST("t2"."s_acctbal" AS DECIMAL(15, 2)) AS "s_acctbal",
+          "t2"."s_comment"
+        FROM "hive"."ibis_sf1"."supplier" AS "t2"
+      ) AS "t18"
+        ON "t18"."s_suppkey" = "t17"."l_suppkey"
+      INNER JOIN (
+        SELECT
+          "t3"."o_orderkey",
+          "t3"."o_custkey",
+          "t3"."o_orderstatus",
+          CAST("t3"."o_totalprice" AS DECIMAL(15, 2)) AS "o_totalprice",
+          "t3"."o_orderdate",
+          "t3"."o_orderpriority",
+          "t3"."o_clerk",
+          "t3"."o_shippriority",
+          "t3"."o_comment"
+        FROM "hive"."ibis_sf1"."orders" AS "t3"
+      ) AS "t19"
+        ON "t17"."l_orderkey" = "t19"."o_orderkey"
+      INNER JOIN (
+        SELECT
+          "t4"."c_custkey",
+          "t4"."c_name",
+          "t4"."c_address",
+          "t4"."c_nationkey",
+          "t4"."c_phone",
+          CAST("t4"."c_acctbal" AS DECIMAL(15, 2)) AS "c_acctbal",
+          "t4"."c_mktsegment",
+          "t4"."c_comment"
+        FROM "hive"."ibis_sf1"."customer" AS "t4"
+      ) AS "t20"
+        ON "t19"."o_custkey" = "t20"."c_custkey"
+      INNER JOIN "t8" AS "t21"
+        ON "t20"."c_nationkey" = "t21"."n_nationkey"
+      INNER JOIN (
+        SELECT
+          "t5"."r_regionkey",
+          "t5"."r_name",
+          "t5"."r_comment"
+        FROM "hive"."ibis_sf1"."region" AS "t5"
+      ) AS "t14"
+        ON "t21"."n_regionkey" = "t14"."r_regionkey"
+      INNER JOIN "t8" AS "t23"
+        ON "t18"."s_nationkey" = "t23"."n_nationkey"
+    ) AS "t24"
+    WHERE
+      "t24"."r_name" = 'AMERICA'
+      AND "t24"."o_orderdate" BETWEEN FROM_ISO8601_DATE('1995-01-01') AND FROM_ISO8601_DATE('1996-12-31')
+      AND "t24"."p_type" = 'ECONOMY ANODIZED STEEL'
+  ) AS "t25"
   GROUP BY
     1
-) AS t3
+) AS "t26"
 ORDER BY
-  t3.o_year ASC
+  "t26"."o_year" ASC

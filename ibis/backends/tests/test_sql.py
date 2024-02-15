@@ -8,10 +8,7 @@ import ibis.common.exceptions as exc
 from ibis import _
 from ibis.backends.conftest import _get_backends_to_test
 
-sa = pytest.importorskip("sqlalchemy")
 sg = pytest.importorskip("sqlglot")
-
-pytestmark = pytest.mark.notimpl(["druid", "flink", "exasol", "risingwave"])
 
 simple_literal = param(ibis.literal(1), id="simple_literal")
 array_literal = param(
@@ -19,19 +16,19 @@ array_literal = param(
     marks=[
         pytest.mark.never(
             ["mysql", "mssql", "oracle", "impala", "sqlite"],
-            raises=exc.OperationNotDefinedError,
+            raises=(exc.OperationNotDefinedError, exc.UnsupportedBackendType),
             reason="arrays not supported in the backend",
         ),
     ],
     id="array_literal",
 )
 no_structs = pytest.mark.never(
-    ["impala", "mysql", "sqlite", "mssql"],
-    raises=(NotImplementedError, sa.exc.CompileError),
+    ["impala", "mysql", "sqlite", "mssql", "exasol"],
+    raises=(NotImplementedError, exc.UnsupportedBackendType),
     reason="structs not supported in the backend",
 )
 no_struct_literals = pytest.mark.notimpl(
-    ["postgres", "mssql", "oracle"], reason="struct literals are not yet implemented"
+    ["mssql"], reason="struct literals are not yet implemented"
 )
 not_sql = pytest.mark.never(
     ["pandas", "dask"],
@@ -39,8 +36,7 @@ not_sql = pytest.mark.never(
     reason="Not a SQL backend",
 )
 no_sql_extraction = pytest.mark.notimpl(
-    ["datafusion", "pyspark", "polars"],
-    reason="Not clear how to extract SQL from the backend",
+    ["polars"], reason="Not clear how to extract SQL from the backend"
 )
 
 
@@ -62,12 +58,7 @@ def test_literal(backend, expr):
     assert ibis.to_sql(expr, dialect=backend.name())
 
 
-@pytest.mark.never(
-    ["pandas", "dask", "datafusion", "polars", "pyspark"], reason="not SQL"
-)
-@pytest.mark.xfail_version(
-    mssql=["sqlalchemy>=2"], reason="sqlalchemy 2 prefixes literals with `N`"
-)
+@pytest.mark.never(["pandas", "dask", "polars"], reason="not SQL")
 def test_group_by_has_index(backend, snapshot):
     countries = ibis.table(
         dict(continent="string", population="int64"), name="countries"
@@ -90,9 +81,7 @@ def test_group_by_has_index(backend, snapshot):
     snapshot.assert_match(sql, "out.sql")
 
 
-@pytest.mark.never(
-    ["pandas", "dask", "datafusion", "polars", "pyspark"], reason="not SQL"
-)
+@pytest.mark.never(["pandas", "dask", "polars"], reason="not SQL")
 def test_cte_refs_in_topo_order(backend, snapshot):
     mr0 = ibis.table(schema=ibis.schema(dict(key="int")), name="leaf")
 
@@ -105,9 +94,7 @@ def test_cte_refs_in_topo_order(backend, snapshot):
     snapshot.assert_match(sql, "out.sql")
 
 
-@pytest.mark.never(
-    ["pandas", "dask", "datafusion", "polars", "pyspark"], reason="not SQL"
-)
+@pytest.mark.never(["pandas", "dask", "polars"], reason="not SQL")
 def test_isin_bug(con, snapshot):
     t = ibis.table(dict(x="int"), name="t")
     good = t[t.x > 2].x
@@ -116,9 +103,14 @@ def test_isin_bug(con, snapshot):
 
 
 @pytest.mark.never(
-    ["pandas", "dask", "datafusion", "polars", "pyspark"],
+    ["pandas", "dask", "polars"],
     reason="not SQL",
     raises=NotImplementedError,
+)
+@pytest.mark.notyet(
+    ["datafusion", "exasol"],
+    reason="no unnest support",
+    raises=exc.OperationNotDefinedError,
 )
 @pytest.mark.notyet(
     ["sqlite", "mysql", "druid", "impala", "mssql"], reason="no unnest support upstream"
@@ -179,3 +171,14 @@ def test_union_aliasing(backend_name, snapshot):
     result = top_ten.union(bottom_ten)
 
     snapshot.assert_match(str(ibis.to_sql(result, dialect=backend_name)), "out.sql")
+
+
+def test_union_generates_predictable_aliases(con):
+    t = ibis.memtable(
+        data=[{"island": "Torgerson", "body_mass_g": 3750, "sex": "male"}]
+    )
+    sub1 = t.inner_join(t.view(), "island").mutate(island_right=lambda t: t.island)
+    sub2 = t.inner_join(t.view(), "sex").mutate(sex_right=lambda t: t.sex)
+    expr = ibis.union(sub1, sub2)
+    df = con.execute(expr)
+    assert len(df) == 2

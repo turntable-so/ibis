@@ -85,7 +85,7 @@ class Expr(Immutable, Coercible):
             except TranslationError as e:
                 lines = [
                     "Translation to backend failed",
-                    f"Error message: {e.args[0]}",
+                    f"Error message: {e!r}",
                     "Expression repr follows:",
                     self._repr(),
                 ]
@@ -137,7 +137,7 @@ class Expr(Immutable, Coercible):
 
     def has_name(self):
         """Check whether this expression has an explicit name."""
-        return isinstance(self._arg, ops.Named)
+        return hasattr(self._arg, "name")
 
     def get_name(self):
         """Return the name of this expression."""
@@ -245,9 +245,10 @@ class Expr(Immutable, Coercible):
         list[BaseBackend]
             A list of the backends found.
         """
+
         backends = set()
         has_unbound = False
-        node_types = (ops.DatabaseTable, ops.SQLQueryResult, ops.UnboundTable)
+        node_types = (ops.UnboundTable, ops.DatabaseTable, ops.SQLQueryResult)
         for table in self.op().find(node_types):
             if isinstance(table, ops.UnboundTable):
                 has_unbound = True
@@ -615,12 +616,22 @@ class Expr(Immutable, Coercible):
         from ibis.common.deferred import _
         from ibis.expr.analysis import c, p
 
-        rule = p.DatabaseTable >> c.UnboundTable(name=_.name, schema=_.schema)
+        rule = p.DatabaseTable >> c.UnboundTable(
+            name=_.name, schema=_.schema, namespace=_.namespace
+        )
         return self.op().replace(rule).to_expr()
 
     def as_table(self) -> ir.Table:
         """Convert an expression to a table."""
-        raise NotImplementedError(type(self))
+        raise NotImplementedError(
+            f"{type(self)} expressions cannot be converted into tables"
+        )
+
+    def as_scalar(self) -> ir.Scalar:
+        """Convert an expression to a scalar."""
+        raise NotImplementedError(
+            f"{type(self)} expression cannot be converted into scalars"
+        )
 
 
 def _binop(op_class: type[ops.Binary], left: ir.Value, right: ir.Value) -> ir.Value:

@@ -3,7 +3,6 @@ from __future__ import annotations
 import contextlib
 
 import pytest
-import sqlalchemy.exc
 
 import ibis
 import ibis.common.exceptions as com
@@ -14,27 +13,22 @@ BINARY_BACKEND_TYPES = {
     "duckdb": "BLOB",
     "snowflake": "BINARY",
     "sqlite": "blob",
-    "trino": "STRING",
+    "trino": "varbinary",
     "postgres": "bytea",
     "risingwave": "bytea",
     "flink": "BINARY(1) NOT NULL",
 }
 
 
-@pytest.mark.broken(
-    ["trino"],
-    "(builtins.AttributeError) 'bytes' object has no attribute 'encode'",
-    raises=sqlalchemy.exc.StatementError,
-)
-@pytest.mark.broken(
-    ["clickhouse", "impala"],
+@pytest.mark.notimpl(
+    ["clickhouse", "impala", "druid", "oracle"],
     "Unsupported type: Binary(nullable=True)",
     raises=NotImplementedError,
 )
 @pytest.mark.notimpl(
     ["exasol"],
     "Exasol does not have native support for a binary data type.",
-    raises=sqlalchemy.exc.StatementError,
+    raises=NotImplementedError,
 )
 def test_binary_literal(con, backend):
     expr = ibis.literal(b"A")

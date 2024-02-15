@@ -10,7 +10,6 @@ import string
 import numpy as np
 import pandas as pd
 import pytest
-import sqlalchemy as sa
 from packaging.version import parse as vparse
 
 import ibis
@@ -18,7 +17,6 @@ import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
 import ibis.expr.types as ir
 from ibis.backends.base import _get_backend_names
-from ibis.backends.pandas.udf import udf
 
 pytestmark = pytest.mark.benchmark
 
@@ -155,11 +153,9 @@ def test_builtins(benchmark, expr_fn, builtin, t, base, large_expr):
     benchmark(builtin, expr)
 
 
-_backends = set(_get_backend_names())
-# compile is a no-op
-_backends.remove("pandas")
+_backends = _get_backend_names(exclude=("pandas",))
 
-_XFAIL_COMPILE_BACKENDS = {"dask", "pyspark", "polars", "risingwave"}
+_XFAIL_COMPILE_BACKENDS = ("dask", "polars")
 
 
 @pytest.mark.benchmark(group="compilation")
@@ -193,7 +189,7 @@ def test_compile(benchmark, module, expr_fn, t, base, large_expr):
         expr = expr_fn(t, base, large_expr)
         try:
             benchmark(mod.compile, expr)
-        except (sa.exc.NoSuchModuleError, ImportError) as e:  # delayed imports
+        except ImportError as e:  # delayed imports
             pytest.skip(str(e))
 
 
@@ -217,7 +213,8 @@ def pt():
         }
     )
 
-    return ibis.pandas.connect(dict(df=data)).table("df")
+    con = ibis.duckdb.connect()
+    return con.create_table("df", data)
 
 
 def high_card_group_by(t):
@@ -280,51 +277,12 @@ def high_card_grouped_rolling(t):
     return t.value.mean().over(high_card_rolling_window(t))
 
 
-@udf.reduction(["double"], "double")
-def my_mean(series):
-    return series.mean()
-
-
-def low_card_grouped_rolling_udf_mean(t):
-    return my_mean(t.value).over(low_card_rolling_window(t))
-
-
-def high_card_grouped_rolling_udf_mean(t):
-    return my_mean(t.value).over(high_card_rolling_window(t))
-
-
-@udf.analytic(["double"], "double")
-def my_zscore(series):
-    return (series - series.mean()) / series.std()
-
-
 def low_card_window(t):
     return ibis.window(group_by=t.low_card_key)
 
 
 def high_card_window(t):
     return ibis.window(group_by=t.key)
-
-
-def low_card_window_analytics_udf(t):
-    return my_zscore(t.value).over(low_card_window(t))
-
-
-def high_card_window_analytics_udf(t):
-    return my_zscore(t.value).over(high_card_window(t))
-
-
-@udf.reduction(["double", "double"], "double")
-def my_wm(v, w):
-    return np.average(v, weights=w)
-
-
-def low_card_grouped_rolling_udf_wm(t):
-    return my_wm(t.value, t.value).over(low_card_rolling_window(t))
-
-
-def high_card_grouped_rolling_udf_wm(t):
-    return my_wm(t.value, t.value).over(low_card_rolling_window(t))
 
 
 broken_pandas_grouped_rolling = pytest.mark.xfail(
@@ -354,30 +312,6 @@ broken_pandas_grouped_rolling = pytest.mark.xfail(
         pytest.param(
             high_card_grouped_rolling,
             id="high_card_grouped_rolling",
-            marks=[broken_pandas_grouped_rolling],
-        ),
-        pytest.param(
-            low_card_grouped_rolling_udf_mean,
-            id="low_card_grouped_rolling_udf_mean",
-            marks=[broken_pandas_grouped_rolling],
-        ),
-        pytest.param(
-            high_card_grouped_rolling_udf_mean,
-            id="high_card_grouped_rolling_udf_mean",
-            marks=[broken_pandas_grouped_rolling],
-        ),
-        pytest.param(low_card_window_analytics_udf, id="low_card_window_analytics_udf"),
-        pytest.param(
-            high_card_window_analytics_udf, id="high_card_window_analytics_udf"
-        ),
-        pytest.param(
-            low_card_grouped_rolling_udf_wm,
-            id="low_card_grouped_rolling_udf_wm",
-            marks=[broken_pandas_grouped_rolling],
-        ),
-        pytest.param(
-            high_card_grouped_rolling_udf_wm,
-            id="high_card_grouped_rolling_udf_wm",
             marks=[broken_pandas_grouped_rolling],
         ),
     ],
@@ -695,10 +629,7 @@ def test_compile_with_drops(
     except (AttributeError, ImportError) as e:
         pytest.skip(str(e))
     else:
-        try:
-            benchmark(mod.compile, expr)
-        except sa.exc.NoSuchModuleError as e:
-            pytest.skip(str(e))
+        benchmark(mod.compile, expr)
 
 
 def test_repr_join(benchmark, customers, orders, orders_items, products):
@@ -715,7 +646,6 @@ def test_repr_join(benchmark, customers, orders, orders_items, products):
 @pytest.mark.parametrize("overwrite", [True, False], ids=["overwrite", "no_overwrite"])
 def test_insert_duckdb(benchmark, overwrite, tmp_path):
     pytest.importorskip("duckdb")
-    pytest.importorskip("duckdb_engine")
 
     n_rows = int(1e4)
     table_name = "t"
@@ -729,7 +659,6 @@ def test_insert_duckdb(benchmark, overwrite, tmp_path):
 
 def test_snowflake_medium_sized_to_pandas(benchmark):
     pytest.importorskip("snowflake.connector")
-    pytest.importorskip("snowflake.sqlalchemy")
 
     if (url := os.environ.get("SNOWFLAKE_URL")) is None:
         pytest.skip("SNOWFLAKE_URL environment variable not set")
@@ -747,10 +676,10 @@ def test_snowflake_medium_sized_to_pandas(benchmark):
 
 
 def test_parse_many_duckdb_types(benchmark):
-    parse = pytest.importorskip("ibis.backends.duckdb.datatypes").DuckDBType.from_string
+    from ibis.backends.base.sqlglot.datatypes import DuckDBType
 
     def parse_many(types):
-        list(map(parse, types))
+        list(map(DuckDBType.from_string, types))
 
     types = ["VARCHAR", "INTEGER", "DOUBLE", "BIGINT"] * 1000
     benchmark(parse_many, types)
@@ -804,7 +733,6 @@ def test_duckdb_to_pyarrow(benchmark, sql, ddb) -> None:
 
 def test_ibis_duckdb_to_pyarrow(benchmark, sql, ddb) -> None:
     pytest.importorskip("duckdb")
-    pytest.importorskip("duckdb_engine")
 
     con = ibis.duckdb.connect(ddb, read_only=True)
 
@@ -847,7 +775,7 @@ def srcs():
 
 @pytest.fixture
 def nrels():
-    return 300
+    return 225
 
 
 def make_big_union(t, nrels):
@@ -874,7 +802,6 @@ def test_big_join_expr(benchmark, src, diff):
 
 def test_big_join_execute(benchmark, nrels):
     pytest.importorskip("duckdb")
-    pytest.importorskip("duckdb_engine")
 
     con = ibis.duckdb.connect()
 

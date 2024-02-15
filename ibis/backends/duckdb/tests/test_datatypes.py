@@ -1,17 +1,13 @@
 from __future__ import annotations
 
-import duckdb_engine
 import numpy as np
 import pytest
-import sqlalchemy as sa
-from packaging.version import parse as vparse
 from pytest import param
 
 import ibis
-import ibis.backends.base.sql.alchemy.datatypes as sat
 import ibis.common.exceptions as exc
 import ibis.expr.datatypes as dt
-from ibis.backends.duckdb.datatypes import DuckDBType
+from ibis.backends.base.sqlglot.datatypes import DuckDBType
 
 
 @pytest.mark.parametrize(
@@ -93,20 +89,6 @@ def test_parse_quoted_struct_field():
     )
 
 
-def test_generate_quoted_struct():
-    typ = sat.StructType(
-        {"in come": sa.VARCHAR(), "my count": sa.BIGINT(), "thing": sa.INTEGER()}
-    )
-    result = typ.compile(dialect=duckdb_engine.Dialect())
-    expected = 'STRUCT("in come" VARCHAR, "my count" BIGINT, thing INTEGER)'
-    assert result == expected
-
-
-@pytest.mark.xfail(
-    condition=vparse(duckdb_engine.__version__) < vparse("0.9.2"),
-    raises=AssertionError,
-    reason="mapping from UINTEGER query metadata fixed in 0.9.2",
-)
 def test_read_uint8_from_parquet(tmp_path):
     con = ibis.duckdb.connect()
 

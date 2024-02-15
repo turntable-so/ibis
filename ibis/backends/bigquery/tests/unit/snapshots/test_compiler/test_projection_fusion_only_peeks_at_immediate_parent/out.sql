@@ -1,28 +1,19 @@
-WITH t0 AS (
+WITH `t1` AS (
   SELECT
-    t5.*
-  FROM unbound_table AS t5
+    CAST(`t0`.`file_date` AS DATE) AS `file_date`,
+    `t0`.`PARTITIONTIME`,
+    `t0`.`val`,
+    `t0`.`val` * 2 AS `XYZ`
+  FROM `unbound_table` AS `t0`
   WHERE
-    t5.`PARTITIONTIME` < CAST('2017-01-01' AS DATE)
-), t1 AS (
-  SELECT
-    CAST(t0.`file_date` AS DATE) AS `file_date`,
-    t0.`PARTITIONTIME`,
-    t0.`val`
-  FROM t0
-), t2 AS (
-  SELECT
-    t1.*
-  FROM t1
-  WHERE
-    t1.`file_date` < CAST('2017-01-01' AS DATE)
-), t3 AS (
-  SELECT
-    t2.*,
-    t2.`val` * 2 AS `XYZ`
-  FROM t2
+    `t0`.`PARTITIONTIME` < DATE(2017, 1, 1)
+    AND CAST(`t0`.`file_date` AS DATE) < DATE(2017, 1, 1)
 )
 SELECT
-  t3.*
-FROM t3
-INNER JOIN t3 AS t4
+  `t3`.`file_date`,
+  `t3`.`PARTITIONTIME`,
+  `t3`.`val`,
+  `t3`.`XYZ`
+FROM `t1` AS `t3`
+INNER JOIN `t1` AS `t5`
+  ON TRUE

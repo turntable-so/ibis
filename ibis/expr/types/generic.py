@@ -7,10 +7,12 @@ from public import public
 
 import ibis
 import ibis.common.exceptions as com
+import ibis.expr.builders as bl
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
-from ibis.common.deferred import Deferred
+from ibis.common.deferred import Deferred, _, deferrable
 from ibis.common.grounds import Singleton
+from ibis.expr.rewrites import rewrite_window_input
 from ibis.expr.types.core import Expr, _binop, _FixedTextJupyterMixin
 from ibis.util import deprecated
 
@@ -18,7 +20,6 @@ if TYPE_CHECKING:
     import pandas as pd
     import pyarrow as pa
 
-    import ibis.expr.builders as bl
     import ibis.expr.types as ir
     from ibis.formats.pyarrow import PyArrowData
 
@@ -542,36 +543,36 @@ class Value(Expr):
         Check against a derived expression
 
         >>> t.a.isin(t.b + 1)
-        ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ InColumn(a, Add(b, 1)) ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━━━┩
-        │ boolean                │
-        ├────────────────────────┤
-        │ False                  │
-        │ False                  │
-        │ True                   │
-        └────────────────────────┘
+        ┏━━━━━━━━━━━━━━━┓
+        ┃ InSubquery(a) ┃
+        ┡━━━━━━━━━━━━━━━┩
+        │ boolean       │
+        ├───────────────┤
+        │ False         │
+        │ False         │
+        │ True          │
+        └───────────────┘
 
         Check against a column from a different table
 
         >>> t2 = ibis.memtable({"x": [99, 2, 99]})
         >>> t.a.isin(t2.x)
-        ┏━━━━━━━━━━━━━━━━┓
-        ┃ InColumn(a, x) ┃
-        ┡━━━━━━━━━━━━━━━━┩
-        │ boolean        │
-        ├────────────────┤
-        │ False          │
-        │ True           │
-        │ False          │
-        └────────────────┘
+        ┏━━━━━━━━━━━━━━━┓
+        ┃ InSubquery(a) ┃
+        ┡━━━━━━━━━━━━━━━┩
+        │ boolean       │
+        ├───────────────┤
+        │ False         │
+        │ True          │
+        │ False         │
+        └───────────────┘
         """
         from ibis.expr.types import ArrayValue
 
         if isinstance(values, ArrayValue):
             return ops.ArrayContains(values, self).to_expr()
         elif isinstance(values, Column):
-            return ops.InColumn(self, values).to_expr()
+            return ops.InSubquery(values.as_table(), needle=self).to_expr()
         else:
             return ops.InValues(self, values).to_expr()
 
@@ -721,11 +722,7 @@ class Value(Expr):
             A window function expression
 
         """
-        import ibis.expr.analysis as an
-        import ibis.expr.builders as bl
-        from ibis import _
-        from ibis.common.deferred import Call
-
+        node = self.op()
         if window is None:
             window = ibis.window(
                 rows=rows,
@@ -733,23 +730,30 @@ class Value(Expr):
                 group_by=group_by,
                 order_by=order_by,
             )
+        elif not isinstance(window, bl.WindowBuilder):
+            raise com.IbisTypeError("Unexpected window type: {window!r}")
 
+        if len(node.relations) == 0:
+            table = None
+        elif len(node.relations) == 1:
+            (table,) = node.relations
+        else:
+            raise com.RelationError("Cannot use window with multiple tables")
+
+        @deferrable
         def bind(table):
             frame = window.bind(table)
-            expr = an.windowize_function(self, frame)
-            if expr.equals(self):
+            winfunc = rewrite_window_input(node, frame)
+            if winfunc == node:
                 raise com.IbisTypeError(
                     "No reduction or analytic function found to construct a window expression"
                 )
-            return expr
+            return winfunc.to_expr()
 
-        if isinstance(window, bl.WindowBuilder):
-            if table := an.find_first_base_table(self.op()):
-                return bind(table)
-            else:
-                return Deferred(Call(bind, _))
-        else:
-            raise com.IbisTypeError("Unexpected window type: {window!r}")
+        try:
+            return bind(table)
+        except com.IbisInputError:
+            return bind(_)
 
     def isnull(self) -> ir.BooleanValue:
         """Return whether this expression is NULL.
@@ -1116,9 +1120,13 @@ class Value(Expr):
         return super().__hash__()
 
     def __eq__(self, other: Value) -> ir.BooleanValue:
+        if other is None:
+            return _binop(ops.IdenticalTo, self, other)
         return _binop(ops.Equals, self, other)
 
     def __ne__(self, other: Value) -> ir.BooleanValue:
+        if other is None:
+            return ~self.__eq__(other)
         return _binop(ops.NotEquals, self, other)
 
     def __ge__(self, other: Value) -> ir.BooleanValue:
@@ -1140,39 +1148,6 @@ class Value(Expr):
     def desc(self) -> ir.Value:
         """Sort an expression descending."""
         return ops.SortKey(self, ascending=False).to_expr()
-
-    def as_table(self) -> ir.Table:
-        """Promote the expression to a [Table](./expression-tables.qmd#ibis.expr.types.Table).
-
-        Returns
-        -------
-        Table
-            A table expression
-
-        Examples
-        --------
-        >>> import ibis
-        >>> t = ibis.table(dict(a="str"), name="t")
-        >>> expr = t.a.length().name("len").as_table()
-        >>> expected = t.select(len=t.a.length())
-        >>> expr.equals(expected)
-        True
-        """
-        from ibis.expr.analysis import find_immediate_parent_tables
-
-        roots = find_immediate_parent_tables(self.op())
-        if len(roots) > 1:
-            raise com.RelationError(
-                f"Cannot convert {type(self)} expression "
-                "involving multiple base table references "
-                "to a projection"
-            )
-
-        if roots:
-            return roots[0].to_expr().select(self)
-
-        # no child table to select from
-        return ops.DummyTable(values=(self,)).to_expr()
 
     def to_pandas(self, **kwargs) -> pd.Series:
         """Convert a column expression to a pandas Series or scalar object.
@@ -1228,6 +1203,42 @@ class Scalar(Value):
 
         return PandasData.convert_scalar(df, self.type())
 
+    def as_scalar(self):
+        """Inform ibis that the expression should be treated as a scalar.
+
+        If the expression is a literal, it will be returned as is. If it depends
+        on a table, it will be turned to a scalar subquery.
+
+        Returns
+        -------
+        Scalar
+            A scalar subquery or a literal
+
+        Examples
+        --------
+        >>> import ibis
+        >>>
+        >>> ibis.options.interactive = True
+        >>>
+        >>> t = ibis.examples.penguins.fetch()
+        >>> max_gentoo_weight = t.filter(t.species == "Gentoo").body_mass_g.max()
+        >>> light_penguins = t.filter(t.body_mass_g < max_gentoo_weight / 2)
+        >>> light_penguins.group_by("species").count()
+        ┏━━━━━━━━━━━┳━━━━━━━━━━━━━┓
+        ┃ species   ┃ CountStar() ┃
+        ┡━━━━━━━━━━━╇━━━━━━━━━━━━━┩
+        │ string    │ int64       │
+        ├───────────┼─────────────┤
+        │ Adelie    │          15 │
+        │ Chinstrap │           2 │
+        └───────────┴─────────────┘
+        """
+        parents = self.op().relations
+        if parents:
+            return ops.ScalarSubquery(self.as_table()).to_expr()
+        else:
+            return self
+
     def as_table(self) -> ir.Table:
         """Promote the scalar expression to a table.
 
@@ -1254,20 +1265,19 @@ class Scalar(Value):
         >>> isinstance(lit, ir.Table)
         True
         """
-        from ibis.expr.analysis import find_first_base_table
+        parents = self.op().relations
 
-        op = self.op()
-        table = find_first_base_table(op)
-        if table is not None:
-            return table.to_expr().aggregate(**{self.get_name(): self})
+        if len(parents) == 0:
+            return ops.DummyTable({self.get_name(): self}).to_expr()
+        elif len(parents) == 1:
+            (parent,) = parents
+            return parent.to_expr().aggregate(self)
         else:
-            if isinstance(op, ops.Alias):
-                value = op
-                assert value.name == self.get_name()
-            else:
-                value = ops.Alias(op, self.get_name())
-
-            return ops.DummyTable(values=(value,)).to_expr()
+            raise com.RelationError(
+                f"The scalar expression {self} cannot be converted to a "
+                "table expression because it involves multiple base table "
+                "references"
+            )
 
     def __deferred_repr__(self):
         return f"<scalar[{self.type()}]>"
@@ -1322,14 +1332,91 @@ class Column(Value, _FixedTextJupyterMixin):
         (column,) = df.columns
         return PandasData.convert_column(df.loc[:, column], self.type())
 
+    def as_scalar(self) -> Scalar:
+        """Inform ibis that the expression should be treated as a scalar.
+
+        Creates a scalar subquery from the column expression. Since ibis cannot
+        be sure that the column expression contains only one value, the column
+        expression is wrapped in a scalar subquery and treated as a scalar.
+
+        Note that the execution of the scalar subquery will fail if the column
+        expression contains more than one value.
+
+        Returns
+        -------
+        Scalar
+            A scalar subquery
+
+        Examples
+        --------
+        >>> import ibis
+        >>>
+        >>> ibis.options.interactive = True
+        >>>
+        >>> t = ibis.examples.penguins.fetch()
+        >>> heavy_gentoo = t.filter(t.species == "Gentoo", t.body_mass_g > 6200)
+        >>> from_that_island = t.filter(t.island == heavy_gentoo.island.as_scalar())
+        >>> from_that_island.group_by("species").count()
+        ┏━━━━━━━━━┳━━━━━━━━━━━━━┓
+        ┃ species ┃ CountStar() ┃
+        ┡━━━━━━━━━╇━━━━━━━━━━━━━┩
+        │ string  │ int64       │
+        ├─────────┼─────────────┤
+        │ Adelie  │          44 │
+        │ Gentoo  │         124 │
+        └─────────┴─────────────┘
+        """
+        return self.as_table().as_scalar()
+
+    def as_table(self) -> ir.Table:
+        """Promote the expression to a [Table](./expression-tables.qmd#ibis.expr.types.Table).
+
+        Returns
+        -------
+        Table
+            A table expression
+
+        Examples
+        --------
+        >>> import ibis
+        >>> t = ibis.table(dict(a="str"), name="t")
+        >>> expr = t.a.length().name("len").as_table()
+        >>> expected = t.select(len=t.a.length())
+        >>> expr.equals(expected)
+        True
+        """
+        parents = self.op().relations
+        values = {self.get_name(): self}
+
+        if len(parents) == 0:
+            return ops.DummyTable(values).to_expr()
+        elif len(parents) == 1:
+            (parent,) = parents
+            return parent.to_expr().select(self)
+        else:
+            raise com.RelationError(
+                f"Cannot convert {type(self)} expression involving multiple "
+                "base table references to a projection"
+            )
+
     def _bind_reduction_filter(self, where):
-        import ibis.expr.analysis as an
-
-        if where is None or not isinstance(where, Deferred):
+        rels = self.op().relations
+        if isinstance(where, Deferred):
+            if len(rels) == 0:
+                raise com.IbisInputError(
+                    "Unable to bind deferred expression to a table because "
+                    "the expression doesn't depend on any tables"
+                )
+            elif len(rels) == 1:
+                (table,) = rels
+                return where.resolve(table.to_expr())
+            else:
+                raise com.RelationError(
+                    "Cannot bind deferred expression to a table because the "
+                    "expression depends on multiple tables"
+                )
+        else:
             return where
-
-        table = an.find_first_base_table(self.op()).to_expr()
-        return where.resolve(table)
 
     def __deferred_repr__(self):
         return f"<column[{self.type()}]>"
@@ -1718,7 +1805,7 @@ class Column(Value, _FixedTextJupyterMixin):
 
         Returns
         -------
-        TableExpr
+        Table
             A top-k expression
         """
 
@@ -1831,16 +1918,9 @@ class Column(Value, _FixedTextJupyterMixin):
         │ d      │           3 │
         └────────┴─────────────┘
         """
-        from ibis.expr.analysis import find_first_base_table
-
         name = self.get_name()
-        return (
-            find_first_base_table(self.op())
-            .to_expr()
-            .select(self)
-            .group_by(name)
-            .agg(**{f"{name}_count": lambda t: t.count()})
-        )
+        metric = _.count().name(f"{name}_count")
+        return self.as_table().group_by(name).aggregate(metric)
 
     def first(self, where: ir.BooleanValue | None = None) -> Value:
         """Return the first value of a column.
@@ -1923,13 +2003,7 @@ class Column(Value, _FixedTextJupyterMixin):
         │      3 │     5 │
         └────────┴───────┘
         """
-        import ibis.expr.analysis as an
-
-        return (
-            ibis.rank()
-            .over(order_by=self)
-            .resolve(an.find_first_base_table(self.op()).to_expr())
-        )
+        return ibis.rank().over(order_by=self)
 
     def dense_rank(self) -> ir.IntegerColumn:
         """Position of first element within each group of equal values.
@@ -1962,33 +2036,15 @@ class Column(Value, _FixedTextJupyterMixin):
         │      3 │     2 │
         └────────┴───────┘
         """
-        import ibis.expr.analysis as an
-
-        return (
-            ibis.dense_rank()
-            .over(order_by=self)
-            .resolve(an.find_first_base_table(self.op()).to_expr())
-        )
+        return ibis.dense_rank().over(order_by=self)
 
     def percent_rank(self) -> Column:
         """Return the relative rank of the values in the column."""
-        import ibis.expr.analysis as an
-
-        return (
-            ibis.percent_rank()
-            .over(order_by=self)
-            .resolve(an.find_first_base_table(self.op()).to_expr())
-        )
+        return ibis.percent_rank().over(order_by=self)
 
     def cume_dist(self) -> Column:
         """Return the cumulative distribution over a window."""
-        import ibis.expr.analysis as an
-
-        return (
-            ibis.cume_dist()
-            .over(order_by=self)
-            .resolve(an.find_first_base_table(self.op()).to_expr())
-        )
+        return ibis.cume_dist().over(order_by=self)
 
     def ntile(self, buckets: int | ir.IntegerValue) -> ir.IntegerColumn:
         """Return the integer number of a partitioning of the column values.
@@ -1998,13 +2054,7 @@ class Column(Value, _FixedTextJupyterMixin):
         buckets
             Number of buckets to partition into
         """
-        import ibis.expr.analysis as an
-
-        return (
-            ibis.ntile(buckets)
-            .over(order_by=self)
-            .resolve(an.find_first_base_table(self.op()).to_expr())
-        )
+        return ibis.ntile(buckets).over(order_by=self)
 
     def cummin(self, *, where=None, group_by=None, order_by=None) -> Column:
         """Return the cumulative min over a window."""

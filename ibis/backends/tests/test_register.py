@@ -11,7 +11,7 @@ import pytest
 from pytest import param
 
 import ibis
-from ibis.backends.conftest import TEST_TABLES
+from ibis.backends.conftest import TEST_TABLES, is_older_than
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
@@ -50,7 +50,9 @@ def gzip_csv(data_dir, tmp_path):
             "Diamonds2",
             id="csv_name",
             marks=pytest.mark.notyet(
-                ["pyspark"], reason="pyspark lowercases view names"
+                ["pyspark"],
+                reason="pyspark lowercases view names",
+                condition=is_older_than("pyspark", "3.5.0"),
             ),
         ),
         param(
@@ -352,8 +354,6 @@ def test_csv_reregister_schema(con, tmp_path):
         )
 
     # For a full file scan, expect correct schema based on final row
-    # We also use the same `table_name` for both tests to ensure that
-    # the table is re-reflected in sqlalchemy
     foo_table = con.register(foo, table_name="same")
     result_schema = foo_table.schema()
 
@@ -387,13 +387,13 @@ def test_register_garbage(con, monkeypatch):
     # monkeypatch to avoid downloading extensions in tests
     monkeypatch.setattr(con, "_load_extensions", lambda x: True)
 
-    sa = pytest.importorskip("sqlalchemy")
+    duckdb = pytest.importorskip("duckdb")
     with pytest.raises(
-        sa.exc.OperationalError, match="No files found that match the pattern"
+        duckdb.IOException, match="No files found that match the pattern"
     ):
         con.read_csv("garbage_notafile")
 
-    with pytest.raises(FileNotFoundError):
+    with pytest.raises((FileNotFoundError, duckdb.IOException)):
         con.read_parquet("garbage_notafile")
 
 
@@ -405,12 +405,7 @@ def test_register_garbage(con, monkeypatch):
     ],
 )
 @pytest.mark.notyet(
-    ["impala", "mssql", "mysql", "postgres", "risingwave", "sqlite", "trino"]
-)
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=ValueError,
-    reason="read_parquet() missing required argument: 'schema'",
+    ["flink", "impala", "mssql", "mysql", "postgres", "risingwave", "sqlite", "trino"]
 )
 def test_read_parquet(con, tmp_path, data_dir, fname, in_table_name):
     pq = pytest.importorskip("pyarrow.parquet")
@@ -441,12 +436,17 @@ def ft_data(data_dir):
 
 
 @pytest.mark.notyet(
-    ["impala", "mssql", "mysql", "pandas", "postgres", "risingwave", "sqlite", "trino"]
-)
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=ValueError,
-    reason="read_parquet() missing required argument: 'schema'",
+    [
+        "flink",
+        "impala",
+        "mssql",
+        "mysql",
+        "pandas",
+        "postgres",
+        "risingwave",
+        "sqlite",
+        "trino",
+    ]
 )
 def test_read_parquet_glob(con, tmp_path, ft_data):
     pq = pytest.importorskip("pyarrow.parquet")
@@ -465,12 +465,17 @@ def test_read_parquet_glob(con, tmp_path, ft_data):
 
 
 @pytest.mark.notyet(
-    ["impala", "mssql", "mysql", "pandas", "postgres", "risingwave", "sqlite", "trino"]
-)
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=ValueError,
-    reason="read_csv() missing required argument: 'schema'",
+    [
+        "flink",
+        "impala",
+        "mssql",
+        "mysql",
+        "pandas",
+        "postgres",
+        "risingwave",
+        "sqlite",
+        "trino",
+    ]
 )
 def test_read_csv_glob(con, tmp_path, ft_data):
     pc = pytest.importorskip("pyarrow.csv")
@@ -552,12 +557,7 @@ DIAMONDS_COLUMN_TYPES = {
     [param(None, id="default"), param("fancy_stones", id="file_name")],
 )
 @pytest.mark.notyet(
-    ["impala", "mssql", "mysql", "postgres", "risingwave", "sqlite", "trino"]
-)
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=ValueError,
-    reason="read_csv() missing required argument: 'schema'",
+    ["flink", "impala", "mssql", "mysql", "postgres", "risingwave", "sqlite", "trino"]
 )
 def test_read_csv(con, data_dir, in_table_name, num_diamonds):
     fname = "diamonds.csv"

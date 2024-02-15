@@ -4,29 +4,33 @@ import pandas as pd
 import pyarrow as pa
 import pyarrow.csv as pcsv
 import pytest
-import sqlalchemy as sa
 from pytest import param
 
 import ibis
 import ibis.expr.datatypes as dt
 from ibis import util
-from ibis.backends.tests.errors import PyDeltaTableError, PySparkAnalysisException
+from ibis.backends.tests.errors import (
+    DuckDBNotImplementedException,
+    DuckDBParserException,
+    ExaQueryError,
+    MySQLOperationalError,
+    OracleDatabaseError,
+    PyDeltaTableError,
+    PyDruidProgrammingError,
+    PyODBCProgrammingError,
+    PySparkArithmeticException,
+    PySparkParseException,
+    SnowflakeProgrammingError,
+    TrinoUserError,
+)
 from ibis.formats.pyarrow import PyArrowType
 
 limit = [
     param(
         42,
         id="limit",
-        marks=[
-            pytest.mark.notimpl(
-                [
-                    # limit not implemented for flink and pandas backend execution
-                    "dask",
-                    "pandas",
-                    "pyspark",
-                ]
-            ),
-        ],
+        # limit not implemented for pandas-family backends
+        marks=[pytest.mark.notimpl(["dask", "pandas"])],
     ),
 ]
 
@@ -87,7 +91,6 @@ def test_empty_column_to_pyarrow(limit, awards_players):
 
 
 @pytest.mark.parametrize("limit", no_limit)
-@pytest.mark.notimpl(["exasol"], raises=AttributeError)
 def test_empty_scalar_to_pyarrow(limit, awards_players):
     expr = awards_players.filter(awards_players.awardID == "DEADBEEF").yearID.sum()
     array = expr.to_pyarrow(limit=limit)
@@ -95,7 +98,6 @@ def test_empty_scalar_to_pyarrow(limit, awards_players):
 
 
 @pytest.mark.parametrize("limit", no_limit)
-@pytest.mark.notimpl(["exasol"], raises=AttributeError)
 def test_scalar_to_pyarrow_scalar(limit, awards_players):
     scalar = awards_players.yearID.sum().to_pyarrow(limit=limit)
     assert isinstance(scalar, pa.Scalar)
@@ -161,9 +163,6 @@ def test_column_pyarrow_batch_chunk_size(awards_players):
 
 @pytest.mark.notimpl(["pandas", "dask"])
 @pytest.mark.broken(
-    ["pyspark"], raises=AssertionError, reason="chunk_size isn't respected"
-)
-@pytest.mark.broken(
     ["sqlite"],
     raises=pa.ArrowException,
     reason="Test data has empty strings in columns typed as int64",
@@ -202,13 +201,15 @@ def test_table_to_parquet(tmp_path, backend, awards_players):
 
     df = pd.read_parquet(outparquet)
 
-    backend.assert_frame_equal(awards_players.to_pandas(), df)
+    backend.assert_frame_equal(
+        awards_players.to_pandas().fillna(pd.NA), df.fillna(pd.NA)
+    )
 
 
 @pytest.mark.notimpl(
     ["duckdb"],
     reason="cannot inline WriteOptions objects",
-    raises=sa.exc.NotSupportedError,
+    raises=DuckDBNotImplementedException,
 )
 @pytest.mark.parametrize("version", ["1.0", "2.6"])
 def test_table_to_parquet_writer_kwargs(version, tmp_path, backend, awards_players):
@@ -217,7 +218,9 @@ def test_table_to_parquet_writer_kwargs(version, tmp_path, backend, awards_playe
 
     df = pd.read_parquet(outparquet)
 
-    backend.assert_frame_equal(awards_players.to_pandas(), df)
+    backend.assert_frame_equal(
+        awards_players.to_pandas().fillna(pd.NA), df.fillna(pd.NA)
+    )
 
     md = pa.parquet.read_metadata(outparquet)
 
@@ -290,7 +293,6 @@ def test_memtable_to_file(tmp_path, con, ftype, monkeypatch):
     assert outfile.is_file()
 
 
-@pytest.mark.notimpl(["exasol"])
 def test_table_to_csv(tmp_path, backend, awards_players):
     outcsv = tmp_path / "out.csv"
 
@@ -304,11 +306,10 @@ def test_table_to_csv(tmp_path, backend, awards_players):
     backend.assert_frame_equal(awards_players.to_pandas(), df)
 
 
-@pytest.mark.notimpl(["exasol"])
 @pytest.mark.notimpl(
     ["duckdb"],
     reason="cannot inline WriteOptions objects",
-    raises=sa.exc.ProgrammingError,
+    raises=DuckDBParserException,
 )
 @pytest.mark.parametrize("delimiter", [";", "\t"], ids=["semicolon", "tab"])
 def test_table_to_csv_writer_kwargs(delimiter, tmp_path, awards_players):
@@ -328,15 +329,7 @@ def test_table_to_csv_writer_kwargs(delimiter, tmp_path, awards_players):
             dt.Decimal(38, 9),
             pa.Decimal128Type,
             id="decimal128",
-            marks=[
-                pytest.mark.notyet(["druid"], raises=sa.exc.ProgrammingError),
-                pytest.mark.notyet(["exasol"], raises=sa.exc.DBAPIError),
-                pytest.mark.notyet(
-                    ["risingwave"],
-                    raises=sa.exc.DBAPIError,
-                    reason="Feature is not yet implemented: unsupported data type: NUMERIC(38,9)",
-                ),
-            ],
+            marks=[pytest.mark.notyet(["exasol"], raises=ExaQueryError)],
         ),
         param(
             dt.Decimal(76, 38),
@@ -345,23 +338,17 @@ def test_table_to_csv_writer_kwargs(delimiter, tmp_path, awards_players):
             marks=[
                 pytest.mark.notyet(["impala"], reason="precision not supported"),
                 pytest.mark.notyet(["duckdb"], reason="precision is out of range"),
-                pytest.mark.notyet(
-                    ["druid", "mssql", "snowflake", "trino"],
-                    raises=sa.exc.ProgrammingError,
-                ),
-                pytest.mark.notyet(["oracle"], raises=sa.exc.DatabaseError),
-                pytest.mark.notyet(["mysql"], raises=sa.exc.OperationalError),
+                pytest.mark.notyet(["mssql"], raises=PyODBCProgrammingError),
+                pytest.mark.notyet(["snowflake"], raises=SnowflakeProgrammingError),
+                pytest.mark.notyet(["trino"], raises=TrinoUserError),
+                pytest.mark.notyet(["oracle"], raises=OracleDatabaseError),
+                pytest.mark.notyet(["mysql"], raises=MySQLOperationalError),
                 pytest.mark.notyet(
                     ["pyspark"],
-                    raises=PySparkAnalysisException,
+                    raises=(PySparkParseException, PySparkArithmeticException),
                     reason="precision is out of range",
                 ),
-                pytest.mark.notyet(["exasol"], raises=sa.exc.DBAPIError),
-                pytest.mark.notyet(
-                    ["risingwave"],
-                    raises=sa.exc.DBAPIError,
-                    reason="Feature is not yet implemented: unsupported data type: NUMERIC(76,38)",
-                ),
+                pytest.mark.notyet(["exasol"], raises=ExaQueryError),
             ],
         ),
     ],
@@ -391,17 +378,13 @@ def test_to_pyarrow_decimal(backend, dtype, pyarrow_dtype):
         "dask",
         "trino",
         "exasol",
+        "druid",
     ],
     raises=NotImplementedError,
     reason="read_delta not yet implemented",
 )
 @pytest.mark.notyet(["clickhouse"], raises=Exception)
 @pytest.mark.notyet(["mssql", "pandas"], raises=PyDeltaTableError)
-@pytest.mark.notyet(
-    ["druid"],
-    raises=pa.lib.ArrowTypeError,
-    reason="arrow type conversion fails in `to_delta` call",
-)
 def test_roundtrip_delta(backend, con, alltypes, tmp_path, monkeypatch):
     if con.name == "pyspark":
         pytest.importorskip("delta")
@@ -420,9 +403,6 @@ def test_roundtrip_delta(backend, con, alltypes, tmp_path, monkeypatch):
     backend.assert_frame_equal(result, expected)
 
 
-@pytest.mark.xfail_version(
-    duckdb=["duckdb<0.8.1"], raises=AssertionError, reason="bug in duckdb"
-)
 @pytest.mark.notimpl(
     ["druid"], raises=AttributeError, reason="string type is used for timestamp_col"
 )
@@ -466,6 +446,11 @@ def test_to_torch(alltypes):
 
 
 @pytest.mark.notimpl(["flink"])
+@pytest.mark.notyet(
+    ["druid"],
+    raises=PyDruidProgrammingError,
+    reason="backend doesn't support an empty VALUES construct",
+)
 def test_empty_memtable(backend, con):
     expected = pd.DataFrame({"a": []})
     table = ibis.memtable(expected)
@@ -481,24 +466,7 @@ def test_to_pandas_batches_empty_table(backend, con):
     assert sum(map(len, t.to_pandas_batches())) == n
 
 
-@pytest.mark.notimpl(["druid"])
-@pytest.mark.parametrize(
-    "n",
-    [
-        param(
-            None,
-            marks=[
-                pytest.mark.notimpl(["exasol"], raises=sa.exc.CompileError),
-                pytest.mark.notimpl(
-                    ["risingwave"],
-                    raises=sa.exc.InternalError,
-                    reason="risingwave doesn't support limit null",
-                ),
-            ],
-        ),
-        1,
-    ],
-)
+@pytest.mark.parametrize("n", [None, 1])
 def test_to_pandas_batches_nonempty_table(backend, con, n):
     t = backend.functional_alltypes.limit(n)
     n = t.count().execute()
@@ -507,25 +475,7 @@ def test_to_pandas_batches_nonempty_table(backend, con, n):
     assert sum(map(len, t.to_pandas_batches())) == n
 
 
-@pytest.mark.parametrize(
-    "n",
-    [
-        param(
-            None,
-            marks=[
-                pytest.mark.notimpl(["exasol"], raises=sa.exc.CompileError),
-                pytest.mark.notimpl(
-                    ["risingwave"],
-                    raises=sa.exc.InternalError,
-                    reason="risingwave doesn't support limit null",
-                ),
-            ],
-        ),
-        0,
-        1,
-        2,
-    ],
-)
+@pytest.mark.parametrize("n", [None, 0, 1, 2])
 def test_to_pandas_batches_column(backend, con, n):
     t = backend.functional_alltypes.limit(n).timestamp_col
     n = t.count().execute()

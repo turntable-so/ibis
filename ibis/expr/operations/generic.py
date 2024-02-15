@@ -1,13 +1,12 @@
 from __future__ import annotations
 
 import itertools
-from typing import Annotated, Any, Optional, Union
+from typing import Annotated, Any, Optional
 from typing import Literal as LiteralType
 
 from public import public
 from typing_extensions import TypeVar
 
-import ibis.common.exceptions as com
 import ibis.expr.datashape as ds
 import ibis.expr.datatypes as dt
 import ibis.expr.rules as rlz
@@ -16,39 +15,12 @@ from ibis.common.deferred import Deferred  # noqa: TCH001
 from ibis.common.grounds import Singleton
 from ibis.common.patterns import InstanceOf, Length  # noqa: TCH001
 from ibis.common.typing import VarTuple  # noqa: TCH001
-from ibis.expr.operations.core import Named, Scalar, Unary, Value
+from ibis.expr.operations.core import Scalar, Unary, Value
 from ibis.expr.operations.relations import Relation  # noqa: TCH001
 
 
 @public
-class TableColumn(Value, Named):
-    """Selects a column from a `Table`."""
-
-    table: Relation
-    name: Union[str, int]
-
-    shape = ds.columnar
-
-    def __init__(self, table, name):
-        if isinstance(name, int):
-            name = table.schema.name_at_position(name)
-
-        if name not in table.schema:
-            columns_formatted = ", ".join(map(repr, table.schema.names))
-            raise com.IbisTypeError(
-                f"Column {name!r} is not found in table. "
-                f"Existing columns: {columns_formatted}."
-            )
-
-        super().__init__(table=table, name=name)
-
-    @property
-    def dtype(self):
-        return self.table.schema[self.name]
-
-
-@public
-class RowID(Value, Named):
+class RowID(Value):
     """The row number (an autonumeric) of the returned result."""
 
     name = "rowid"
@@ -57,22 +29,9 @@ class RowID(Value, Named):
     shape = ds.columnar
     dtype = dt.int64
 
-
-@public
-class TableArrayView(Value, Named):
-    """Helper operation class for creating scalar subqueries."""
-
-    table: Relation
-
-    shape = ds.columnar
-
-    @property
-    def dtype(self):
-        return self.table.schema[self.name]
-
-    @property
-    def name(self):
-        return self.table.schema.names[0]
+    @attribute
+    def relations(self):
+        return frozenset({self.table})
 
 
 @public
@@ -120,6 +79,7 @@ class IsNull(Unary):
     -------
     ir.BooleanValue
         Value expression indicating whether values are null
+
     """
 
     dtype = dt.boolean
@@ -133,6 +93,7 @@ class NotNull(Unary):
     -------
     ir.BooleanValue
         Value expression indicating whether values are not null
+
     """
 
     dtype = dt.boolean
@@ -199,7 +160,7 @@ NULL = Literal(None, dt.null)
 
 
 @public
-class ScalarParameter(Scalar, Named):
+class ScalarParameter(Scalar):
     _counter = itertools.count()
 
     dtype: dt.DataType

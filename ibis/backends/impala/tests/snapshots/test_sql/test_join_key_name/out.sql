@@ -1,32 +1,79 @@
-WITH t0 AS (
-  SELECT t5.*, t3.`r_name` AS `region`, t6.`o_totalprice`,
-         CAST(t6.`o_orderdate` AS timestamp) AS `odate`
-  FROM `tpch_region` t3
-    INNER JOIN `tpch_nation` t4
-      ON t3.`r_regionkey` = t4.`n_regionkey`
-    INNER JOIN `tpch_customer` t5
-      ON t5.`c_nationkey` = t4.`n_nationkey`
-    INNER JOIN `tpch_orders` t6
-      ON t6.`o_custkey` = t5.`c_custkey`
-),
-t1 AS (
-  SELECT extract(t0.`odate`, 'year') AS `year`, count(1) AS `CountStar()`
-  FROM t0
-  WHERE t0.`o_totalprice` > (
-    SELECT avg(t3.`o_totalprice`) AS `Mean(o_totalprice)`
-    FROM t0 t3
-    WHERE t3.`region` = t0.`region`
-  )
-  GROUP BY 1
-),
-t2 AS (
-  SELECT extract(t0.`odate`, 'year') AS `year`, count(1) AS `CountStar()`
-  FROM t0
-  GROUP BY 1
+WITH `t8` AS (
+  SELECT
+    `t6`.`c_custkey`,
+    `t6`.`c_name`,
+    `t6`.`c_address`,
+    `t6`.`c_nationkey`,
+    `t6`.`c_phone`,
+    `t6`.`c_acctbal`,
+    `t6`.`c_mktsegment`,
+    `t6`.`c_comment`,
+    `t4`.`r_name` AS `region`,
+    `t7`.`o_totalprice`,
+    CAST(`t7`.`o_orderdate` AS TIMESTAMP) AS `odate`
+  FROM `tpch_region` AS `t4`
+  INNER JOIN `tpch_nation` AS `t5`
+    ON `t4`.`r_regionkey` = `t5`.`n_regionkey`
+  INNER JOIN `tpch_customer` AS `t6`
+    ON `t6`.`c_nationkey` = `t5`.`n_nationkey`
+  INNER JOIN `tpch_orders` AS `t7`
+    ON `t7`.`o_custkey` = `t6`.`c_custkey`
 )
-SELECT t2.`year`, t2.`CountStar()` AS `pre_count`,
-       t1.`CountStar()` AS `post_count`,
-       t1.`CountStar()` / CAST(t2.`CountStar()` AS double) AS `fraction`
-FROM t2
-  INNER JOIN t1
-    ON t2.`year` = t1.`year`
+SELECT
+  `t12`.`year`,
+  `t12`.`CountStar()` AS `pre_count`,
+  `t17`.`CountStar()` AS `post_count`,
+  `t17`.`CountStar()` / CAST(`t12`.`CountStar()` AS DOUBLE) AS `fraction`
+FROM (
+  SELECT
+    EXTRACT(year FROM `t9`.`odate`) AS `year`,
+    COUNT(*) AS `CountStar()`
+  FROM `t8` AS `t9`
+  GROUP BY
+    1
+) AS `t12`
+INNER JOIN (
+  SELECT
+    EXTRACT(year FROM `t15`.`odate`) AS `year`,
+    COUNT(*) AS `CountStar()`
+  FROM (
+    SELECT
+      `t9`.`c_custkey`,
+      `t9`.`c_name`,
+      `t9`.`c_address`,
+      `t9`.`c_nationkey`,
+      `t9`.`c_phone`,
+      `t9`.`c_acctbal`,
+      `t9`.`c_mktsegment`,
+      `t9`.`c_comment`,
+      `t9`.`region`,
+      `t9`.`o_totalprice`,
+      `t9`.`odate`
+    FROM `t8` AS `t9`
+    WHERE
+      `t9`.`o_totalprice` > (
+        SELECT
+          AVG(`t13`.`o_totalprice`) AS `Mean(o_totalprice)`
+        FROM (
+          SELECT
+            `t10`.`c_custkey`,
+            `t10`.`c_name`,
+            `t10`.`c_address`,
+            `t10`.`c_nationkey`,
+            `t10`.`c_phone`,
+            `t10`.`c_acctbal`,
+            `t10`.`c_mktsegment`,
+            `t10`.`c_comment`,
+            `t10`.`region`,
+            `t10`.`o_totalprice`,
+            `t10`.`odate`
+          FROM `t8` AS `t10`
+          WHERE
+            `t10`.`region` = `t9`.`region`
+        ) AS `t13`
+      )
+  ) AS `t15`
+  GROUP BY
+    1
+) AS `t17`
+  ON `t12`.`year` = `t17`.`year`

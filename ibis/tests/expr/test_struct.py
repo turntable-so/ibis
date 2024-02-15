@@ -8,6 +8,7 @@ import ibis
 import ibis.expr.operations as ops
 import ibis.expr.types as ir
 from ibis import _
+from ibis.expr.tests.test_newrels import join_tables
 from ibis.tests.util import assert_pickle_roundtrip
 
 
@@ -71,8 +72,16 @@ def test_unpack_from_table(t):
 def test_lift_join(t, s):
     join = t.join(s, t.d == s.a.g)
     result = join.a_right.lift()
-    expected = join[_.a_right.f, _.a_right.g]
-    assert result.equals(expected)
+
+    with join_tables(t, s) as (r1, r2):
+        join = ops.JoinChain(
+            first=r1,
+            rest=[
+                ops.JoinLink("inner", r2, [r1.d == r2.a.g]),
+            ],
+            values={"f": r2.a.f, "g": r2.a.g},
+        )
+        assert result.op() == join
 
 
 def test_unpack_join_from_table(t, s):

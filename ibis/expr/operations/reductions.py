@@ -17,11 +17,13 @@ from ibis.expr.operations.relations import Relation  # noqa: TCH001
 class Reduction(Value):
     shape = ds.scalar
 
+    # TODO(kszucs): remove this
     @property
     def __window_op__(self):
         return self
 
 
+# TODO(kszucs): all reductions all filterable so we could remove Filterable
 class Filterable(Value):
     where: Optional[Value[dt.Boolean]] = None
 
@@ -39,12 +41,20 @@ class CountStar(Filterable, Reduction):
 
     dtype = dt.int64
 
+    @attribute
+    def relations(self):
+        return frozenset({self.arg})
+
 
 @public
 class CountDistinctStar(Filterable, Reduction):
     arg: Relation
 
     dtype = dt.int64
+
+    @attribute
+    def relations(self):
+        return frozenset({self.arg})
 
 
 @public

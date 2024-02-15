@@ -39,7 +39,6 @@ concurrency:
 env:
   FORCE_COLOR: "1"
   ODBCSYSINI: "${{ github.workspace }}/ci/odbc"
-  SQLALCHEMY_WARN_20: "1"
   HYPOTHESIS_PROFILE: "ci"
 
 jobs:
@@ -56,10 +55,6 @@ jobs:
           - "3.9"
           - "3.11"
         backend:
-          - name: dask
-            title: Dask
-            extras:
-              - dask
           - name: duckdb
             title: DuckDB
             extras:
@@ -67,8 +62,20 @@ jobs:
               - deltalake
               - geospatial
               - examples
+              - decompiler
             additional_deps:
               - torch
+          - name: clickhouse
+            title: ClickHouse
+            services:
+              - clickhouse
+            extras:
+              - clickhouse
+              - examples
+          - name: dask
+            title: Dask
+            extras:
+              - dask
           - name: pandas
             title: Pandas
             extras:
@@ -86,7 +93,6 @@ jobs:
             extras:
               - polars
               - deltalake
-              - examples
           - name: mysql
             title: MySQL
             services:
@@ -96,13 +102,6 @@ jobs:
               - geospatial
             sys-deps:
               - libgeos-dev
-          - name: clickhouse
-            title: ClickHouse
-            services:
-              - clickhouse
-            extras:
-              - clickhouse
-              - examples
           - name: postgres
             title: PostgreSQL
             extras:
@@ -125,12 +124,14 @@ jobs:
               - libgeos-dev
           - name: risingwave
             title: Risingwave
+            serial: true
             services:
               - risingwave
             extras:
               - risingwave
           - name: impala
             title: Impala
+            serial: true
             extras:
               - impala
             services:
@@ -161,13 +162,6 @@ jobs:
               - druid
             services:
               - druid
-          - name: oracle
-            title: Oracle
-            serial: true
-            extras:
-              - oracle
-            services:
-              - oracle
           - name: exasol
             title: Exasol
             serial: true
@@ -175,6 +169,13 @@ jobs:
               - exasol
             services:
               - exasol
+          - name: oracle
+            title: Oracle
+            serial: true
+            extras:
+              - oracle
+            services:
+              - oracle
           - name: flink
             title: Flink
             serial: true
@@ -182,9 +183,21 @@ jobs:
               - flink
             additional_deps:
               - apache-flink
-              - pytest-split
             services:
               - flink
+        include:
+          - os: ubuntu-latest
+            python-version: "3.10"
+            backend:
+              name: flink
+              title: Flink
+              serial: true
+              extras:
+                - flink
+              additional_deps:
+                - apache-flink
+              services:
+                - flink
         exclude:
           - os: windows-latest
             backend:
@@ -221,6 +234,7 @@ jobs:
             backend:
               name: risingwave
               title: Risingwave
+              serial: true
               services:
                 - risingwave
               extras:
@@ -242,6 +256,7 @@ jobs:
             backend:
               name: impala
               title: Impala
+              serial: true
               extras:
                 - impala
               services:
@@ -294,15 +309,20 @@ jobs:
               serial: true
               extras:
                 - flink
+              additional_deps:
+                - apache-flink
               services:
                 - flink
-          - python-version: "3.11"
+          - os: ubuntu-latest
+            python-version: "3.11"
             backend:
               name: flink
               title: Flink
               serial: true
               extras:
                 - flink
+              additional_deps:
+                - apache-flink
               services:
                 - flink
           - os: windows-latest
@@ -373,29 +393,18 @@ jobs:
           IBIS_TEST_IMPALA_PORT: 21050
           IBIS_EXAMPLES_DATA: ${{ runner.temp }}/examples-${{ matrix.backend.name }}-${{ matrix.os }}-${{ steps.install_python.outputs.python-version }}
 
-      # FIXME(deepyaman): If some backend-specific test, in test_ddl.py,
-      #   executes before common tests, they will fail with:
-      #   org.apache.flink.table.api.ValidationException: Table `default_catalog`.`default_database`.`functional_alltypes` was not found.
-      #   Therefore, we run backend-specific tests second to avoid this.
       - name: "run serial tests: ${{ matrix.backend.name }}"
-        if: matrix.backend.serial && matrix.backend.name == 'flink'
-        run: |
-          just ci-check -m ${{ matrix.backend.name }} ibis/backends/tests
-          just ci-check -m ${{ matrix.backend.name }} ibis/backends/flink/tests
-        env:
-          IBIS_EXAMPLES_DATA: ${{ runner.temp }}/examples-${{ matrix.backend.name }}-${{ matrix.os }}-${{ steps.install_python.outputs.python-version }}
-          FLINK_REMOTE_CLUSTER_ADDR: localhost
-          FLINK_REMOTE_CLUSTER_PORT: "8081"
-
-      - name: "run serial tests: ${{ matrix.backend.name }}"
-        if: matrix.backend.serial && matrix.backend.name != 'flink'
+        if: matrix.backend.serial
         run: just ci-check -m ${{ matrix.backend.name }}
         env:
+          FLINK_REMOTE_CLUSTER_ADDR: localhost
+          FLINK_REMOTE_CLUSTER_PORT: "8081"
           IBIS_EXAMPLES_DATA: ${{ runner.temp }}/examples-${{ matrix.backend.name }}-${{ matrix.os }}-${{ steps.install_python.outputs.python-version }}
 
       - name: check that no untracked files were produced
         shell: bash
-        run: git checkout poetry.lock pyproject.toml && ! git status --porcelain | tee /dev/stderr | grep .
+        run: |
+          ! git status --porcelain | tee /dev/stderr | grep .
 
       - name: upload code coverage
         if: success()
@@ -432,7 +441,6 @@ jobs:
             title: PostgreSQL
             deps:
               - "psycopg2@2.8.4"
-              - "GeoAlchemy2@0.6.3"
               - "geopandas@0.6"
               - "Shapely@2"
             services:
@@ -447,7 +455,6 @@ jobs:
               title: PostgreSQL
               deps:
                 - "psycopg2@2.8.4"
-                - "GeoAlchemy2@0.6.3"
                 - "geopandas@0.6"
                 - "Shapely@2"
               services:
@@ -461,7 +468,6 @@ jobs:
               title: PostgreSQL
               deps:
                 - "psycopg2@2.8.4"
-                - "GeoAlchemy2@0.6.3"
                 - "geopandas@0.6"
                 - "Shapely@2"
               services:
@@ -537,15 +543,26 @@ jobs:
         run: docker compose logs
 
   test_pyspark:
-    name: PySpark ${{ matrix.os }} python-${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
+    name: PySpark ${{ matrix.pyspark-version }} ubuntu-latest python-${{ matrix.python-version }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
-        os:
-          - ubuntu-latest
-        python-version:
-          - "3.10"
+        include:
+          - name: pyspark-3.3
+            python-version: "3.9"
+            pyspark-version: 3.3
+            deps:
+              - "pyspark@3.3"
+              - "'pandas@<2'"
+              - "'numpy@<1.24'"
+          - name: pyspark-3.5
+            python-version: "3.11"
+            pyspark-version: 3.5
+            deps:
+              - "pyspark@3.5"
+              - "'pandas@>2'"
+              - "'numpy@>1.24'"
     steps:
       - name: checkout
         uses: actions/checkout@v4
@@ -575,8 +592,8 @@ jobs:
         # it requires a version of pandas that pyspark is not compatible with
         run: poetry remove lonboard
 
-      - name: install maximum versions of pandas and numpy
-        run: poetry add --lock 'pandas@<2' 'numpy<1.24'
+      - name: install exact versions of pyspark, pandas and numpy
+        run: poetry add --lock ${{ join(matrix.deps, ' ') }}
 
       - name: checkout the lock file
         run: git checkout poetry.lock
@@ -605,129 +622,12 @@ jobs:
         with:
           flags: backend,pyspark,${{ runner.os }},python-${{ steps.install_python.outputs.python-version }}
 
-  test_backends_sqlalchemy2:
-    name: SQLAlchemy 2 ${{ matrix.backend.title }} ${{ matrix.os }} python-${{ matrix.python-version }}
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        os:
-          - ubuntu-latest
-        python-version:
-          - "3.11"
-        backend:
-          - name: mssql
-            title: MS SQL Server
-            services:
-              - mssql
-            extras:
-              - mssql
-            sys-deps:
-              - freetds-dev
-              - unixodbc-dev
-              - tdsodbc
-          - name: mysql
-            title: MySQL
-            services:
-              - mysql
-            extras:
-              - geospatial
-              - mysql
-          - name: postgres
-            title: PostgreSQL
-            services:
-              - postgres
-            extras:
-              - geospatial
-              - postgres
-            sys-deps:
-              - libgeos-dev
-          - name: sqlite
-            title: SQLite
-            extras:
-              - sqlite
-          - name: trino
-            title: Trino
-            services:
-              - trino
-            extras:
-              - trino
-          - name: duckdb
-            title: DuckDB
-            extras:
-              - duckdb
-          - name: oracle
-            title: Oracle
-            serial: true
-            extras:
-              - oracle
-            services:
-              - oracle
-    steps:
-      - name: checkout
-        uses: actions/checkout@v4
-
-      - name: update and install system dependencies
-        if: matrix.backend.sys-deps != null
-        run: |
-          set -euo pipefail
-
-          sudo apt-get update -qq -y
-          sudo apt-get install -qq -y build-essential ${{ join(matrix.backend.sys-deps, ' ') }}
-
-      - uses: extractions/setup-just@v1
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: download backend data
-        run: just download-data
-
-      - name: start services
-        if: matrix.backend.services != null
-        run: docker compose up --wait ${{ join(matrix.backend.services, ' ') }}
-
-      - name: install poetry
-        run: pipx install 'poetry==1.7.1'
-
-      - name: install python
-        uses: actions/setup-python@v5
-        id: install_python
-        with:
-          python-version: ${{ matrix.python-version }}
-
-      - name: remove deps that are not compatible with sqlalchemy 2
-        run: poetry remove snowflake-sqlalchemy sqlalchemy-exasol sqlalchemy-risingwave
-
-      - name: add sqlalchemy 2
-        run: poetry update sqlalchemy
-
-      - name: check sqlalchemy is version 2
-        run: poetry run python -c 'import sqlalchemy as sa; assert sa.__version__[0] == "2", sa.__version__'
-
-      - name: install ibis
-        run: poetry install --without dev --without docs --extras "${{ join(matrix.backend.extras, ' ') }}"
-
-      - name: run tests
-        run: just ci-check -m ${{ matrix.backend.name }} --numprocesses auto --dist=loadgroup
-
-      - name: check that no untracked files were produced
-        shell: bash
-        run: git checkout poetry.lock pyproject.toml && ! git status --porcelain | tee /dev/stderr | grep .
-
-      - name: upload code coverage
-        if: success()
-        continue-on-error: true
-        uses: codecov/codecov-action@v4
-        with:
-          flags: backend,${{ matrix.backend.name }},${{ runner.os }},python-${{ steps.install_python.outputs.python-version }}
-
   backends:
     # this job exists so that we can use a single job from this workflow to gate merging
     runs-on: ubuntu-latest
     needs:
-      - test_backends_min_version
+      # - test_backends_min_version
       - test_backends
-      - test_backends_sqlalchemy2
       - test_pyspark
     steps:
       - run: exit 0

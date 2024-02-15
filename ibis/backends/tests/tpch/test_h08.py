@@ -1,23 +1,11 @@
 from __future__ import annotations
 
-import pytest
-
 import ibis
 
 from .conftest import add_date, tpch_test
 
 
 @tpch_test
-@pytest.mark.notimpl(
-    ["snowflake"],
-    raises=AssertionError,
-    reason="ibis doesn't preserve decimal types in aggregations",
-)
-@pytest.mark.xfail_version(
-    duckdb=["sqlalchemy>=2"],
-    trino=["sqlalchemy>=2"],
-    reason="slightly different code is generated for sqlalchemy 2 for aggregations",
-)
 def test_tpc_h08(part, supplier, region, lineitem, orders, customer, nation):
     """National Market Share Query (Q8)"""
     NATION = "BRAZIL"

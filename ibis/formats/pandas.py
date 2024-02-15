@@ -3,6 +3,8 @@ from __future__ import annotations
 import contextlib
 import datetime
 import warnings
+from functools import partial
+from importlib.util import find_spec as _find_spec
 
 import numpy as np
 import pandas as pd
@@ -11,6 +13,7 @@ import pyarrow as pa
 
 import ibis.expr.datatypes as dt
 import ibis.expr.schema as sch
+from ibis.common.numeric import normalize_decimal
 from ibis.common.temporal import normalize_timezone
 from ibis.formats import DataMapper, SchemaMapper, TableProxy
 from ibis.formats.numpy import NumpyType
@@ -23,6 +26,8 @@ if not _has_arrow_dtype:
         f"The `ArrowDtype` class is not available in pandas {pd.__version__}. "
         "Install pandas >= 1.5.0 for interop with pandas and arrow dtype support"
     )
+
+geospatial_supported = _find_spec("geopandas") is not None
 
 
 class PandasType(NumpyType):
@@ -107,6 +112,8 @@ class PandasData(DataMapper):
 
         return sch.Schema.from_tuples(pairs)
 
+    concat = staticmethod(pd.concat)
+
     @classmethod
     def convert_table(cls, df, schema):
         if len(schema) != len(df.columns):
@@ -114,20 +121,36 @@ class PandasData(DataMapper):
                 "schema column count does not match input data column count"
             )
 
-        for (name, series), dtype in zip(df.items(), schema.types):
-            df[name] = cls.convert_column(series, dtype)
+        columns = []
+        for (_, series), dtype in zip(df.items(), schema.types):
+            columns.append(cls.convert_column(series, dtype))
+        df = cls.concat(columns, axis=1)
 
         # return data with the schema's columns which may be different than the
         # input columns
         df.columns = schema.names
+
+        if geospatial_supported:
+            from geopandas import GeoDataFrame
+            from geopandas.array import GeometryDtype
+
+            if (
+                # pluck out the first geometry column if it exists
+                geom := next(
+                    (
+                        name
+                        for name, c in df.items()
+                        if isinstance(c.dtype, GeometryDtype)
+                    ),
+                    None,
+                )
+            ) is not None:
+                return GeoDataFrame(df, geometry=geom)
         return df
 
     @classmethod
     def convert_column(cls, obj, dtype):
         pandas_type = PandasType.from_ibis(dtype)
-
-        if obj.dtype == pandas_type and dtype.is_primitive():
-            return obj
 
         method_name = f"convert_{dtype.__class__.__name__}"
         convert_method = getattr(cls, method_name, cls.convert_default)
@@ -143,7 +166,11 @@ class PandasData(DataMapper):
 
     @classmethod
     def convert_GeoSpatial(cls, s, dtype, pandas_type):
-        return s
+        import geopandas as gpd
+
+        if isinstance(s.dtype, gpd.array.GeometryDtype):
+            return gpd.GeoSeries(s)
+        return gpd.GeoSeries.from_wkb(s)
 
     convert_Point = (
         convert_LineString
@@ -155,6 +182,8 @@ class PandasData(DataMapper):
 
     @classmethod
     def convert_default(cls, s, dtype, pandas_type):
+        if s.dtype == pandas_type and dtype.is_primitive():
+            return s
         try:
             return s.astype(pandas_type)
         except Exception:  # noqa: BLE001
@@ -205,6 +234,8 @@ class PandasData(DataMapper):
                 if isinstance(v, datetime.datetime):
                     return v.date()
                 elif isinstance(v, str):
+                    if v.endswith("Z"):
+                        return datetime.datetime.fromisoformat(v[:-1]).date()
                     return datetime.date.fromisoformat(v)
                 else:
                     return v
@@ -225,6 +256,16 @@ class PandasData(DataMapper):
     @classmethod
     def convert_String(cls, s, dtype, pandas_type):
         return s.astype(pandas_type, errors="ignore")
+
+    @classmethod
+    def convert_Decimal(cls, s, dtype, pandas_type):
+        func = partial(
+            normalize_decimal,
+            precision=dtype.precision,
+            scale=dtype.scale,
+            strict=False,
+        )
+        return s.map(func, na_action="ignore")
 
     @classmethod
     def convert_UUID(cls, s, dtype, pandas_type):
@@ -354,12 +395,6 @@ class PandasData(DataMapper):
             return UUID(value)
 
         return convert
-
-
-class DaskData(PandasData):
-    @classmethod
-    def infer_column(cls, s):
-        return PyArrowData.infer_column(s.compute())
 
 
 class PandasDataFrameProxy(TableProxy[pd.DataFrame]):

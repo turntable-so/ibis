@@ -3,13 +3,12 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 import pytest
-import sqlalchemy as sa
 from pytest import param
 
 import ibis
 import ibis.common.exceptions as exc
 import ibis.expr.datatypes as dt
-from ibis.backends.tests.errors import Py4JJavaError
+from ibis.backends.tests.errors import PsycoPg2InternalError, Py4JJavaError
 
 pytestmark = [
     pytest.mark.never(
@@ -19,7 +18,7 @@ pytestmark = [
         ["bigquery", "impala"], reason="Backend doesn't yet implement map types"
     ),
     pytest.mark.notimpl(
-        ["datafusion", "exasol", "pyspark", "polars", "druid", "oracle"],
+        ["datafusion", "exasol", "polars", "druid", "oracle"],
         reason="Not yet implemented in ibis",
     ),
 ]
@@ -38,7 +37,7 @@ def test_map_table(backend):
 )
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="function hstore(character varying[], character varying[]) does not exist",
 )
 def test_column_map_values(backend):
@@ -73,7 +72,7 @@ def test_column_map_merge(backend):
 )
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="function hstore(character varying[], character varying[]) does not exist",
 )
 def test_literal_map_keys(con):
@@ -93,7 +92,7 @@ def test_literal_map_keys(con):
 )
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="function hstore(character varying[], character varying[]) does not exist",
 )
 def test_literal_map_values(con):
@@ -145,7 +144,7 @@ def test_map_scalar_contains_key_scalar(con):
 )
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="function hstore(character varying[], character varying[]) does not exist",
 )
 def test_map_scalar_contains_key_column(backend, alltypes, df):
@@ -209,13 +208,8 @@ def test_literal_map_merge(con):
 
 
 @pytest.mark.notimpl(
-    ["flink"],
-    raises=NotImplementedError,
-    reason="No translation rule for map<string, string>",
-)
-@pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="function hstore(character varying[], character varying[]) does not exist",
 )
 def test_literal_map_getitem_broadcast(backend, alltypes, df):
@@ -231,13 +225,8 @@ def test_literal_map_getitem_broadcast(backend, alltypes, df):
 
 
 @pytest.mark.notimpl(
-    ["flink"],
-    raises=NotImplementedError,
-    reason="No translation rule for map<string, string>",
-)
-@pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="function hstore(character varying[], character varying[]) does not exist",
 )
 def test_literal_map_get_broadcast(backend, alltypes, df):
@@ -269,7 +258,7 @@ def test_literal_map_get_broadcast(backend, alltypes, df):
 )
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="function hstore(character varying[], character varying[]) does not exist",
 )
 def test_map_construct_dict(con, keys, values):
@@ -297,11 +286,6 @@ def test_map_construct_array_column(con, alltypes, df):
 @pytest.mark.notyet(
     ["postgres", "risingwave"], reason="only support maps of string -> string"
 )
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=NotImplementedError,
-    reason="No translation rule for map<string, int16>",
-)
 def test_map_get_with_compatible_value_smaller(con):
     value = ibis.literal({"A": 1000, "B": 2000})
     expr = value.get("C", 3)
@@ -311,11 +295,6 @@ def test_map_get_with_compatible_value_smaller(con):
 @pytest.mark.notyet(
     ["postgres", "risingwave"], reason="only support maps of string -> string"
 )
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=NotImplementedError,
-    reason="No translation rule for map<string, int8>",
-)
 def test_map_get_with_compatible_value_bigger(con):
     value = ibis.literal({"A": 1, "B": 2})
     expr = value.get("C", 3000)
@@ -324,11 +303,6 @@ def test_map_get_with_compatible_value_bigger(con):
 
 @pytest.mark.notyet(
     ["postgres", "risingwave"], reason="only support maps of string -> string"
-)
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=NotImplementedError,
-    reason="NotImplementedError: No translation rule for map<string, int16>",
 )
 def test_map_get_with_incompatible_value_different_kind(con):
     value = ibis.literal({"A": 1000, "B": 2000})
@@ -340,11 +314,6 @@ def test_map_get_with_incompatible_value_different_kind(con):
 @pytest.mark.notyet(
     ["postgres", "risingwave"], reason="only support maps of string -> string"
 )
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=NotImplementedError,
-    reason="No translation rule for map<string, int16>",
-)
 def test_map_get_with_null_on_not_nullable(con, null_value):
     map_type = dt.Map(dt.string, dt.Int16(nullable=False))
     value = ibis.literal({"A": 1000, "B": 2000}).cast(map_type)
@@ -354,14 +323,12 @@ def test_map_get_with_null_on_not_nullable(con, null_value):
 
 
 @pytest.mark.parametrize("null_value", [None, ibis.NA])
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=NotImplementedError,
-    reason="No translation rule for map<string, null>",
+@pytest.mark.notyet(
+    ["flink"], raises=Py4JJavaError, reason="Flink cannot handle typeless nulls"
 )
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="function hstore(character varying[], character varying[]) does not exist",
 )
 def test_map_get_with_null_on_null_type_with_null(con, null_value):
@@ -374,10 +341,8 @@ def test_map_get_with_null_on_null_type_with_null(con, null_value):
 @pytest.mark.notyet(
     ["postgres", "risingwave"], reason="only support maps of string -> string"
 )
-@pytest.mark.notimpl(
-    ["flink"],
-    raises=NotImplementedError,
-    reason="No translation rule for map<string, null>",
+@pytest.mark.notyet(
+    ["flink"], raises=Py4JJavaError, reason="Flink cannot handle typeless nulls"
 )
 def test_map_get_with_null_on_null_type_with_non_null(con):
     value = ibis.literal({"A": None, "B": None})
@@ -392,7 +357,7 @@ def test_map_get_with_null_on_null_type_with_non_null(con):
 )
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="function hstore(character varying[], character varying[]) does not exist",
 )
 def test_map_create_table(con, temp_table):
@@ -410,7 +375,7 @@ def test_map_create_table(con, temp_table):
 )
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=sa.exc.InternalError,
+    raises=PsycoPg2InternalError,
     reason="function hstore(character varying[], character varying[]) does not exist",
 )
 def test_map_length(con):

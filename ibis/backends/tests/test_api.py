@@ -5,6 +5,7 @@ from pytest import param
 
 import ibis.expr.types as ir
 from ibis.backends.conftest import TEST_TABLES
+from ibis.backends.tests.errors import PyDruidProgrammingError
 
 
 def test_backend_name(backend):
@@ -12,9 +13,7 @@ def test_backend_name(backend):
     assert backend.api.name == backend.name()
 
 
-@pytest.mark.notimpl(
-    ["druid"], raises=TypeError, reason="'NoneType' object is not iterable"
-)
+@pytest.mark.notyet(["druid"], raises=PyDruidProgrammingError)
 def test_version(backend):
     assert isinstance(backend.api.version, str)
 
@@ -55,11 +54,11 @@ def test_list_tables(con):
     assert all(isinstance(table, str) for table in tables)
 
 
-def test_tables_accessor_mapping(backend, con):
+def test_tables_accessor_mapping(con):
     if con.name == "snowflake":
         pytest.skip("snowflake sometimes counts more tables than are around")
 
-    name = backend.default_identifier_case_fn("functional_alltypes")
+    name = "functional_alltypes"
 
     assert isinstance(con.tables[name], ir.Table)
 
@@ -73,8 +72,8 @@ def test_tables_accessor_mapping(backend, con):
     assert TEST_TABLES.keys() & set(map(str.lower, con.tables))
 
 
-def test_tables_accessor_getattr(backend, con):
-    name = backend.default_identifier_case_fn("functional_alltypes")
+def test_tables_accessor_getattr(con):
+    name = "functional_alltypes"
     assert isinstance(getattr(con.tables, name), ir.Table)
 
     with pytest.raises(AttributeError, match="doesnt_exist"):
@@ -86,8 +85,8 @@ def test_tables_accessor_getattr(backend, con):
         con.tables._private_attr  # noqa: B018
 
 
-def test_tables_accessor_tab_completion(backend, con):
-    name = backend.default_identifier_case_fn("functional_alltypes")
+def test_tables_accessor_tab_completion(con):
+    name = "functional_alltypes"
     attrs = dir(con.tables)
     assert name in attrs
     assert "keys" in attrs  # type methods also present
@@ -96,8 +95,8 @@ def test_tables_accessor_tab_completion(backend, con):
     assert name in keys
 
 
-def test_tables_accessor_repr(backend, con):
-    name = backend.default_identifier_case_fn("functional_alltypes")
+def test_tables_accessor_repr(con):
+    name = "functional_alltypes"
     result = repr(con.tables)
     assert f"- {name}" in result
 
@@ -119,7 +118,7 @@ def test_limit_chain(alltypes, expr_fn):
     "expr_fn",
     [
         param(lambda t: t, id="alltypes table"),
-        param(lambda t: t.join(t.view(), t.id == t.view().int_col), id="self join"),
+        param(lambda t: t.join(t.view(), [("id", "int_col")]), id="self join"),
     ],
 )
 def test_unbind(alltypes, expr_fn):

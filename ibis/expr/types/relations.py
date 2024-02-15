@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import collections
-import contextlib
-import functools
 import itertools
 import operator
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from keyword import iskeyword
-from typing import TYPE_CHECKING, Callable, Literal
+from typing import (
+    TYPE_CHECKING,
+    Any,
+    Callable,
+    Literal,
+)
 
 import toolz
 from public import public
@@ -19,9 +21,11 @@ import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
 import ibis.expr.schema as sch
 from ibis import util
-from ibis.common.deferred import Deferred, Resolver
+from ibis.common.deferred import Deferred
 from ibis.expr.types.core import Expr, _FixedTextJupyterMixin
-from ibis.expr.types.generic import literal
+from ibis.expr.types.generic import ValueExpr, literal
+from ibis.selectors import Selector
+from ibis.util import deprecated
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -30,29 +34,12 @@ if TYPE_CHECKING:
     import ibis.expr.types as ir
     import ibis.selectors as s
     from ibis.common.typing import SupportsSchema
+    from ibis.expr.operations.relations import JoinKind
+    from ibis.expr.types import Table
     from ibis.expr.types.groupby import GroupedTable
     from ibis.expr.types.tvf import WindowedTable
     from ibis.formats.pyarrow import PyArrowData
-    from ibis.selectors import IfAnyAll, Selector
-
-_ALIASES = (f"_ibis_view_{n:d}" for n in itertools.count())
-
-
-def _ensure_expr(table, expr):
-    from ibis.selectors import Selector
-
-    # This is different than self._ensure_expr, since we don't want to
-    # treat `str` or `int` values as column indices
-    if isinstance(expr, Expr):
-        return expr
-    elif util.is_function(expr):
-        return expr(table)
-    elif isinstance(expr, Deferred):
-        return expr.resolve(table)
-    elif isinstance(expr, Selector):
-        return expr.expand(table)
-    else:
-        return literal(expr)
+    from ibis.selectors import IfAnyAll
 
 
 def _regular_join_method(
@@ -69,8 +56,8 @@ def _regular_join_method(
     ],
 ):
     def f(  # noqa: D417
-        self: Table,
-        right: Table,
+        self: ir.Table,
+        right: ir.Table,
         predicates: str
         | Sequence[
             str | tuple[str | ir.Column, str | ir.Column] | ir.BooleanValue
@@ -78,7 +65,7 @@ def _regular_join_method(
         *,
         lname: str = "",
         rname: str = "{name}_right",
-    ) -> Table:
+    ) -> ir.Table:
         """Perform a join between two tables.
 
         Parameters
@@ -103,6 +90,125 @@ def _regular_join_method(
 
     f.__name__ = name
     return f
+
+
+# TODO(kszucs): should use (table, *args, **kwargs) instead to avoid interpreting
+# nested inputs
+def bind(table: Table, value: Any, prefer_column=True) -> Iterator[ir.Value]:
+    """Bind a value to a table expression."""
+    if prefer_column and type(value) in (str, int):
+        yield table._get_column(value)
+    elif isinstance(value, ValueExpr):
+        yield value
+    elif isinstance(value, Table):
+        for name in value.columns:
+            yield value._get_column(name)
+    elif isinstance(value, Deferred):
+        yield value.resolve(table)
+    elif isinstance(value, Selector):
+        yield from value.expand(table)
+    elif isinstance(value, Mapping):
+        for k, v in value.items():
+            for val in bind(table, v, prefer_column=prefer_column):
+                yield val.name(k)
+    elif util.is_iterable(value):
+        for v in value:
+            yield from bind(table, v, prefer_column=prefer_column)
+    elif isinstance(value, ops.Value):
+        # TODO(kszucs): from certain builders, like ir.GroupedTable we pass
+        # operation nodes instead of expressions to table methods, it would
+        # be better to convert them to expressions before passing them to
+        # this function
+        yield value.to_expr()
+    elif callable(value):
+        yield value(table)
+    else:
+        yield literal(value)
+
+
+def unwrap_aliases(values: Iterator[ir.Value]) -> Mapping[str, ir.Value]:
+    """Unwrap aliases into a mapping of {name: expression}."""
+    result = {}
+    for value in values:
+        node = value.op()
+        if node.name in result:
+            raise com.IntegrityError(
+                f"Duplicate column name {node.name!r} in result set"
+            )
+        if isinstance(node, ops.Alias):
+            result[node.name] = node.arg
+        else:
+            result[node.name] = node
+    return result
+
+
+def dereference_mapping(parents):
+    parents = util.promote_list(parents)
+    mapping = {}
+
+    for parent in parents:
+        # do not defereference fields referencing the requested parents
+        for _, v in parent.fields.items():
+            mapping[v] = v
+
+    for parent in parents:
+        for k, v in parent.values.items():
+            if isinstance(v, ops.Field):
+                # track down the field in the hierarchy until no modification
+                # is made so only follow ops.Field nodes not arbitrary values;
+                # also stop tracking if the field belongs to a parent which
+                # we want to dereference to, see the docstring of
+                # `dereference_values()` for more details
+                while isinstance(v, ops.Field) and v not in mapping:
+                    mapping[v] = ops.Field(parent, k)
+                    v = v.rel.values.get(v.name)
+            elif v.relations and v not in mapping:
+                # do not dereference literal expressions
+                mapping[v] = ops.Field(parent, k)
+
+    return mapping
+
+
+def dereference_values(
+    parents: Iterable[ops.Parents], values: Mapping[str, ops.Value]
+) -> Mapping[str, ops.Value]:
+    """Trace and replace fields from earlier relations in the hierarchy.
+
+    In order to provide a nice user experience, we need to allow expressions
+    from earlier relations in the hierarchy. Consider the following example:
+
+    t = ibis.table([('a', 'int64'), ('b', 'string')], name='t')
+    t1 = t.select([t.a, t.b])
+    t2 = t1.filter(t.a > 0)  # note that not t1.a is referenced here
+    t3 = t2.select(t.a)  # note that not t2.a is referenced here
+
+    However the relational operations in the IR are strictly enforcing that
+    the expressions are referencing the immediate parent only. So we need to
+    track fields upwards the hierarchy to replace `t.a` with `t1.a` and `t2.a`
+    in the example above. This is called dereferencing.
+
+    Whether we can treat or not a field of a relation semantically equivalent
+    with a field of an earlier relation in the hierarchy depends on the
+    `.values` mapping of the relation. Leaf relations, like `t` in the example
+    above, have an empty `.values` mapping, so we cannot dereference fields
+    from them. On the other hand a projection, like `t1` in the example above,
+    has a `.values` mapping like `{'a': t.a, 'b': t.b}`, so we can deduce that
+    `t1.a` is semantically equivalent with `t.a` and so on.
+
+    Parameters
+    ----------
+    parents
+        The relations we want the values to point to.
+    values
+        The values to dereference.
+
+    Returns
+    -------
+    The same mapping as `values` but with all the dereferenceable fields
+    replaced with the fields from the parents.
+    """
+    subs = dereference_mapping(parents)
+    return {k: v.replace(subs, filter=ops.Value) for k, v in values.items()}
 
 
 @public
@@ -178,6 +284,40 @@ class Table(Expr, _FixedTextJupyterMixin):
             return where
 
         return where.resolve(self)
+
+    def as_scalar(self) -> ir.ScalarExpr:
+        """Inform ibis that the table expression should be treated as a scalar.
+
+        Note that the table must have exactly one column and one row for this to
+        work. If the table has more than one column an error will be raised in
+        expression construction time. If the table has more than one row an
+        error will be raised by the backend when the expression is executed.
+
+        Returns
+        -------
+        Scalar
+            A scalar subquery
+
+        Examples
+        --------
+        >>> import ibis
+        >>>
+        >>> ibis.options.interactive = True
+        >>>
+        >>> t = ibis.examples.penguins.fetch()
+        >>> heavy_gentoo = t.filter(t.species == "Gentoo", t.body_mass_g > 6200)
+        >>> from_that_island = t.filter(t.island == heavy_gentoo.select("island").as_scalar())
+        >>> from_that_island.group_by("species").count()
+        ┏━━━━━━━━━┳━━━━━━━━━━━━━┓
+        ┃ species ┃ CountStar() ┃
+        ┡━━━━━━━━━╇━━━━━━━━━━━━━┩
+        │ string  │ int64       │
+        ├─────────┼─────────────┤
+        │ Adelie  │          44 │
+        │ Gentoo  │         124 │
+        └─────────┴─────────────┘
+        """
+        return ops.ScalarSubquery(self).to_expr()
 
     def as_table(self) -> Table:
         """Promote the expression to a table.
@@ -386,6 +526,13 @@ class Table(Expr, _FixedTextJupyterMixin):
             console.print_exception()
             raise e
         return console.render(table, options=options)
+
+    # TODO(kszucs): expose this method in the public API
+    def _get_column(self, name: str | int) -> ir.Column:
+        """Get a column from the table."""
+        if isinstance(name, int):
+            name = self.schema().name_at_position(name)
+        return ops.Field(self, name).to_expr()
 
     def __getitem__(self, what):
         """Select items from a table expression.
@@ -631,33 +778,24 @@ class Table(Expr, _FixedTextJupyterMixin):
         │           36.7 │          19.3 │               193 │        3450 │
         └────────────────┴───────────────┴───────────────────┴─────────────┘
         """
-        from ibis.expr.types.generic import Column
         from ibis.expr.types.logical import BooleanValue
 
         if isinstance(what, (str, int)):
-            return ops.TableColumn(self, what).to_expr()
-
-        if isinstance(what, slice):
+            return self._get_column(what)
+        elif isinstance(what, slice):
             limit, offset = util.slice_to_limit_offset(what, self.count())
             return self.limit(limit, offset=offset)
-
-        what = bind_expr(self, what)
-
-        if isinstance(what, (list, tuple, Table)):
+        elif isinstance(what, (list, tuple, Table)):
             # Projection case
             return self.select(what)
-        elif isinstance(what, BooleanValue):
-            # Boolean predicate
-            return self.filter([what])
-        elif isinstance(what, Column):
-            # Projection convenience
-            return self.select(what)
+
+        items = tuple(bind(self, what))
+        if util.all_of(items, BooleanValue):
+            # TODO(kszucs): this branch should be removed, .filter should be
+            # used instead
+            return self.filter(items)
         else:
-            raise NotImplementedError(
-                "Selection rows or columns with {} objects is not supported".format(
-                    type(what).__name__
-                )
-            )
+            return self.select(items)
 
     def __len__(self):
         raise com.ExpressionError("Use .count() instead")
@@ -699,8 +837,10 @@ class Table(Expr, _FixedTextJupyterMixin):
         │ …         │
         └───────────┘
         """
-        with contextlib.suppress(com.IbisTypeError):
-            return ops.TableColumn(self, key).to_expr()
+        try:
+            return self._get_column(key)
+        except com.IbisTypeError:
+            pass
 
         # A mapping of common attribute typos, mapping them to the proper name
         common_typos = {
@@ -715,6 +855,7 @@ class Table(Expr, _FixedTextJupyterMixin):
             raise AttributeError(
                 f"{type(self).__name__} object has no attribute {key!r}, did you mean {hint!r}"
             )
+
         raise AttributeError(f"'Table' object has no attribute {key!r}")
 
     def __dir__(self) -> list[str]:
@@ -724,28 +865,6 @@ class Table(Expr, _FixedTextJupyterMixin):
 
     def _ipython_key_completions_(self) -> list[str]:
         return self.columns
-
-    def _ensure_expr(self, expr):
-        import numpy as np
-
-        from ibis.selectors import Selector
-
-        if isinstance(expr, str):
-            # treat strings as column names
-            return self[expr]
-        elif isinstance(expr, (int, np.integer)):
-            # treat Python integers as a column index
-            return self[self.schema().name_at_position(expr)]
-        elif isinstance(expr, Deferred):
-            return expr.resolve(self)
-        elif isinstance(expr, Resolver):
-            return expr.resolve({"_": self})
-        elif isinstance(expr, Selector):
-            return expr.expand(self)
-        elif callable(expr):
-            return expr(self)
-        else:
-            return expr
 
     @property
     def columns(self) -> list[str]:
@@ -797,7 +916,7 @@ class Table(Expr, _FixedTextJupyterMixin):
 
     def group_by(
         self,
-        by: str | ir.Value | Iterable[str] | Iterable[ir.Value] | None = None,
+        by: str | ir.Value | Iterable[str] | Iterable[ir.Value] | None = (),
         **key_exprs: str | ir.Value | Iterable[str] | Iterable[ir.Value],
     ) -> GroupedTable:
         """Create a grouped table expression.
@@ -853,8 +972,13 @@ class Table(Expr, _FixedTextJupyterMixin):
         """
         from ibis.expr.types.groupby import GroupedTable
 
-        return GroupedTable(self, by, **key_exprs)
+        if by is None:
+            by = ()
 
+        groups = bind(self, (by, key_exprs))
+        return GroupedTable(self, groups)
+
+    # TODO(kszucs): shouldn't this be ibis.rowid() instead not bound to a specific table?
     def rowid(self) -> ir.IntegerValue:
         """A unique integer per row.
 
@@ -890,7 +1014,10 @@ class Table(Expr, _FixedTextJupyterMixin):
         Table
             Table expression
         """
-        return ops.SelfReference(self).to_expr()
+        if isinstance(self.op(), ops.SelfReference):
+            return self
+        else:
+            return ops.SelfReference(self).to_expr()
 
     def difference(self, table: Table, *rest: Table, distinct: bool = True) -> Table:
         """Compute the set difference of multiple table expressions.
@@ -955,9 +1082,9 @@ class Table(Expr, _FixedTextJupyterMixin):
 
     def aggregate(
         self,
-        metrics: Sequence[ir.Scalar] | None = None,
-        by: Sequence[ir.Value] | None = None,
-        having: Sequence[ir.BooleanValue] | None = None,
+        metrics: Sequence[ir.Scalar] | None = (),
+        by: Sequence[ir.Value] | None = (),
+        having: Sequence[ir.BooleanValue] | None = (),
         **kwargs: ir.Value,
     ) -> Table:
         """Aggregate a table with a given set of reductions grouping by `by`.
@@ -1022,33 +1149,46 @@ class Table(Expr, _FixedTextJupyterMixin):
         │ orange │       0.33 │     0.33 │
         └────────┴────────────┴──────────┘
         """
-        import ibis.expr.analysis as an
+        from ibis.common.patterns import Contains, In
+        from ibis.expr.rewrites import p
 
-        metrics = itertools.chain(
-            itertools.chain.from_iterable(
-                (
-                    (_ensure_expr(self, m) for m in metric)
-                    if isinstance(metric, (list, tuple))
-                    else util.promote_list(_ensure_expr(self, metric))
-                )
-                for metric in util.promote_list(metrics)
-            ),
-            (
-                e.name(name)
-                for name, expr in kwargs.items()
-                for e in util.promote_list(_ensure_expr(self, expr))
-            ),
-        )
+        node = self.op()
 
-        agg = ops.Aggregation(
-            self,
-            metrics=list(metrics),
-            by=bind_expr(self, util.promote_list(by)),
-            having=bind_expr(self, util.promote_list(having)),
-        )
-        agg = an.simplify_aggregation(agg)
+        groups = bind(self, by)
+        metrics = bind(self, (metrics, kwargs))
+        having = bind(self, having)
 
-        return agg.to_expr()
+        groups = unwrap_aliases(groups)
+        metrics = unwrap_aliases(metrics)
+        having = unwrap_aliases(having)
+
+        groups = dereference_values(node, groups)
+        metrics = dereference_values(node, metrics)
+        having = dereference_values(node, having)
+
+        # the user doesn't need to specify the metrics used in the having clause
+        # explicitly, we implicitly add them to the metrics list by looking for
+        # any metrics depending on self which are not specified explicitly
+        pattern = p.Reduction(relations=Contains(node)) & ~In(set(metrics.values()))
+        original_metrics = metrics.copy()
+        for pred in having.values():
+            for metric in pred.find_topmost(pattern):
+                if metric.name in metrics:
+                    metrics[util.get_name("metric")] = metric
+                else:
+                    metrics[metric.name] = metric
+
+        # construct the aggregate node
+        agg = ops.Aggregate(node, groups, metrics).to_expr()
+
+        if having:
+            # apply the having clause
+            agg = agg.filter(*having.values())
+            # remove any metrics that were only used in the having clause
+            if metrics != original_metrics:
+                agg = agg.select(*groups.keys(), *original_metrics.keys())
+
+        return agg
 
     agg = aggregate
 
@@ -1555,22 +1695,14 @@ class Table(Expr, _FixedTextJupyterMixin):
         │     2 │ B      │     6 │
         └───────┴────────┴───────┘
         """
-        import ibis.selectors as s
-
-        sort_keys = []
-        for item in util.promote_list(by):
-            if isinstance(item, tuple):
-                if len(item) != 2:
-                    raise ValueError(f"Tuple must be of length 2, got {len(item):d}")
-                sort_keys.append(bind_expr(self, item[0]), item[1])
-            elif isinstance(item, s.Selector):
-                sort_keys.extend(item.expand(self))
-            else:
-                sort_keys.append(bind_expr(self, item))
-
-        if not sort_keys:
+        keys = bind(self, by)
+        keys = unwrap_aliases(keys)
+        keys = dereference_values(self.op(), keys)
+        if not keys:
             raise com.IbisError("At least one sort key must be provided")
-        return self.op().order_by(sort_keys).to_expr()
+
+        node = ops.Sort(self, keys.values())
+        return node.to_expr()
 
     def union(self, table: Table, *rest: Table, distinct: bool = False) -> Table:
         """Compute the set union of multiple table expressions.
@@ -1707,6 +1839,7 @@ class Table(Expr, _FixedTextJupyterMixin):
             node = ops.Intersection(node, table, distinct=distinct)
         return node.to_expr().select(self.columns)
 
+    @deprecated(as_of="9.0", instead="use table.as_scalar() instead")
     def to_array(self) -> ir.Column:
         """View a single column table as an array.
 
@@ -1720,12 +1853,9 @@ class Table(Expr, _FixedTextJupyterMixin):
             raise com.ExpressionError(
                 "Table must have exactly one column when viewed as array"
             )
+        return self.as_scalar()
 
-        return ops.TableArrayView(self).to_expr()
-
-    def mutate(
-        self, exprs: Sequence[ir.Expr] | None = None, **mutations: ir.Value
-    ) -> Table:
+    def mutate(self, *exprs: Sequence[ir.Expr] | None, **mutations: ir.Value) -> Table:
         """Add columns to a table expression.
 
         Parameters
@@ -1811,28 +1941,14 @@ class Table(Expr, _FixedTextJupyterMixin):
         │ Adelie  │  2007 │       -7.22193 │
         └─────────┴───────┴────────────────┘
         """
-        import ibis.expr.analysis as an
-
-        exprs = [] if exprs is None else util.promote_list(exprs)
-
-        new_exprs = []
-
-        for expr in exprs:
-            if isinstance(expr, Mapping):
-                new_exprs.extend(
-                    _ensure_expr(self, val).name(name) for name, val in expr.items()
-                )
-            else:
-                new_exprs.extend(util.promote_list(_ensure_expr(self, expr)))
-
-        new_exprs.extend(
-            e.name(name)
-            for name, expr in mutations.items()
-            for e in util.promote_list(_ensure_expr(self, expr))
-        )
-
-        mutation_exprs = an.get_mutation_exprs(new_exprs, self)
-        return self.select(mutation_exprs)
+        # string and integer inputs are going to be coerced to literals instead
+        # of interpreted as column references like in select
+        node = self.op()
+        values = bind(self, (exprs, mutations), prefer_column=False)
+        values = unwrap_aliases(values)
+        # allow overriding of fields, hence the mutation behavior
+        values = {**node.fields, **values}
+        return self.select(**values)
 
     def select(
         self,
@@ -2011,39 +2127,22 @@ class Table(Expr, _FixedTextJupyterMixin):
         │       43.92193 │      17.15117 │        200.915205 │ 4201.754386 │
         └────────────────┴───────────────┴───────────────────┴─────────────┘
         """
-        import ibis.expr.analysis as an
-        from ibis.selectors import Selector
+        from ibis.expr.rewrites import rewrite_project_input
 
-        new_exprs = []
-
-        for expr in exprs:
-            if isinstance(expr, Selector):
-                new_exprs.extend(expr.expand(self))
-            elif isinstance(expr, Mapping):
-                new_exprs.extend(
-                    self._ensure_expr(value).name(name) for name, value in expr.items()
-                )
-            else:
-                new_exprs.extend(map(self._ensure_expr, util.promote_list(expr)))
-
-        new_exprs.extend(
-            self._ensure_expr(expr).name(name) for name, expr in named_exprs.items()
-        )
-
-        if not new_exprs:
+        values = bind(self, (exprs, named_exprs))
+        values = unwrap_aliases(values)
+        values = dereference_values(self.op(), values)
+        if not values:
             raise com.IbisTypeError(
                 "You must select at least one column for a valid projection"
             )
-        for ex in new_exprs:
-            if not isinstance(ex, Expr):
-                raise com.IbisTypeError(
-                    "All arguments to `.select` must be coerceable to "
-                    f"expressions - got {type(ex)!r}"
-                )
 
-        op = an.Projector(self, new_exprs).get_result()
-
-        return op.to_expr()
+        # we need to detect reductions which are either turned into window functions
+        # or scalar subqueries depending on whether they are originating from self
+        values = {
+            k: rewrite_project_input(v, relation=self.op()) for k, v in values.items()
+        }
+        return ops.Project(self, values).to_expr()
 
     projection = select
 
@@ -2355,7 +2454,7 @@ class Table(Expr, _FixedTextJupyterMixin):
 
     def filter(
         self,
-        predicates: ir.BooleanValue | Sequence[ir.BooleanValue] | IfAnyAll,
+        *predicates: ir.BooleanValue | Sequence[ir.BooleanValue] | IfAnyAll,
     ) -> Table:
         """Select rows from `table` based on `predicates`.
 
@@ -2404,11 +2503,17 @@ class Table(Expr, _FixedTextJupyterMixin):
         │ male   │        68 │
         └────────┴───────────┘
         """
-        import ibis.expr.analysis as an
+        from ibis.expr.analysis import flatten_predicates
+        from ibis.expr.rewrites import rewrite_filter_input
 
-        resolved_predicates = _resolve_predicates(self, predicates)
-        relation = an.pushdown_selection_filters(self.op(), resolved_predicates)
-        return relation.to_expr()
+        preds = bind(self, predicates)
+        preds = unwrap_aliases(preds)
+        preds = dereference_values(self.op(), preds)
+        preds = flatten_predicates(list(preds.values()))
+        preds = list(map(rewrite_filter_input, preds))
+        if not preds:
+            raise com.IbisInputError("You must pass at least one predicate to filter")
+        return ops.Filter(self, preds).to_expr()
 
     def nunique(self, where: ir.BooleanValue | None = None) -> ir.IntegerScalar:
         """Compute the number of unique rows in the table.
@@ -2537,7 +2642,7 @@ class Table(Expr, _FixedTextJupyterMixin):
         344
         """
         if subset is not None:
-            subset = bind_expr(self, util.promote_list(subset))
+            subset = bind(self, subset)
         return ops.DropNa(self, how, subset).to_expr()
 
     def fillna(
@@ -2609,7 +2714,7 @@ class Table(Expr, _FixedTextJupyterMixin):
         """
         schema = self.schema()
 
-        if isinstance(replacements, collections.abc.Mapping):
+        if isinstance(replacements, Mapping):
             for col, val in replacements.items():
                 if col not in schema:
                     columns_formatted = ", ".join(map(repr, schema.names))
@@ -2620,7 +2725,7 @@ class Table(Expr, _FixedTextJupyterMixin):
 
                 col_type = schema[col]
                 val_type = val.type() if isinstance(val, Expr) else dt.infer(val)
-                if not dt.castable(val_type, col_type):
+                if not val_type.castable(col_type):
                     raise com.IbisTypeError(
                         f"Cannot fillna on column {col!r} of type {col_type} with a "
                         f"value of type {val_type}"
@@ -2632,7 +2737,7 @@ class Table(Expr, _FixedTextJupyterMixin):
                 else dt.infer(replacements)
             )
             for col, col_type in schema.items():
-                if col_type.nullable and not dt.castable(val_type, col_type):
+                if col_type.nullable and not val_type.castable(col_type):
                     raise com.IbisTypeError(
                         f"Cannot fillna on column {col!r} of type {col_type} with a "
                         f"value of type {val_type} - pass in an explicit mapping "
@@ -2766,17 +2871,7 @@ class Table(Expr, _FixedTextJupyterMixin):
                 str | ir.Column | ir.Deferred,
             ]
         ] = (),
-        how: Literal[
-            "inner",
-            "left",
-            "outer",
-            "right",
-            "semi",
-            "anti",
-            "any_inner",
-            "any_left",
-            "left_semi",
-        ] = "inner",
+        how: JoinKind = "inner",
         *,
         lname: str = "",
         rname: str = "{name}_right",
@@ -2887,17 +2982,17 @@ class Table(Expr, _FixedTextJupyterMixin):
         rated a movie:
 
         >>> tags.join(ratings, ["userId", "movieId"]).head(5)
-        ┏━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━┓
-        ┃ userId ┃ movieId ┃ tag            ┃ timestamp  ┃ rating  ┃
-        ┡━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━┩
-        │ int64  │ int64   │ string         │ int64      │ float64 │
-        ├────────┼─────────┼────────────────┼────────────┼─────────┤
-        │     62 │       2 │ Robin Williams │ 1528843907 │     4.0 │
-        │     62 │     110 │ sword fight    │ 1528152535 │     4.5 │
-        │     62 │     410 │ gothic         │ 1525636609 │     4.5 │
-        │     62 │    2023 │ mafia          │ 1525636733 │     5.0 │
-        │     62 │    2124 │ quirky         │ 1525636846 │     5.0 │
-        └────────┴─────────┴────────────────┴────────────┴─────────┘
+        ┏━━━━━━━━┳━━━━━━━━━┳━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━┳━━━━━━━━━┓
+        ┃ userId ┃ movieId ┃ tag             ┃ timestamp  ┃ rating  ┃
+        ┡━━━━━━━━╇━━━━━━━━━╇━━━━━━━━━━━━━━━━━╇━━━━━━━━━━━━╇━━━━━━━━━┩
+        │ int64  │ int64   │ string          │ int64      │ float64 │
+        ├────────┼─────────┼─────────────────┼────────────┼─────────┤
+        │      2 │   60756 │ will ferrell    │ 1445714992 │     5.0 │
+        │      2 │   89774 │ Tom Hardy       │ 1445715205 │     5.0 │
+        │      2 │  106782 │ Martin Scorsese │ 1445715056 │     5.0 │
+        │      7 │   48516 │ way too long    │ 1169687325 │     1.0 │
+        │     18 │     431 │ mafia           │ 1462138755 │     4.0 │
+        └────────┴─────────┴─────────────────┴────────────┴─────────┘
 
         To self-join a table with itself, you need to call
         `.view()` on one of the arguments so the two tables
@@ -2935,34 +3030,17 @@ class Table(Expr, _FixedTextJupyterMixin):
         │  106782 │ Leonardo DiCaprio │          5989 │ Leonardo DiCaprio │
         └─────────┴───────────────────┴───────────────┴───────────────────┘
         """
+        from ibis.expr.types.joins import Join
 
-        _join_classes = {
-            "inner": ops.InnerJoin,
-            "left": ops.LeftJoin,
-            "any_inner": ops.AnyInnerJoin,
-            "any_left": ops.AnyLeftJoin,
-            "outer": ops.OuterJoin,
-            "right": ops.RightJoin,
-            "left_semi": ops.LeftSemiJoin,
-            "semi": ops.LeftSemiJoin,
-            "anti": ops.LeftAntiJoin,
-            "cross": ops.CrossJoin,
-        }
-
-        klass = _join_classes[how.lower()]
-        expr = klass(left, right, predicates).to_expr()
-
-        # semi/anti join only give access to the left table's fields, so
-        # there's never overlap
-        if how in ("left_semi", "semi", "anti"):
-            return expr
-
-        return ops.relations._dedup_join_columns(expr, lname=lname, rname=rname)
+        return Join(left.op()).join(
+            right, predicates, how=how, lname=lname, rname=rname
+        )
 
     def asof_join(
         left: Table,
         right: Table,
-        predicates: str | ir.BooleanColumn | Sequence[str | ir.BooleanColumn] = (),
+        on: str | ir.BooleanColumn,
+        predicates: str | ir.Column | Sequence[str | ir.Column] = (),
         by: str | ir.Column | Sequence[str | ir.Column] = (),
         tolerance: str | ir.IntervalScalar | None = None,
         *,
@@ -2982,10 +3060,12 @@ class Table(Expr, _FixedTextJupyterMixin):
             Table expression
         right
             Table expression
+        on
+            Closest match inequality condition
         predicates
-            Join expressions
+            Additional join predicates
         by
-            column to group by before joining
+            Additional equality join predicates
         tolerance
             Amount of time to look behind when joining
         lname
@@ -3000,14 +3080,11 @@ class Table(Expr, _FixedTextJupyterMixin):
         Table
             Table expression
         """
-        op = ops.AsOfJoin(
-            left=left,
-            right=right,
-            predicates=predicates,
-            by=by,
-            tolerance=tolerance,
+        from ibis.expr.types.joins import Join
+
+        return Join(left.op()).asof_join(
+            right, on, predicates, by=by, tolerance=tolerance, lname=lname, rname=rname
         )
-        return ops.relations._dedup_join_columns(op.to_expr(), lname=lname, rname=rname)
 
     def cross_join(
         left: Table,
@@ -3083,12 +3160,9 @@ class Table(Expr, _FixedTextJupyterMixin):
         >>> expr.count()
         344
         """
-        op = ops.CrossJoin(
-            left,
-            functools.reduce(Table.cross_join, rest, right),
-            [],
-        )
-        return ops.relations._dedup_join_columns(op.to_expr(), lname=lname, rname=rname)
+        from ibis.expr.types.joins import Join
+
+        return Join(left.op()).cross_join(right, *rest, lname=lname, rname=rname)
 
     inner_join = _regular_join_method("inner_join", "inner")
     left_join = _regular_join_method("left_join", "left")
@@ -3145,11 +3219,6 @@ class Table(Expr, _FixedTextJupyterMixin):
         └─────────┴───────────┴────────────────┴───────────────┴───────────────────┴───┘
         """
         expr = ops.View(child=self, name=alias).to_expr()
-
-        # NB: calling compile is necessary so that any temporary views are
-        # created so that we can infer the schema without executing the entire
-        # query
-        expr.compile()
         return expr
 
     def sql(self, query: str, dialect: str | None = None) -> ir.Table:
@@ -3237,13 +3306,23 @@ class Table(Expr, _FixedTextJupyterMixin):
         --------
         [`Table.alias`](#ibis.expr.types.relations.Table.alias)
         '''
+        op = self.op()
+        backend = self._find_backend()
 
-        # only transpile if dialect was passed
         if dialect is not None:
-            backend = self._find_backend()
+            # only transpile if dialect was passed
             query = backend._transpile_sql(query, dialect=dialect)
-        op = ops.SQLStringView(child=self, name=next(_ALIASES), query=query)
-        return op.to_expr()
+
+        if isinstance(op, ops.View):
+            name = op.name
+            expr = op.child.to_expr()
+        else:
+            name = util.gen_name("sql_query")
+            expr = self
+
+        schema = backend._get_sql_string_view_schema(name, expr, query)
+        node = ops.SQLStringView(child=self.op(), query=query, schema=schema)
+        return node.to_expr()
 
     def to_pandas(self, **kwargs) -> pd.DataFrame:
         """Convert a table expression to a pandas DataFrame.
@@ -4344,43 +4423,4 @@ class CachedTable(Table):
         return current_backend._release_cached(self)
 
 
-# TODO(kszucs): used at a single place along with an.apply_filter(), should be
-# consolidated into a single function
-def _resolve_predicates(
-    table: Table, predicates
-) -> tuple[list[ir.BooleanValue], list[tuple[ir.BooleanValue, ir.Table]]]:
-    import ibis.expr.types as ir
-    from ibis.expr.analysis import flatten_predicate, p
-
-    # TODO(kszucs): clean this up, too much flattening and resolving happens here
-    predicates = [
-        pred.op()
-        for preds in map(
-            functools.partial(ir.relations.bind_expr, table),
-            util.promote_list(predicates),
-        )
-        for pred in util.promote_list(preds)
-    ]
-    predicates = flatten_predicate(predicates)
-
-    rules = (
-        # turn reductions into table array views so that they can be used as
-        # WHERE t1.`a` = (SELECT max(t1.`a`) AS `Max(a)`
-        p.Reduction >> (lambda _: ops.TableArrayView(_.to_expr().as_table()))
-        |
-        # resolve unresolved exists subqueries to IN subqueries
-        p.UnresolvedExistsSubquery >> (lambda _: _.resolve(table.op()))
-    )
-    # do not apply the rules below the following nodes
-    until = p.Value & ~p.WindowFunction & ~p.TableArrayView & ~p.ExistsSubquery
-    return [pred.replace(rules, filter=until) for pred in predicates]
-
-
-def bind_expr(table, expr):
-    if util.is_iterable(expr):
-        return [bind_expr(table, x) for x in expr]
-
-    return table._ensure_expr(expr)
-
-
-public(TableExpr=Table)
+public(Table=Table, CachedTable=CachedTable)

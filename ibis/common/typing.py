@@ -66,6 +66,7 @@ def get_type_hints(
     Returns
     -------
     Mapping of parameter or attribute name to type hint.
+
     """
     try:
         hints = _get_type_hints(obj, include_extras=include_extras)
@@ -111,6 +112,7 @@ def get_type_params(obj: Any) -> dict[str, type]:
     >>>
     >>> get_type_params(MyDict[int, str])
     {'T': <class 'int'>, 'U': <class 'str'>}
+
     """
     args = get_args(obj)
     origin = get_origin(obj) or obj
@@ -156,6 +158,7 @@ def get_bound_typevars(obj: Any) -> dict[TypeVar, tuple[str, type]]:
     ...         ...
     >>> get_bound_typevars(MyStruct[float, bytes])
     {~T: ('a', <class 'float'>), ~U: ('myprop', <class 'bytes'>)}
+
     """
     origin = get_origin(obj) or obj
     hints = get_type_hints(origin, include_properties=True)
@@ -172,6 +175,7 @@ def evaluate_annotations(
     annots: dict[str, str],
     module_name: str,
     class_name: Optional[str] = None,
+    best_effort: bool = False,
 ) -> dict[str, Any]:
     """Evaluate type annotations that are strings.
 
@@ -185,6 +189,8 @@ def evaluate_annotations(
     class_name
         The name of the class that the annotations are defined in, hence
         providing Self type.
+    best_effort
+        Whether to ignore errors when evaluating type annotations.
 
     Returns
     -------
@@ -195,6 +201,7 @@ def evaluate_annotations(
     >>> annots = {"a": "dict[str, float]", "b": "int"}
     >>> evaluate_annotations(annots, __name__)
     {'a': dict[str, float], 'b': <class 'int'>}
+
     """
     module = sys.modules.get(module_name, None)
     globalns = getattr(module, "__dict__", None)
@@ -202,10 +209,18 @@ def evaluate_annotations(
         localns = None
     else:
         localns = dict(Self=f"{module_name}.{class_name}")
-    return {
-        k: eval(v, globalns, localns) if isinstance(v, str) else v
-        for k, v in annots.items()
-    }
+
+    result = {}
+    for k, v in annots.items():
+        if isinstance(v, str):
+            try:
+                v = eval(v, globalns, localns)
+            except NameError:
+                if not best_effort:
+                    raise
+        result[k] = v
+
+    return result
 
 
 def format_typehint(typ: Any) -> str:

@@ -1,26 +1,115 @@
-WITH t0 AS (
+SELECT
+  "t10"."c_custkey",
+  "t10"."c_name",
+  "t10"."revenue",
+  "t10"."c_acctbal",
+  "t10"."n_name",
+  "t10"."c_address",
+  "t10"."c_phone",
+  "t10"."c_comment"
+FROM (
   SELECT
-    t2.c_custkey AS c_custkey,
-    t2.c_name AS c_name,
-    t2.c_acctbal AS c_acctbal,
-    t5.n_name AS n_name,
-    t2.c_address AS c_address,
-    t2.c_phone AS c_phone,
-    t2.c_comment AS c_comment,
-    SUM(t4.l_extendedprice * (
-      CAST(1 AS TINYINT) - t4.l_discount
-    )) AS revenue
-  FROM main.customer AS t2
-  JOIN main.orders AS t3
-    ON t2.c_custkey = t3.o_custkey
-  JOIN main.lineitem AS t4
-    ON t4.l_orderkey = t3.o_orderkey
-  JOIN main.nation AS t5
-    ON t2.c_nationkey = t5.n_nationkey
-  WHERE
-    t3.o_orderdate >= MAKE_DATE(1993, 10, 1)
-    AND t3.o_orderdate < MAKE_DATE(1994, 1, 1)
-    AND t4.l_returnflag = 'R'
+    "t9"."c_custkey",
+    "t9"."c_name",
+    "t9"."c_acctbal",
+    "t9"."n_name",
+    "t9"."c_address",
+    "t9"."c_phone",
+    "t9"."c_comment",
+    SUM("t9"."l_extendedprice" * (
+      CAST(1 AS TINYINT) - "t9"."l_discount"
+    )) AS "revenue"
+  FROM (
+    SELECT
+      "t8"."c_custkey",
+      "t8"."c_name",
+      "t8"."c_address",
+      "t8"."c_nationkey",
+      "t8"."c_phone",
+      "t8"."c_acctbal",
+      "t8"."c_mktsegment",
+      "t8"."c_comment",
+      "t8"."o_orderkey",
+      "t8"."o_custkey",
+      "t8"."o_orderstatus",
+      "t8"."o_totalprice",
+      "t8"."o_orderdate",
+      "t8"."o_orderpriority",
+      "t8"."o_clerk",
+      "t8"."o_shippriority",
+      "t8"."o_comment",
+      "t8"."l_orderkey",
+      "t8"."l_partkey",
+      "t8"."l_suppkey",
+      "t8"."l_linenumber",
+      "t8"."l_quantity",
+      "t8"."l_extendedprice",
+      "t8"."l_discount",
+      "t8"."l_tax",
+      "t8"."l_returnflag",
+      "t8"."l_linestatus",
+      "t8"."l_shipdate",
+      "t8"."l_commitdate",
+      "t8"."l_receiptdate",
+      "t8"."l_shipinstruct",
+      "t8"."l_shipmode",
+      "t8"."l_comment",
+      "t8"."n_nationkey",
+      "t8"."n_name",
+      "t8"."n_regionkey",
+      "t8"."n_comment"
+    FROM (
+      SELECT
+        "t4"."c_custkey",
+        "t4"."c_name",
+        "t4"."c_address",
+        "t4"."c_nationkey",
+        "t4"."c_phone",
+        "t4"."c_acctbal",
+        "t4"."c_mktsegment",
+        "t4"."c_comment",
+        "t5"."o_orderkey",
+        "t5"."o_custkey",
+        "t5"."o_orderstatus",
+        "t5"."o_totalprice",
+        "t5"."o_orderdate",
+        "t5"."o_orderpriority",
+        "t5"."o_clerk",
+        "t5"."o_shippriority",
+        "t5"."o_comment",
+        "t6"."l_orderkey",
+        "t6"."l_partkey",
+        "t6"."l_suppkey",
+        "t6"."l_linenumber",
+        "t6"."l_quantity",
+        "t6"."l_extendedprice",
+        "t6"."l_discount",
+        "t6"."l_tax",
+        "t6"."l_returnflag",
+        "t6"."l_linestatus",
+        "t6"."l_shipdate",
+        "t6"."l_commitdate",
+        "t6"."l_receiptdate",
+        "t6"."l_shipinstruct",
+        "t6"."l_shipmode",
+        "t6"."l_comment",
+        "t7"."n_nationkey",
+        "t7"."n_name",
+        "t7"."n_regionkey",
+        "t7"."n_comment"
+      FROM "customer" AS "t4"
+      INNER JOIN "orders" AS "t5"
+        ON "t4"."c_custkey" = "t5"."o_custkey"
+      INNER JOIN "lineitem" AS "t6"
+        ON "t6"."l_orderkey" = "t5"."o_orderkey"
+      INNER JOIN "nation" AS "t7"
+        ON "t4"."c_nationkey" = "t7"."n_nationkey"
+    ) AS "t8"
+    WHERE
+      "t8"."o_orderdate" >= MAKE_DATE(1993, 10, 1)
+      AND "t8"."o_orderdate" < MAKE_DATE(1994, 1, 1)
+      AND "t8"."l_returnflag" = 'R'
+  ) AS "t9"
   GROUP BY
     1,
     2,
@@ -29,28 +118,7 @@ WITH t0 AS (
     5,
     6,
     7
-)
-SELECT
-  t1.c_custkey,
-  t1.c_name,
-  t1.revenue,
-  t1.c_acctbal,
-  t1.n_name,
-  t1.c_address,
-  t1.c_phone,
-  t1.c_comment
-FROM (
-  SELECT
-    t0.c_custkey AS c_custkey,
-    t0.c_name AS c_name,
-    t0.revenue AS revenue,
-    t0.c_acctbal AS c_acctbal,
-    t0.n_name AS n_name,
-    t0.c_address AS c_address,
-    t0.c_phone AS c_phone,
-    t0.c_comment AS c_comment
-  FROM t0
-) AS t1
+) AS "t10"
 ORDER BY
-  t1.revenue DESC
+  "t10"."revenue" DESC
 LIMIT 20

@@ -8,6 +8,7 @@ from pytest import param
 import ibis
 import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
+from ibis.backends.conftest import is_older_than
 from ibis.legacy.udf.vectorized import analytic, elementwise, reduction
 
 pytestmark = pytest.mark.notimpl(["druid", "oracle", "risingwave"])
@@ -37,7 +38,7 @@ def _format_struct_udf_return_type(func, result_formatter):
 
 # elementwise UDF
 def add_one(s):
-    assert isinstance(s, pd.Series)
+    assert isinstance(s, pd.Series), type(s)
     return s + 1
 
 
@@ -320,6 +321,11 @@ def test_reduction_udf_array_return_type(udf_backend, udf_alltypes, udf_df):
     udf_backend.assert_frame_equal(result, expected)
 
 
+@pytest.mark.broken(
+    ["pandas"],
+    condition=is_older_than("pandas", "2.0.0"),
+    reason="FutureWarning: Not prepending group keys to the result index of transform-like apply",
+)
 def test_reduction_udf_on_empty_data(udf_backend, udf_alltypes):
     """Test that summarization can handle empty data."""
     # First filter down to zero rows
@@ -362,14 +368,15 @@ def test_valid_kwargs(udf_backend, udf_alltypes, udf_df):
         # UDF with kwargs
         return v + kwargs.get("amount", 1)
 
-    result = udf_alltypes.mutate(
+    expr = udf_alltypes.mutate(
         v1=foo1(udf_alltypes["double_col"]),
         v2=foo2(udf_alltypes["double_col"], amount=1),
         v3=foo2(udf_alltypes["double_col"], amount=2),
         v4=foo3(udf_alltypes["double_col"]),
         v5=foo3(udf_alltypes["double_col"], amount=2),
         v6=foo3(udf_alltypes["double_col"], amount=3),
-    ).execute()
+    )
+    result = expr.execute()
 
     expected = udf_df.assign(
         v1=udf_df["double_col"] + 1,
@@ -518,7 +525,6 @@ def test_elementwise_udf_overwrite_destruct_and_assign(udf_backend, udf_alltypes
 
 @pytest.mark.xfail_version(pyspark=["pyspark<3.1"])
 @pytest.mark.parametrize("method", ["destructure", "unpack"])
-@pytest.mark.skip("dask")
 def test_elementwise_udf_destructure_exact_once(udf_alltypes, method, tmp_path):
     @elementwise(
         input_type=[dt.double],
@@ -570,7 +576,8 @@ def test_elementwise_udf_named_destruct(udf_alltypes):
     add_one_struct_udf = create_add_one_struct_udf(
         result_formatter=lambda v1, v2: (v1, v2)
     )
-    with pytest.raises(com.IbisTypeError, match=r"Unable to infer"):
+    msg = "Duplicate column name 'new_struct' in result set"
+    with pytest.raises(com.IntegrityError, match=msg):
         udf_alltypes.mutate(
             new_struct=add_one_struct_udf(udf_alltypes["double_col"]).destructure()
         )
@@ -635,7 +642,6 @@ def test_analytic_udf_destruct_no_group_by(udf_backend, udf_alltypes):
 
 
 @pytest.mark.notimpl(["pyspark"])
-@pytest.mark.xfail_version(dask=["pandas>=2"])
 def test_analytic_udf_destruct_overwrite(udf_backend, udf_alltypes):
     w = ibis.window(preceding=None, following=None, group_by="year")
 
@@ -721,7 +727,7 @@ def test_reduction_udf_destruct_no_group_by_overwrite(udf_backend, udf_alltypes)
 
 
 # TODO - windowing - #2553
-@pytest.mark.notimpl(["dask", "pyspark"])
+@pytest.mark.notimpl(["pyspark"])
 def test_reduction_udf_destruct_window(udf_backend, udf_alltypes):
     win = ibis.window(
         preceding=ibis.interval(hours=2),

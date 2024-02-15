@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import importlib
 from functools import lru_cache
 from typing import TYPE_CHECKING, Any
 
@@ -14,7 +13,7 @@ import ibis.expr.operations as ops
 import ibis.expr.schema as sch
 import ibis.expr.types as ir
 from ibis import util
-from ibis.backends.base import BaseBackend
+from ibis.backends.base import BaseBackend, NoUrl
 from ibis.formats.pandas import PandasData, PandasSchema
 from ibis.formats.pyarrow import PyArrowData
 
@@ -23,10 +22,11 @@ if TYPE_CHECKING:
     from collections.abc import Mapping, MutableMapping
 
 
-class BasePandasBackend(BaseBackend):
+class BasePandasBackend(BaseBackend, NoUrl):
     """Base class for backends based on pandas."""
 
     name = "pandas"
+    dialect = None
     backend_table_type = pd.DataFrame
 
     class Options(ibis.config.Config):
@@ -48,12 +48,13 @@ class BasePandasBackend(BaseBackend):
         >>> import ibis
         >>> ibis.pandas.connect({"t": pd.DataFrame({"a": [1, 2, 3]})})
         <ibis.backends.pandas.Backend at 0x...>
-        """
-        # register dispatchers
-        from ibis.backends.pandas import execution, udf  # noqa: F401
 
+        """
         self.dictionary = dictionary or {}
         self.schemas: MutableMapping[str, sch.Schema] = {}
+
+    def disconnect(self) -> None:
+        pass
 
     def from_dataframe(
         self,
@@ -77,6 +78,7 @@ class BasePandasBackend(BaseBackend):
         -------
         Table
             A table expression
+
         """
         if client is None:
             return self.connect({name: df}).table(name)
@@ -105,6 +107,7 @@ class BasePandasBackend(BaseBackend):
         -------
         ir.Table
             The just-registered table
+
         """
         table_name = table_name or util.gen_name("read_csv")
         df = pd.read_csv(source, **kwargs)
@@ -133,6 +136,7 @@ class BasePandasBackend(BaseBackend):
         -------
         ir.Table
             The just-registered table
+
         """
         table_name = table_name or util.gen_name("read_parquet")
         df = pd.read_parquet(source, **kwargs)
@@ -190,15 +194,10 @@ class BasePandasBackend(BaseBackend):
             raise com.IbisError("The schema or obj parameter is required")
 
         if obj is not None:
-            if not self._supports_conversion(obj):
-                raise com.BackendConversionError(
-                    f"Unable to convert {obj.__class__} object "
-                    f"to backend type: {self.__class__.backend_table_type}"
-                )
             df = self._convert_object(obj)
         else:
             dtypes = dict(PandasSchema.from_ibis(schema))
-            df = self._from_pandas(pd.DataFrame(columns=dtypes.keys()).astype(dtypes))
+            df = pd.DataFrame(columns=dtypes.keys()).astype(dtypes)
 
         if name in self.dictionary and not overwrite:
             raise com.IbisError(f"Cannot overwrite existing table `{name}`")
@@ -231,57 +230,36 @@ class BasePandasBackend(BaseBackend):
             )
         del self.dictionary[name]
 
-    @classmethod
-    def _supports_conversion(cls, obj: Any) -> bool:
-        if isinstance(obj, ir.Table):
-            return isinstance(obj.op(), ops.InMemoryTable)
-        return True
-
-    @staticmethod
-    def _from_pandas(df: pd.DataFrame) -> pd.DataFrame:
-        return df
-
-    @classmethod
-    def _convert_object(cls, obj: Any) -> Any:
-        if isinstance(obj, ir.Table):
-            # Support memtables
-            assert isinstance(obj.op(), ops.InMemoryTable)
-            return obj.op().data.to_frame()
+    def _convert_object(self, obj: Any) -> Any:
+        if isinstance(obj, pd.DataFrame):
+            return obj
+        elif isinstance(obj, ir.Table):
+            op = obj.op()
+            if isinstance(op, ops.InMemoryTable):
+                return op.data.to_frame()
+            else:
+                raise com.BackendConversionError(
+                    f"Unable to convert {obj.__class__} object "
+                    f"to backend type: {self.__class__.backend_table_type}"
+                )
         elif isinstance(obj, pa.Table):
             return obj.to_pandas()
-        return cls.backend_table_type(obj)
+        else:
+            raise com.BackendConversionError(
+                f"Unable to convert {obj.__class__} object "
+                f"to backend type: {self.__class__.backend_table_type}"
+            )
 
     @classmethod
     @lru_cache
     def _get_operations(cls):
-        backend = f"ibis.backends.{cls.name}"
+        from ibis.backends.pandas.kernels import supported_operations
 
-        execution = importlib.import_module(f"{backend}.execution")
-        execute_node = execution.execute_node
-
-        # import UDF to pick up AnalyticVectorizedUDF and others
-        importlib.import_module(f"{backend}.udf")
-
-        dispatch = importlib.import_module(f"{backend}.dispatch")
-        pre_execute = dispatch.pre_execute
-
-        return frozenset(
-            op
-            for op, *_ in execute_node.funcs.keys() | pre_execute.funcs.keys()
-            if issubclass(op, ops.Value)
-        )
+        return supported_operations
 
     @classmethod
     def has_operation(cls, operation: type[ops.Value]) -> bool:
-        # Pandas doesn't support geospatial ops, but the dispatcher implements
-        # a common base class that makes it appear that it does. Explicitly
-        # exclude these operations.
-        if issubclass(operation, (ops.GeoSpatialUnOp, ops.GeoSpatialBinOp)):
-            return False
-        op_classes = cls._get_operations()
-        return operation in op_classes or any(
-            issubclass(operation, op_impl) for op_impl in op_classes
-        )
+        return operation in cls._get_operations()
 
     def _clean_up_cached_table(self, op):
         del self.dictionary[op.name]
@@ -301,7 +279,7 @@ class BasePandasBackend(BaseBackend):
         # cudf.pandas adds a column with the name `__index_level_0__` (and maybe
         # other index level columns) but these aren't part of the known schema
         # so we drop them
-        output = output.drop_columns(
+        output = output.drop(
             filter(lambda col: col.startswith("__index_level_"), output.column_names)
         )
         table = PyArrowData.convert_table(output, table_expr.schema())
@@ -329,7 +307,7 @@ class Backend(BasePandasBackend):
     name = "pandas"
 
     def execute(self, query, params=None, limit="default", **kwargs):
-        from ibis.backends.pandas.core import execute_and_reset
+        from ibis.backends.pandas.executor import PandasExecutor
 
         if limit != "default" and limit is not None:
             raise ValueError(
@@ -344,16 +322,10 @@ class Backend(BasePandasBackend):
                 )
             )
 
-        node = query.op()
+        params = params or {}
+        params = {k.op() if isinstance(k, ir.Expr) else k: v for k, v in params.items()}
 
-        if params is None:
-            params = {}
-        else:
-            params = {
-                k.op() if isinstance(k, ir.Expr) else k: v for k, v in params.items()
-            }
-
-        return execute_and_reset(node, params=params, **kwargs)
+        return PandasExecutor.execute(query.op(), backend=self, params=params)
 
     def _load_into_cache(self, name, expr):
         self.create_table(name, expr.execute())

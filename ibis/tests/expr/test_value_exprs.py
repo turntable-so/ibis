@@ -115,6 +115,16 @@ multipolygon1 = [polygon1, polygon2]
         ("foo", "string"),
         (ipaddress.ip_address("1.2.3.4"), "inet"),
         (ipaddress.ip_address("::1"), "inet"),
+    ],
+)
+def test_literal_with_explicit_type(value, expected_type):
+    expr = ibis.literal(value, type=expected_type)
+    assert expr.type().equals(dt.validate_type(expected_type))
+
+
+@pytest.mark.parametrize(
+    ["value", "expected_type"],
+    [
         (list(pointA), "point"),
         (tuple(pointA), "point"),
         (list(lineAB), "linestring"),
@@ -133,7 +143,8 @@ multipolygon1 = [polygon1, polygon2]
         param(234234, "decimal(9, 3)", id="decimal_int"),
     ],
 )
-def test_literal_with_explicit_type(value, expected_type):
+def test_literal_with_explicit_geotype(value, expected_type):
+    pytest.importorskip("shapely")
     expr = ibis.literal(value, type=expected_type)
     assert expr.type().equals(dt.validate_type(expected_type))
 
@@ -247,6 +258,9 @@ def test_list_and_tuple_literals():
     # it works!
     repr(expr)
 
+
+def test_list_and_tuple_literals_geotype():
+    pytest.importorskip("shapely")
     # test using explicit type
     point = ibis.literal((1, 2, 1000), type="point")
     assert point.type() == dt.point
@@ -308,7 +322,7 @@ def test_distinct_table(functional_alltypes):
     expr = functional_alltypes.distinct()
     assert isinstance(expr.op(), ops.Distinct)
     assert isinstance(expr, ir.Table)
-    assert expr.op().table == functional_alltypes.op()
+    assert expr.op().parent == functional_alltypes.op()
 
 
 def test_nunique(functional_alltypes):
@@ -1465,10 +1479,9 @@ def test_deferred_r_ops(op_name, expected_left, expected_right):
 
     op = getattr(operator, op_name)
     expr = t[op(left, right).name("b")]
-
-    op = expr.op().selections[0].arg
-    assert op.left.equals(expected_left(t).op())
-    assert op.right.equals(expected_right(t).op())
+    node = expr.op().values["b"]
+    assert node.left.equals(expected_left(t).op())
+    assert node.right.equals(expected_right(t).op())
 
 
 @pytest.mark.parametrize(
@@ -1671,9 +1684,9 @@ def test_quantile_shape():
 
     projs = [b1]
     expr = t.select(projs)
-    (b1,) = expr.op().selections
+    b1 = expr.br2
 
-    assert b1.shape.is_columnar()
+    assert b1.op().shape.is_columnar()
 
 
 def test_sample():
@@ -1700,3 +1713,13 @@ def test_deferred_doesnt_convert_callables():
         b=t.b.split(",").filter(lambda pp: ~pp.isin(("word1", "word2")))
     )
     assert expr.equals(expected)
+
+
+def test_in_subquery_shape():
+    t = ibis.table([("a", "int64"), ("b", "string")])
+
+    expr = t.a.cast("string").isin(t.b)
+    assert expr.op().shape.is_columnar()
+
+    expr = ibis.literal(2).isin(t.a)
+    assert expr.op().shape.is_scalar()

@@ -1,56 +1,76 @@
-WITH t0 AS (
-  SELECT
-    t3.l_orderkey AS l1_orderkey,
-    t4.o_orderstatus AS o_orderstatus,
-    t3.l_receiptdate AS l_receiptdate,
-    t3.l_commitdate AS l_commitdate,
-    t3.l_suppkey AS l1_suppkey,
-    t2.s_name AS s_name,
-    t5.n_name AS n_name
-  FROM main.supplier AS t2
-  JOIN main.lineitem AS t3
-    ON t2.s_suppkey = t3.l_suppkey
-  JOIN main.orders AS t4
-    ON t4.o_orderkey = t3.l_orderkey
-  JOIN main.nation AS t5
-    ON t2.s_nationkey = t5.n_nationkey
-)
 SELECT
-  t1.s_name,
-  t1.numwait
+  "t14"."s_name",
+  "t14"."numwait"
 FROM (
   SELECT
-    t0.s_name AS s_name,
-    COUNT(*) AS numwait
-  FROM t0
-  WHERE
-    t0.o_orderstatus = 'F'
-    AND t0.l_receiptdate > t0.l_commitdate
-    AND t0.n_name = 'SAUDI ARABIA'
-    AND (
-      EXISTS(
+    "t13"."s_name",
+    COUNT(*) AS "numwait"
+  FROM (
+    SELECT
+      "t10"."l1_orderkey",
+      "t10"."o_orderstatus",
+      "t10"."l_receiptdate",
+      "t10"."l_commitdate",
+      "t10"."l1_suppkey",
+      "t10"."s_name",
+      "t10"."n_name"
+    FROM (
+      SELECT
+        "t5"."l_orderkey" AS "l1_orderkey",
+        "t8"."o_orderstatus",
+        "t5"."l_receiptdate",
+        "t5"."l_commitdate",
+        "t5"."l_suppkey" AS "l1_suppkey",
+        "t4"."s_name",
+        "t9"."n_name"
+      FROM "supplier" AS "t4"
+      INNER JOIN "lineitem" AS "t5"
+        ON "t4"."s_suppkey" = "t5"."l_suppkey"
+      INNER JOIN "orders" AS "t8"
+        ON "t8"."o_orderkey" = "t5"."l_orderkey"
+      INNER JOIN "nation" AS "t9"
+        ON "t4"."s_nationkey" = "t9"."n_nationkey"
+    ) AS "t10"
+    WHERE
+      "t10"."o_orderstatus" = 'F'
+      AND "t10"."l_receiptdate" > "t10"."l_commitdate"
+      AND "t10"."n_name" = 'SAUDI ARABIA'
+      AND EXISTS(
         SELECT
-          CAST(1 AS TINYINT) AS anon_1
-        FROM main.lineitem AS t2
+          1
+        FROM "lineitem" AS "t6"
         WHERE
-          t2.l_orderkey = t0.l1_orderkey AND t2.l_suppkey <> t0.l1_suppkey
+          (
+            "t6"."l_orderkey" = "t10"."l1_orderkey"
+          )
+          AND (
+            "t6"."l_suppkey" <> "t10"."l1_suppkey"
+          )
       )
-    )
-    AND NOT (
-      EXISTS(
-        SELECT
-          CAST(1 AS TINYINT) AS anon_2
-        FROM main.lineitem AS t2
-        WHERE
-          t2.l_orderkey = t0.l1_orderkey
-          AND t2.l_suppkey <> t0.l1_suppkey
-          AND t2.l_receiptdate > t2.l_commitdate
+      AND NOT (
+        EXISTS(
+          SELECT
+            1
+          FROM "lineitem" AS "t7"
+          WHERE
+            (
+              (
+                "t7"."l_orderkey" = "t10"."l1_orderkey"
+              )
+              AND (
+                "t7"."l_suppkey" <> "t10"."l1_suppkey"
+              )
+            )
+            AND (
+              "t7"."l_receiptdate" > "t7"."l_commitdate"
+            )
+        )
       )
-    )
+  ) AS "t13"
   GROUP BY
     1
-) AS t1
+) AS "t14"
 ORDER BY
-  t1.numwait DESC,
-  t1.s_name ASC
+  "t14"."numwait" DESC,
+  "t14"."s_name" ASC
 LIMIT 100

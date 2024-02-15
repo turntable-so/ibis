@@ -5,13 +5,19 @@ import sqlite3
 import numpy as np
 import pandas as pd
 import pytest
-import sqlalchemy as sa
 from packaging.version import parse as vparse
 from pytest import param
 
 import ibis
 import ibis.common.exceptions as com
 import ibis.expr.schema as sch
+from ibis.backends.tests.errors import PyDruidProgrammingError
+
+sqlite_right_or_full_mark = pytest.mark.notyet(
+    ["sqlite"],
+    condition=vparse(sqlite3.sqlite_version) < vparse("3.39"),
+    reason="SQLite < 3.39 doesn't support RIGHT/FULL OUTER joins",
+)
 
 
 def _pandas_semi_join(left, right, on, **_):
@@ -42,27 +48,32 @@ def check_eq(left, right, how, **kwargs):
     [
         "inner",
         "left",
-        "right",
+        param(
+            "right",
+            marks=[
+                pytest.mark.broken(
+                    ["exasol"], raises=AssertionError, reasons="results don't match"
+                ),
+                sqlite_right_or_full_mark,
+            ],
+        ),
         param(
             "outer",
             # TODO: mysql will likely never support full outer join
             # syntax, but we might be able to work around that using
             # LEFT JOIN UNION RIGHT JOIN
             marks=[
-                pytest.mark.notimpl(
-                    ["mysql"]
-                    + ["sqlite"] * (vparse(sqlite3.sqlite_version) < vparse("3.39"))
-                ),
+                pytest.mark.notimpl(["mysql"]),
+                sqlite_right_or_full_mark,
                 pytest.mark.xfail_version(datafusion=["datafusion<31"]),
                 pytest.mark.broken(
-                    ["polars"], reason="upstream outer joins are broken"
+                    ["exasol"], raises=AssertionError, reasons="results don't match"
                 ),
             ],
         ),
     ],
 )
 @pytest.mark.notimpl(["druid"])
-@pytest.mark.notimpl(["exasol"], raises=AttributeError)
 def test_mutating_join(backend, batting, awards_players, how):
     left = batting[batting.yearID == 2015]
     right = awards_players[awards_players.lgID == "NL"].drop("yearID", "lgID")
@@ -111,7 +122,7 @@ def test_mutating_join(backend, batting, awards_players, how):
 
 
 @pytest.mark.parametrize("how", ["semi", "anti"])
-@pytest.mark.notimpl(["dask", "druid", "exasol"])
+@pytest.mark.notimpl(["dask", "druid"])
 @pytest.mark.notyet(["flink"], reason="Flink doesn't support semi joins or anti joins")
 def test_filtering_join(backend, batting, awards_players, how):
     left = batting[batting.yearID == 2015]
@@ -141,12 +152,6 @@ def test_filtering_join(backend, batting, awards_players, how):
     backend.assert_frame_equal(result, expected, check_like=True)
 
 
-@pytest.mark.broken(
-    ["polars"],
-    raises=ValueError,
-    reason="https://github.com/pola-rs/polars/issues/9335",
-)
-@pytest.mark.notimpl(["exasol"], raises=com.IbisTypeError)
 def test_join_then_filter_no_column_overlap(awards_players, batting):
     left = batting[batting.yearID == 2015]
     year = left.yearID.name("year")
@@ -159,12 +164,6 @@ def test_join_then_filter_no_column_overlap(awards_players, batting):
     assert not q.execute().empty
 
 
-@pytest.mark.broken(
-    ["polars"],
-    raises=ValueError,
-    reason="https://github.com/pola-rs/polars/issues/9335",
-)
-@pytest.mark.notimpl(["exasol"], raises=com.IbisTypeError)
 def test_mutate_then_join_no_column_overlap(batting, awards_players):
     left = batting.mutate(year=batting.yearID).filter(lambda t: t.year == 2015)
     left = left["year", "RBI"]
@@ -176,11 +175,6 @@ def test_mutate_then_join_no_column_overlap(batting, awards_players):
 @pytest.mark.notimpl(["druid"])
 @pytest.mark.notyet(["dask"], reason="dask doesn't support descending order by")
 @pytest.mark.notyet(["flink"], reason="Flink doesn't support semi joins")
-@pytest.mark.broken(
-    ["polars"],
-    raises=ValueError,
-    reason="https://github.com/pola-rs/polars/issues/9335",
-)
 @pytest.mark.parametrize(
     "func",
     [
@@ -192,15 +186,25 @@ def test_mutate_then_join_no_column_overlap(batting, awards_players):
         param(lambda left, right: left.join(right, "year", how="semi"), id="how_semi"),
     ],
 )
-@pytest.mark.notimpl(["exasol"], raises=com.IbisTypeError)
-def test_semi_join_topk(batting, awards_players, func):
+def test_semi_join_topk(con, batting, awards_players, func):
+    if con.name == "sqlite":
+        # TODO: remove after CTE extraction is reimplemented
+        pytest.skip("topk -> semi-join performance has increased post SQLGlot refactor")
+    elif con.name == "risingwave":
+        # e.g., https://github.com/ibis-project/ibis/actions/runs/7900463100/job/21562034052
+        pytest.skip("risingwave times out on semi join topk")
     batting = batting.mutate(year=batting.yearID)
     left = func(batting, batting.year.topk(5)).select("year", "RBI")
     expr = left.join(awards_players, left.year == awards_players.yearID)
     assert not expr.limit(5).execute().empty
 
 
-@pytest.mark.notimpl(["dask", "druid", "exasol"])
+@pytest.mark.notimpl(["druid", "exasol", "oracle"])
+@pytest.mark.notimpl(
+    ["postgres", "mssql", "risingwave"],
+    raises=com.IbisTypeError,
+    reason="postgres can't handle null types columns",
+)
 def test_join_with_pandas(batting, awards_players):
     batting_filt = batting[lambda t: t.yearID < 1900]
     awards_players_filt = awards_players[lambda t: t.yearID < 1900].execute()
@@ -210,7 +214,6 @@ def test_join_with_pandas(batting, awards_players):
     assert df.yearID.nunique() == 7
 
 
-@pytest.mark.notimpl(["dask", "exasol"])
 def test_join_with_pandas_non_null_typed_columns(batting, awards_players):
     batting_filt = batting[lambda t: t.yearID < 1900][["yearID"]]
     awards_players_filt = awards_players[lambda t: t.yearID < 1900][
@@ -265,37 +268,9 @@ def test_join_with_pandas_non_null_typed_columns(batting, awards_players):
     [
         "inner",
         "left",
-        "right",
-        param(
-            "outer",
-            marks=[
-                pytest.mark.notyet(
-                    ["mysql"],
-                    raises=sa.exc.ProgrammingError,
-                    reason="MySQL doesn't support full outer joins natively",
-                ),
-                pytest.mark.notyet(
-                    ["sqlite"],
-                    condition=vparse(sqlite3.sqlite_version) < vparse("3.39"),
-                    reason="sqlite didn't support full outer join until 3.39",
-                ),
-            ],
-        ),
+        param("right", marks=[sqlite_right_or_full_mark]),
+        param("outer", marks=[sqlite_right_or_full_mark]),
     ],
-)
-@pytest.mark.notimpl(
-    ["polars"],
-    raises=com.TranslationError,
-    reason="polars doesn't support join predicates",
-)
-@pytest.mark.notimpl(
-    ["dask", "pandas"],
-    raises=TypeError,
-    reason="dask and pandas don't support join predicates",
-)
-@pytest.mark.notimpl(
-    ["exasol"],
-    raises=com.IbisTypeError,
 )
 def test_join_with_trivial_predicate(awards_players, predicate, how, pandas_value):
     n = 5
@@ -316,20 +291,7 @@ def test_join_with_trivial_predicate(awards_players, predicate, how, pandas_valu
     assert len(result) == len(expected)
 
 
-outer_join_nullability_failures = [
-    pytest.mark.notyet(
-        ["mysql"],
-        raises=sa.exc.ProgrammingError,
-        reason="mysql doesn't support full outer joins",
-    )
-] + [pytest.mark.notyet(["sqlite"])] * (vparse(sqlite3.sqlite_version) < vparse("3.39"))
-
-
-@pytest.mark.notimpl(
-    ["druid", "exasol"],
-    raises=sa.exc.NoSuchTableError,
-    reason="`win` table isn't loaded",
-)
+@pytest.mark.notimpl(["druid"], raises=PyDruidProgrammingError)
 @pytest.mark.parametrize(
     ("how", "nrows", "gen_right", "keys"),
     [
@@ -339,7 +301,6 @@ outer_join_nullability_failures = [
             lambda left: left.filter(lambda t: t.x == 1).select(y=lambda t: t.x),
             [("x", "y")],
             id="left-xy",
-            marks=pytest.mark.notyet(["polars"], reason="renaming fails"),
         ),
         param(
             "left",
@@ -347,7 +308,6 @@ outer_join_nullability_failures = [
             lambda left: left.filter(lambda t: t.x == 1),
             "x",
             id="left-x",
-            marks=pytest.mark.notimpl(["pyspark"], reason="overlapping columns"),
         ),
         param(
             "right",
@@ -355,7 +315,7 @@ outer_join_nullability_failures = [
             lambda left: left.filter(lambda t: t.x == 1).select(y=lambda t: t.x),
             [("x", "y")],
             id="right-xy",
-            marks=pytest.mark.notyet(["polars"], reason="renaming fails"),
+            marks=[sqlite_right_or_full_mark],
         ),
         param(
             "right",
@@ -363,7 +323,7 @@ outer_join_nullability_failures = [
             lambda left: left.filter(lambda t: t.x == 1),
             "x",
             id="right-x",
-            marks=pytest.mark.notimpl(["pyspark"], reason="overlapping columns"),
+            marks=[sqlite_right_or_full_mark],
         ),
         param(
             "outer",
@@ -371,7 +331,7 @@ outer_join_nullability_failures = [
             lambda left: left.filter(lambda t: t.x == 1).select(y=lambda t: t.x),
             [("x", "y")],
             id="outer-xy",
-            marks=outer_join_nullability_failures,
+            marks=[sqlite_right_or_full_mark],
         ),
         param(
             "outer",
@@ -379,10 +339,7 @@ outer_join_nullability_failures = [
             lambda left: left.filter(lambda t: t.x == 1),
             "x",
             id="outer-x",
-            marks=[
-                pytest.mark.notimpl(["pyspark"], reason="overlapping columns"),
-                *outer_join_nullability_failures,
-            ],
+            marks=[sqlite_right_or_full_mark],
         ),
     ],
 )
@@ -397,3 +354,33 @@ def test_outer_join_nullability(backend, how, nrows, gen_right, keys):
 
     result = expr.to_pyarrow()
     assert len(result) == nrows
+
+
+def test_complex_join_agg(snapshot):
+    t1 = ibis.table(dict(value1="float", key1="string", key2="string"), name="table1")
+    t2 = ibis.table(dict(value2="float", key1="string", key4="string"), name="table2")
+
+    avg_diff = (t1.value1 - t2.value2).mean()
+    expr = t1.left_join(t2, "key1").group_by(t1.key1).aggregate(avg_diff=avg_diff)
+
+    snapshot.assert_match(str(ibis.to_sql(expr, dialect="duckdb")), "out.sql")
+
+
+def test_join_conflicting_columns(backend, con):
+    # GH #7345
+    t1 = ibis.memtable({"x": [1, 2, 3], "y": [4, 5, 6], "z": ["a", "b", "c"]})
+    t2 = ibis.memtable({"x": [3, 2, 1], "y": [7, 8, 9], "z": ["d", "e", "f"]})
+
+    expr = t1.join(t2, "x")
+    result = con.execute(expr).sort_values("x")
+
+    expected = pd.DataFrame(
+        {
+            "x": [1, 2, 3],
+            "y": [4, 5, 6],
+            "z": ["a", "b", "c"],
+            "y_right": [9, 8, 7],
+            "z_right": ["f", "e", "d"],
+        }
+    )
+    backend.assert_frame_equal(result, expected)

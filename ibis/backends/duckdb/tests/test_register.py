@@ -11,7 +11,6 @@ import pandas as pd
 import pandas.testing as tm
 import pyarrow as pa
 import pytest
-import sqlalchemy as sa
 
 import ibis
 import ibis.expr.datatypes as dt
@@ -50,7 +49,8 @@ def test_read_parquet(con, data_dir):
     reason="nix on linux cannot download duckdb extensions or data due to sandboxing",
 )
 def test_load_spatial_when_geo_column(tmpdir):
-    pytest.importorskip("geoalchemy2")
+    pytest.importorskip("geopandas")
+    pytest.importorskip("shapely")
 
     path = str(tmpdir.join("test_load_spatial.ddb"))
 
@@ -110,7 +110,7 @@ def test_read_geo_from_url(con, monkeypatch):
     loaded_exts = []
     monkeypatch.setattr(con, "_load_extensions", lambda x, **_: loaded_exts.extend(x))
 
-    with pytest.raises((sa.exc.OperationalError, sa.exc.ProgrammingError)):
+    with pytest.raises((duckdb.IOException, duckdb.CatalogException)):
         # The read will fail, either because the URL is bogus (which it is) or
         # because the current connection doesn't have the spatial extension
         # installed and so the call to `st_read` will raise a catalog error.
@@ -138,16 +138,15 @@ def test_temp_directory(tmp_path):
 
     # 1. in-memory + no temp_directory specified
     con = ibis.duckdb.connect()
-    with con.begin() as c:
-        value = c.exec_driver_sql(query).scalar()
-        assert value  # we don't care what the specific value is
+
+    value = con.raw_sql(query).fetchone()[0]
+    assert value  # we don't care what the specific value is
 
     temp_directory = Path(tempfile.gettempdir()) / "duckdb"
 
     # 2. in-memory + temp_directory specified
     con = ibis.duckdb.connect(temp_directory=temp_directory)
-    with con.begin() as c:
-        value = c.exec_driver_sql(query).scalar()
+    value = con.raw_sql(query).fetchone()[0]
     assert value == str(temp_directory)
 
     # 3. on-disk + no temp_directory specified
@@ -156,8 +155,7 @@ def test_temp_directory(tmp_path):
 
     # 4. on-disk + temp_directory specified
     con = ibis.duckdb.connect(tmp_path / "test2.ddb", temp_directory=temp_directory)
-    with con.begin() as c:
-        value = c.exec_driver_sql(query).scalar()
+    value = con.raw_sql(query).fetchone()[0]
     assert value == str(temp_directory)
 
 
@@ -357,7 +355,7 @@ def test_set_temp_dir(tmp_path):
         "nix on linux cannot download duckdb extensions or data due to sandboxing; "
         "duckdb will try to automatically install and load read_parquet"
     ),
-    raises=(duckdb.IOException, sa.exc.DBAPIError),
+    raises=(duckdb.Error, duckdb.IOException),
 )
 def test_s3_403_fallback(con, httpserver, monkeypatch):
     # monkeypatch to avoid downloading extensions in tests

@@ -11,11 +11,10 @@ import ibis.expr.datatypes as dt
 import ibis.expr.rules as rlz
 from ibis import util
 from ibis.common.annotations import attribute
-from ibis.common.bases import Abstract
 from ibis.common.graph import Node as Traversable
 from ibis.common.grounds import Concrete
 from ibis.common.patterns import Coercible, CoercionError
-from ibis.common.typing import DefaultTypeVars, VarTuple
+from ibis.common.typing import DefaultTypeVars
 
 
 @public
@@ -32,28 +31,13 @@ class Node(Concrete, Traversable):
         """Make `Node` backwards compatible with code that uses `Expr.op()`."""
         return self
 
-    @abstractmethod
-    def to_expr(self):
-        ...
-
     # Avoid custom repr for performance reasons
     __repr__ = object.__repr__
 
-
-# TODO(kszucs): remove this mixin
-@public
-class Named(Abstract):
-    __slots__: VarTuple[str] = tuple()
-
-    @property
-    @abstractmethod
-    def name(self) -> str:
-        """Name of the operation.
-
-        Returns
-        -------
-        str
-        """
+    # TODO(kszucs): hidrate the __children__ traversable attribute
+    # @attribute
+    # def __children__(self):
+    #     return super().__children__
 
 
 T = TypeVar("T", bound=dt.DataType, covariant=True)
@@ -61,7 +45,7 @@ S = TypeVar("S", bound=ds.DataShape, default=ds.Any, covariant=True)
 
 
 @public
-class Value(Node, Named, Coercible, DefaultTypeVars, Generic[T, S]):
+class Value(Node, Coercible, DefaultTypeVars, Generic[T, S]):
     @classmethod
     def __coerce__(
         cls, value: Any, T: Optional[type] = None, S: Optional[type] = None
@@ -101,8 +85,8 @@ class Value(Node, Named, Coercible, DefaultTypeVars, Generic[T, S]):
     # TODO(kszucs): figure out how to represent not named arguments
     @property
     def name(self) -> str:
-        args = ", ".join(arg.name for arg in self.__args__ if isinstance(arg, Named))
-        return f"{self.__class__.__name__}({args})"
+        names = (arg.name for arg in self.__args__ if hasattr(arg, "name"))
+        return f"{self.__class__.__name__}({', '.join(names)})"
 
     @property
     @abstractmethod
@@ -112,6 +96,7 @@ class Value(Node, Named, Coercible, DefaultTypeVars, Generic[T, S]):
         Returns
         -------
         dt.DataType
+
         """
 
     @property
@@ -124,7 +109,14 @@ class Value(Node, Named, Coercible, DefaultTypeVars, Generic[T, S]):
         Returns
         -------
         ds.Shape
+
         """
+
+    @attribute
+    def relations(self):
+        """Set of relations the value node depends on."""
+        children = (n.relations for n in self.__children__ if isinstance(n, Value))
+        return frozenset().union(*children)
 
     @property
     @util.deprecated(as_of="7.0", instead="use .dtype property instead")
@@ -167,9 +159,13 @@ class Unary(Value):
 
     arg: Value
 
-    @property
+    @attribute
     def shape(self) -> ds.DataShape:
         return self.arg.shape
+
+    @attribute
+    def relations(self):
+        return self.arg.relations
 
 
 @public
@@ -179,9 +175,13 @@ class Binary(Value):
     left: Value
     right: Value
 
-    @property
+    @attribute
     def shape(self) -> ds.DataShape:
         return max(self.left.shape, self.right.shape)
+
+    @attribute
+    def relations(self):
+        return self.left.relations | self.right.relations
 
 
 @public
