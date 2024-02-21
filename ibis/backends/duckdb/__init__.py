@@ -1419,20 +1419,11 @@ class Backend(SQLGlotBackend, CanCreateSchema, UrlFromPath):
             self._register_in_memory_table(memtable)
 
     def _register_in_memory_table(self, op: ops.InMemoryTable) -> None:
-        schema = op.schema
-        if null_columns := [col for col, dtype in schema.items() if dtype.is_null()]:
-            raise exc.IbisTypeError(
-                "DuckDB cannot yet reliably handle `null` typed columns; "
-                f"got null typed columns: {null_columns}"
-            )
-
         # only register if we haven't already done so
         if (name := op.name) not in self.list_tables():
-            self.con.register(name, op.data.to_pyarrow(schema))
+            self.con.register(name, op.data.to_pyarrow(op.schema))
 
     def _register_udfs(self, expr: ir.Expr) -> None:
-        import ibis.expr.operations as ops
-
         con = self.con
 
         for udf_node in expr.op().find(ops.ScalarUDF):
@@ -1446,7 +1437,7 @@ class Backend(SQLGlotBackend, CanCreateSchema, UrlFromPath):
             if registration_func is not None:
                 registration_func(con)
 
-    def _compile_udf(self, udf_node: ops.ScalarUDF) -> None:
+    def _compile_udf(self, udf_node: ops.ScalarUDF):
         func = udf_node.__func__
         name = type(udf_node).__name__
         type_mapper = self.compiler.type_mapper
@@ -1469,12 +1460,6 @@ class Backend(SQLGlotBackend, CanCreateSchema, UrlFromPath):
 
     _compile_python_udf = _compile_udf
     _compile_pyarrow_udf = _compile_udf
-
-    def _compile_builtin_udf(self, udf_node: ops.ScalarUDF) -> None:
-        """No op."""
-
-    def _compile_pandas_udf(self, _: ops.ScalarUDF) -> None:
-        raise NotImplementedError("duckdb doesn't support pandas UDFs")
 
     def _get_temp_view_definition(self, name: str, definition: str) -> str:
         return sge.Create(

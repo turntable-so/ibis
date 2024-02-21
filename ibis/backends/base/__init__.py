@@ -1031,7 +1031,7 @@ class BaseBackend(abc.ABC, _FileIOHandler):
         self._register_udfs(expr)
         self._register_in_memory_tables(expr)
 
-    def _define_udf_translation_rules(self, expr):
+    def _define_udf_translation_rules(self, expr: ir.Expr):
         if self.supports_python_udfs:
             raise NotImplementedError(self.name)
 
@@ -1433,9 +1433,14 @@ class UrlFromPath:
         url = urlparse(url)
         netloc = url.netloc
         parts = list(filter(None, (netloc, url.path[bool(netloc) :])))
-        database = (
-            Path(*parts).absolute() if parts and parts != [":memory:"] else ":memory:"
-        )
+        database = Path(*parts) if parts and parts != [":memory:"] else ":memory:"
+        if (strdatabase := str(database)).startswith("md:") or strdatabase.startswith(
+            "motherduck:"
+        ):
+            database = strdatabase
+        elif isinstance(database, Path):
+            database = database.absolute()
+
         query_params = parse_qs(url.query)
 
         for name, value in query_params.items():
