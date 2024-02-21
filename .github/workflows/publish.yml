@@ -1,4 +1,4 @@
-name: Publish to vinyl-core on PYPI
+name: Publish to turntable-spoonbill on PYPI
 
 on: push
 
