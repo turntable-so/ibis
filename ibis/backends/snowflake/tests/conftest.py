@@ -16,18 +16,38 @@ import snowflake.connector as sc
 import sqlglot as sg
 
 import ibis
-from ibis.backends.base.sqlglot.datatypes import SnowflakeType
 from ibis.backends.conftest import TEST_TABLES
+from ibis.backends.sql.datatypes import SnowflakeType
 from ibis.backends.tests.base import BackendTest
 from ibis.formats.pyarrow import PyArrowSchema
 
 if TYPE_CHECKING:
-    from ibis.backends.base import BaseBackend
+    from ibis.backends import BaseBackend
 
 
 def _get_url():
     if (url := os.environ.get("SNOWFLAKE_URL")) is not None:
         return url
+    elif os.environ.get("SNOWFLAKE_HOME"):
+        import tomli
+
+        # requires a connection named ibis_testing or one explicitly set with
+        # export SNOWFLAKE_DEFAULT_CONNECTION_NAME
+        connection_name = os.environ.get(
+            "SNOWFLAKE_DEFAULT_CONNECTION_NAME", "ibis_testing"
+        )
+        config_file = Path(os.environ["SNOWFLAKE_HOME"], "connections.toml")
+        config_text = config_file.read_text()
+        params = tomli.loads(config_text)[connection_name]
+        user, password, account, database, schema, warehouse = (
+            params["user"],
+            params["password"],
+            params["account"],
+            params["database"],
+            params["schema"],
+            params["warehouse"],
+        )
+        return f"snowflake://{user}:{password}@{account}/{database}/{schema}?warehouse={warehouse}"
     else:
         try:
             user, password, account, database, schema, warehouse = tuple(

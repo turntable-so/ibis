@@ -249,7 +249,6 @@ def calc_zscore(s):
                 .astype(bool)
             ),
             id="cumany",
-            marks=[pytest.mark.broken(["mssql"], raises=com.OperationNotDefinedError)],
         ),
         param(
             lambda t, win: (t.double_col == 0).notany().over(win),
@@ -262,7 +261,6 @@ def calc_zscore(s):
             id="cumnotany",
             marks=[
                 pytest.mark.broken(["oracle"], raises=OracleDatabaseError),
-                pytest.mark.broken(["mssql"], raises=com.OperationNotDefinedError),
             ],
         ),
         param(
@@ -274,7 +272,6 @@ def calc_zscore(s):
                 .astype(bool)
             ),
             id="cumall",
-            marks=[pytest.mark.broken(["mssql"], raises=com.OperationNotDefinedError)],
         ),
         param(
             lambda t, win: (t.double_col == 0).notall().over(win),
@@ -287,7 +284,6 @@ def calc_zscore(s):
             id="cumnotall",
             marks=[
                 pytest.mark.broken(["oracle"], raises=OracleDatabaseError),
-                pytest.mark.broken(["mssql"], raises=com.OperationNotDefinedError),
             ],
         ),
         param(
@@ -548,17 +544,7 @@ def test_grouped_bounded_preceding_window(backend, alltypes, df, window_fn):
 @pytest.mark.parametrize(
     ("ordered"),
     [
-        param(
-            False,
-            id="unordered",
-            marks=[
-                pytest.mark.broken(
-                    ["mssql"],
-                    raises=PyODBCProgrammingError,
-                    reason="unbounded window frames are not supported",
-                ),
-            ],
-        ),
+        param(False, id="unordered"),
     ],
 )
 @pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
@@ -671,13 +657,6 @@ def test_simple_ungrouped_window_with_scalar_order_by(alltypes):
             lambda df: pd.Series([df.double_col.mean()] * len(df.double_col)),
             False,
             id="unordered-mean",
-            marks=[
-                pytest.mark.broken(
-                    ["mssql"],
-                    raises=PyODBCProgrammingError,
-                    reason="unbounded window frames are not supported",
-                ),
-            ],
         ),
         param(
             lambda _, win: ibis.ntile(7).over(win),

@@ -126,13 +126,7 @@ The best way to interact with a single table is through the
 render_methods(
     table,
     "drop",
-    "drop_partition",
-    "files",
     "insert",
-    "is_partitioned",
-    "partition_schema",
-    "partitions",
-    "refresh",
     "describe_formatted",
 )
 ```
@@ -202,7 +196,7 @@ table or database.
 ```{python}
 #| echo: false
 #| output: asis
-render_methods(get_object("ibis.backends.base.sqlglot", "SQLGlotBackend"), "table")
+render_methods(get_object("ibis.backends.sql", "SQLBackend"), "table")
 ```
 
 The client's `table` method allows you to create an Ibis table
@@ -1065,9 +1059,7 @@ func.register(fuzzy_equals.name, udf_db)
 The object `fuzzy_equals` is callable and works with Ibis expressions:
 
 ```python
->>> db = c.database('ibis_testing')
-
->>> t = db.functional_alltypes
+>>> t = con.tables.functional_alltypes
 
 >>> expr = fuzzy_equals(t.float_col, t.double_col / 10)
 
