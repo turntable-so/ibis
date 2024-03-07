@@ -87,7 +87,7 @@ jobs:
           github_token: ${{ steps.generate_token.outputs.token }}
 
       - name: install poetry
-        run: pipx install 'poetry==1.7.1'
+        run: pipx install 'poetry==1.8.1'
 
       - name: install python
         uses: actions/setup-python@v5
@@ -99,7 +99,7 @@ jobs:
       - name: install ibis
         run: poetry install --without dev --without docs --extras "${{ join(matrix.backend.extras, ' ') }}"
 
-      - uses: extractions/setup-just@v1
+      - uses: extractions/setup-just@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 

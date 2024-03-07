@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 try:
+    from duckdb import BinderException as DuckDBBinderException
     from duckdb import ConversionException as DuckDBConversionException
     from duckdb import InvalidInputException as DuckDBInvalidInputException
     from duckdb import NotImplementedException as DuckDBNotImplementedException
+    from duckdb import OutOfRangeException as DuckDBOutOfRangeException
     from duckdb import ParserException as DuckDBParserException
 except ImportError:
-    DuckDBConversionException = (
-        DuckDBInvalidInputException
-    ) = DuckDBParserException = DuckDBNotImplementedException = None
+    DuckDBConversionException = DuckDBInvalidInputException = DuckDBParserException = (
+        DuckDBNotImplementedException
+    ) = DuckDBBinderException = DuckDBOutOfRangeException = None
 
 try:
     from clickhouse_connect.driver.exceptions import (
@@ -21,9 +23,9 @@ try:
         OperationalError as ClickHouseOperationalError,
     )
 except ImportError:
-    ClickHouseDatabaseError = (
-        ClickHouseInternalError
-    ) = ClickHouseOperationalError = None
+    ClickHouseDatabaseError = ClickHouseInternalError = ClickHouseOperationalError = (
+        None
+    )
 
 
 try:
@@ -39,9 +41,9 @@ try:
     from pyspark.sql.utils import ParseException as PySparkParseException
     from pyspark.sql.utils import PythonException as PySparkPythonException
 except ImportError:
-    PySparkAnalysisException = (
-        PySparkIllegalArgumentException
-    ) = PySparkParseException = PySparkPythonException = None
+    PySparkAnalysisException = PySparkIllegalArgumentException = (
+        PySparkParseException
+    ) = PySparkPythonException = None
 
 try:
     # PySpark 3.5.0
@@ -106,17 +108,11 @@ try:
     from psycopg2.errors import SyntaxError as PsycoPg2SyntaxError
     from psycopg2.errors import UndefinedObject as PsycoPg2UndefinedObject
 except ImportError:
-    PsycoPg2SyntaxError = (
-        PsycoPg2IndeterminateDatatype
-    ) = (
+    PsycoPg2SyntaxError = PsycoPg2IndeterminateDatatype = (
         PsycoPg2InvalidTextRepresentation
-    ) = (
-        PsycoPg2DivisionByZero
-    ) = (
-        PsycoPg2InternalError
-    ) = (
-        PsycoPg2ProgrammingError
-    ) = PsycoPg2OperationalError = PsycoPg2UndefinedObject = None
+    ) = PsycoPg2DivisionByZero = PsycoPg2InternalError = PsycoPg2ProgrammingError = (
+        PsycoPg2OperationalError
+    ) = PsycoPg2UndefinedObject = None
 
 try:
     from pymysql.err import NotSupportedError as MySQLNotSupportedError

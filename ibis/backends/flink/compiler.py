@@ -15,8 +15,6 @@ from ibis.backends.sql.rewrites import (
     exclude_unsupported_window_frame_from_ops,
     exclude_unsupported_window_frame_from_rank,
     exclude_unsupported_window_frame_from_row_number,
-    rewrite_first_to_first_value,
-    rewrite_last_to_last_value,
     rewrite_sample_as_filter,
 )
 
@@ -30,8 +28,6 @@ class FlinkCompiler(SQLGlotCompiler):
         exclude_unsupported_window_frame_from_row_number,
         exclude_unsupported_window_frame_from_ops,
         exclude_unsupported_window_frame_from_rank,
-        rewrite_first_to_first_value,
-        rewrite_last_to_last_value,
         *SQLGlotCompiler.rewrites,
     )
 
@@ -55,7 +51,6 @@ class FlinkCompiler(SQLGlotCompiler):
             ops.IsInf,
             ops.IsNan,
             ops.Levenshtein,
-            ops.MapMerge,
             ops.Median,
             ops.MultiQuantile,
             ops.NthValue,
@@ -81,9 +76,11 @@ class FlinkCompiler(SQLGlotCompiler):
         ops.ExtractDayOfYear: "dayofyear",
         ops.First: "first_value",
         ops.Last: "last_value",
-        ops.Map: "map_from_arrays",
+        ops.MapKeys: "map_keys",
+        ops.MapValues: "map_values",
         ops.Power: "power",
         ops.RandomScalar: "rand",
+        ops.RandomUUID: "uuid",
         ops.RegexSearch: "regexp",
         ops.StrRight: "right",
         ops.StringLength: "char_length",
@@ -143,6 +140,13 @@ class FlinkCompiler(SQLGlotCompiler):
             and end.following
         ):
             return None
+        elif (
+            isinstance(getattr(end, "value", None), ops.Cast)
+            and end.value.arg.value == 0
+            and end.following
+        ):
+            spec.args["end"] = "CURRENT ROW"
+            spec.args["end_side"] = None
         return spec
 
     def visit_TumbleWindowingTVF(self, op, *, table, time_col, window_size, offset):
@@ -489,9 +493,9 @@ class FlinkCompiler(SQLGlotCompiler):
         unit_sql = unit_var.sql(self.dialect)
         return self.f.floor(self.v[f"{arg_sql} TO {unit_sql}"])
 
-    visit_TimestampTruncate = (
-        visit_DateTruncate
-    ) = visit_TimeTruncate = visit_TemporalTruncate
+    visit_TimestampTruncate = visit_DateTruncate = visit_TimeTruncate = (
+        visit_TemporalTruncate
+    )
 
     def visit_StringContains(self, op, *, haystack, needle):
         return self.f.instr(haystack, needle) > 0
@@ -518,11 +522,7 @@ class FlinkCompiler(SQLGlotCompiler):
     def visit_ExtractUrlField(self, op, *, arg):
         return self.f.parse_url(arg, type(op).__name__[len("Extract") :].upper())
 
-    visit_ExtractAuthority = (
-        visit_ExtractHost
-    ) = (
-        visit_ExtractUserInfo
-    ) = (
+    visit_ExtractAuthority = visit_ExtractHost = visit_ExtractUserInfo = (
         visit_ExtractProtocol
     ) = visit_ExtractFile = visit_ExtractPath = visit_ExtractUrlField
 
@@ -541,3 +541,21 @@ class FlinkCompiler(SQLGlotCompiler):
         if where is not None:
             arg = self.if_(where, arg, self.f.array(arg)[2])
         return self.f.count(sge.Distinct(expressions=[arg]))
+
+    def visit_MapContains(self, op: ops.MapContains, *, arg, key):
+        return self.f.array_contains(self.f.map_keys(arg), key)
+
+    def visit_Map(self, op: ops.Map, *, keys, values):
+        return self.cast(self.f.map_from_arrays(keys, values), op.dtype)
+
+    def visit_MapMerge(self, op: ops.MapMerge, *, left, right):
+        left_keys = self.f.map_keys(left)
+        left_values = self.f.map_values(left)
+
+        right_keys = self.f.map_keys(right)
+        right_values = self.f.map_values(right)
+
+        keys = self.f.array_concat(left_keys, right_keys)
+        values = self.f.array_concat(left_values, right_values)
+
+        return self.cast(self.f.map_from_arrays(keys, values), op.dtype)

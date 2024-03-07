@@ -40,14 +40,14 @@ _from_sqlglot_types = {
     typecode.LONGTEXT: dt.String,
     typecode.MEDIUMBLOB: dt.Binary,
     typecode.MEDIUMTEXT: dt.String,
-    typecode.MONEY: dt.Int64,
+    typecode.MONEY: dt.Decimal(19, 4),
     typecode.NCHAR: dt.String,
     typecode.UUID: dt.UUID,
     typecode.NULL: dt.Null,
     typecode.NVARCHAR: dt.String,
     typecode.OBJECT: partial(dt.Map, dt.string, dt.json),
     typecode.SMALLINT: dt.Int16,
-    typecode.SMALLMONEY: dt.Int32,
+    typecode.SMALLMONEY: dt.Decimal(10, 4),
     typecode.TEXT: dt.String,
     typecode.TIME: dt.Time,
     typecode.TIMETZ: dt.Time,
@@ -356,11 +356,7 @@ class SqlglotType(TypeMapper):
             return sge.DataType(this=getattr(typecode, geotype.upper()))
         return sge.DataType(this=typecode.GEOMETRY)
 
-    _from_ibis_Point = (
-        _from_ibis_LineString
-    ) = (
-        _from_ibis_Polygon
-    ) = (
+    _from_ibis_Point = _from_ibis_LineString = _from_ibis_Polygon = (
         _from_ibis_MultiLineString
     ) = _from_ibis_MultiPoint = _from_ibis_MultiPolygon = _from_ibis_GeoSpatial
 
@@ -734,11 +730,9 @@ class BigQueryType(SqlglotType):
     def _from_sqlglot_TINYINT(cls) -> dt.Int64:
         return dt.Int64(nullable=cls.default_nullable)
 
-    _from_sqlglot_UINT = (
-        _from_sqlglot_USMALLINT
-    ) = (
-        _from_sqlglot_UTINYINT
-    ) = _from_sqlglot_INT = _from_sqlglot_SMALLINT = _from_sqlglot_TINYINT
+    _from_sqlglot_UINT = _from_sqlglot_USMALLINT = _from_sqlglot_UTINYINT = (
+        _from_sqlglot_INT
+    ) = _from_sqlglot_SMALLINT = _from_sqlglot_TINYINT
 
     @classmethod
     def _from_sqlglot_UBIGINT(cls) -> NoReturn:
@@ -966,7 +960,7 @@ class ClickHouseType(SqlglotType):
     def from_ibis(cls, dtype: dt.DataType) -> sge.DataType:
         """Convert a sqlglot type to an ibis type."""
         typ = super().from_ibis(dtype)
-        if dtype.nullable and not dtype.is_map():
+        if dtype.nullable and not (dtype.is_map() or dtype.is_array()):
             # map cannot be nullable in clickhouse
             return sge.DataType(this=typecode.NULLABLE, expressions=[typ])
         else:
@@ -1030,7 +1024,9 @@ class ClickHouseType(SqlglotType):
         # key cannot be nullable in clickhouse
         key_type = cls.from_ibis(dtype.key_type.copy(nullable=False))
         value_type = cls.from_ibis(dtype.value_type)
-        return sge.DataType(this=typecode.MAP, expressions=[key_type, value_type])
+        return sge.DataType(
+            this=typecode.MAP, expressions=[key_type, value_type], nested=True
+        )
 
 
 class FlinkType(SqlglotType):
@@ -1041,3 +1037,17 @@ class FlinkType(SqlglotType):
     @classmethod
     def _from_ibis_Binary(cls, dtype: dt.Binary) -> sge.DataType:
         return sge.DataType(this=sge.DataType.Type.VARBINARY)
+
+    @classmethod
+    def _from_ibis_Map(cls, dtype: dt.Map) -> sge.DataType:
+        # key cannot be nullable in clickhouse
+        key_type = cls.from_ibis(dtype.key_type.copy(nullable=False))
+        value_type = cls.from_ibis(dtype.value_type)
+        return sge.DataType(
+            this=typecode.MAP,
+            expressions=[
+                sge.Var(this=key_type.sql(cls.dialect) + " NOT NULL"),
+                value_type,
+            ],
+            nested=True,
+        )

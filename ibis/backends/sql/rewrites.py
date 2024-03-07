@@ -1,6 +1,5 @@
 """Lower the ibis expression graph to a SQL-like relational algebra."""
 
-
 from __future__ import annotations
 
 import operator
@@ -64,6 +63,28 @@ class Select(ops.Relation):
 
 
 @public
+class FirstValue(ops.Analytic):
+    """Retrieve the first element."""
+
+    arg: ops.Column[dt.Any]
+
+    @attribute
+    def dtype(self):
+        return self.arg.dtype
+
+
+@public
+class LastValue(ops.Analytic):
+    """Retrieve the last element."""
+
+    arg: ops.Column[dt.Any]
+
+    @attribute
+    def dtype(self):
+        return self.arg.dtype
+
+
+@public
 class Window(ops.Value):
     """Window modelled after SQL's window statements."""
 
@@ -101,12 +122,23 @@ def sort_to_select(_, **kwargs):
 
 @replace(p.WindowFunction)
 def window_function_to_window(_, **kwargs):
-    """Convert a WindowFunction node to a Window node."""
-    if isinstance(_.frame, ops.RowsWindowFrame) and _.frame.max_lookback is not None:
-        raise NotImplementedError("max_lookback is not supported for SQL backends")
+    """Convert a WindowFunction node to a Window node.
+
+    Also rewrites first -> first_value, last -> last_value.
+    """
+    func = _.func
+    if isinstance(func, (ops.First, ops.Last)):
+        if func.where is not None:
+            raise com.UnsupportedOperationError(
+                f"`{type(func).__name__.lower()}` with `where` is unsupported "
+                "in a window function"
+            )
+        cls = FirstValue if isinstance(func, ops.First) else LastValue
+        func = cls(func.arg)
+
     return Window(
         how=_.frame.how,
-        func=_.func,
+        func=func,
         start=_.frame.start,
         end=_.frame.end,
         group_by=_.frame.group_by,
@@ -138,11 +170,14 @@ def merge_select_select(_, **kwargs):
     predicates = tuple(p.replace(subs, filter=ops.Value) for p in _.predicates)
     sort_keys = tuple(s.replace(subs, filter=ops.Value) for s in _.sort_keys)
 
+    unique_predicates = toolz.unique(_.parent.predicates + predicates)
+    unique_sort_keys = {s.expr: s for s in _.parent.sort_keys + sort_keys}
+
     return Select(
         _.parent.parent,
         selections=selections,
-        predicates=tuple(toolz.unique(_.parent.predicates + predicates)),
-        sort_keys=tuple(toolz.unique(_.parent.sort_keys + sort_keys)),
+        predicates=unique_predicates,
+        sort_keys=unique_sort_keys.values(),
     )
 
 
@@ -268,26 +303,6 @@ def rewrite_sample_as_filter(_, **kwargs):
             "`Table.sample` with a random seed is unsupported"
         )
     return ops.Filter(_.parent, (ops.LessEqual(ops.RandomScalar(), _.fraction),))
-
-
-@replace(p.WindowFunction(p.First(x, where=y)))
-def rewrite_first_to_first_value(_, x, y, **kwargs):
-    """Rewrite Ibis's first to first_value when used in a window function."""
-    if y is not None:
-        raise com.UnsupportedOperationError(
-            "`first` with `where` is unsupported in a window function"
-        )
-    return _.copy(func=ops.FirstValue(x))
-
-
-@replace(p.WindowFunction(p.Last(x, where=y)))
-def rewrite_last_to_last_value(_, x, y, **kwargs):
-    """Rewrite Ibis's last to last_value when used in a window function."""
-    if y is not None:
-        raise com.UnsupportedOperationError(
-            "`last` with `where` is unsupported in a window function"
-        )
-    return _.copy(func=ops.LastValue(x))
 
 
 @replace(p.WindowFunction(frame=y @ p.WindowFrame(order_by=())))

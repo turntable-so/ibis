@@ -18,6 +18,7 @@ from ibis.util import deprecated
 
 if TYPE_CHECKING:
     import pandas as pd
+    import polars as pl
     import pyarrow as pa
 
     import ibis.expr.types as ir
@@ -1203,6 +1204,11 @@ class Scalar(Value):
 
         return PandasData.convert_scalar(df, self.type())
 
+    def __polars_result__(self, df: pl.DataFrame) -> Any:
+        from ibis.formats.polars import PolarsData
+
+        return PolarsData.convert_scalar(df, self.type())
+
     def as_scalar(self):
         """Inform ibis that the expression should be treated as a scalar.
 
@@ -1217,21 +1223,19 @@ class Scalar(Value):
         Examples
         --------
         >>> import ibis
-        >>>
         >>> ibis.options.interactive = True
-        >>>
         >>> t = ibis.examples.penguins.fetch()
         >>> max_gentoo_weight = t.filter(t.species == "Gentoo").body_mass_g.max()
         >>> light_penguins = t.filter(t.body_mass_g < max_gentoo_weight / 2)
-        >>> light_penguins.group_by("species").count()
-        ┏━━━━━━━━━━━┳━━━━━━━━━━━━━┓
-        ┃ species   ┃ CountStar() ┃
-        ┡━━━━━━━━━━━╇━━━━━━━━━━━━━┩
-        │ string    │ int64       │
-        ├───────────┼─────────────┤
-        │ Adelie    │          15 │
-        │ Chinstrap │           2 │
-        └───────────┴─────────────┘
+        >>> light_penguins.species.value_counts().order_by("species")
+        ┏━━━━━━━━━━━┳━━━━━━━━━━━━━━━┓
+        ┃ species   ┃ species_count ┃
+        ┡━━━━━━━━━━━╇━━━━━━━━━━━━━━━┩
+        │ string    │ int64         │
+        ├───────────┼───────────────┤
+        │ Adelie    │            15 │
+        │ Chinstrap │             2 │
+        └───────────┴───────────────┘
         """
         parents = self.op().relations
         if parents:
@@ -1332,6 +1336,11 @@ class Column(Value, _FixedTextJupyterMixin):
         (column,) = df.columns
         return PandasData.convert_column(df.loc[:, column], self.type())
 
+    def __polars_result__(self, df: pl.DataFrame) -> pl.Series:
+        from ibis.formats.polars import PolarsData
+
+        return PolarsData.convert_column(df, self.type())
+
     def as_scalar(self) -> Scalar:
         """Inform ibis that the expression should be treated as a scalar.
 
@@ -1350,21 +1359,19 @@ class Column(Value, _FixedTextJupyterMixin):
         Examples
         --------
         >>> import ibis
-        >>>
         >>> ibis.options.interactive = True
-        >>>
         >>> t = ibis.examples.penguins.fetch()
         >>> heavy_gentoo = t.filter(t.species == "Gentoo", t.body_mass_g > 6200)
         >>> from_that_island = t.filter(t.island == heavy_gentoo.island.as_scalar())
-        >>> from_that_island.group_by("species").count()
-        ┏━━━━━━━━━┳━━━━━━━━━━━━━┓
-        ┃ species ┃ CountStar() ┃
-        ┡━━━━━━━━━╇━━━━━━━━━━━━━┩
-        │ string  │ int64       │
-        ├─────────┼─────────────┤
-        │ Adelie  │          44 │
-        │ Gentoo  │         124 │
-        └─────────┴─────────────┘
+        >>> from_that_island.species.value_counts().order_by("species")
+        ┏━━━━━━━━━┳━━━━━━━━━━━━━━━┓
+        ┃ species ┃ species_count ┃
+        ┡━━━━━━━━━╇━━━━━━━━━━━━━━━┩
+        │ string  │ int64         │
+        ├─────────┼───────────────┤
+        │ Adelie  │            44 │
+        │ Gentoo  │           124 │
+        └─────────┴───────────────┘
         """
         return self.as_table().as_scalar()
 
@@ -1808,32 +1815,20 @@ class Column(Value, _FixedTextJupyterMixin):
         Table
             A top-k expression
         """
+        from ibis.expr.types.relations import bind
 
-        from ibis.expr.analysis import find_first_base_table
+        try:
+            (table,) = self.op().relations
+        except ValueError:
+            raise com.IbisTypeError("TopK must depend on exactly one table.")
 
-        arg_table = find_first_base_table(self.op()).to_expr()
-
+        table = table.to_expr()
         if by is None:
-            by = self.count()
-
-        if callable(by):
-            by = by(arg_table)
-            by_table = arg_table
-        elif isinstance(by, Value):
-            by_table = find_first_base_table(by.op()).to_expr()
+            metric = self.count()
         else:
-            raise com.IbisTypeError(f"Invalid `by` argument with type {type(by)}")
+            (metric,) = bind(table, by)
 
-        assert by.op().name != self.op().name
-
-        if not arg_table.equals(by_table):
-            raise com.IbisError("Cross-table TopK; must provide a parent joined table")
-
-        return (
-            arg_table.aggregate(by, by=[self])
-            .order_by(ibis.desc(by.get_name()))
-            .limit(k)
-        )
+        return table.aggregate(metric, by=[self]).order_by(metric.desc()).limit(k)
 
     def arbitrary(
         self,

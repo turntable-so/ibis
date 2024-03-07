@@ -1,4 +1,5 @@
 """Various traversal utilities for the expression graph."""
+
 from __future__ import annotations
 
 from abc import abstractmethod
@@ -263,9 +264,7 @@ class Node(Hashable):
         return results
 
     @experimental
-    def map_clear(
-        self, fn: Callable, filter: Optional[Finder] = None
-    ) -> dict[Node, Any]:
+    def map_clear(self, fn: Callable, filter: Optional[Finder] = None) -> Any:
         """Apply a function to all nodes in the graph more memory efficiently.
 
         Alternative implementation of `map` to reduce memory usage. While `map` keeps

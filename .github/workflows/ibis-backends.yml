@@ -57,12 +57,14 @@ jobs:
         backend:
           - name: duckdb
             title: DuckDB
+            serial: true
             extras:
               - duckdb
               - deltalake
               - geospatial
               - examples
               - decompiler
+              - polars
             additional_deps:
               - torch
           - name: clickhouse
@@ -116,6 +118,7 @@ jobs:
             extras:
               - postgres
               - geospatial
+              - polars
             additional_deps:
               - torch
             services:
@@ -246,6 +249,7 @@ jobs:
               extras:
                 - postgres
                 - geospatial
+                - polars
               additional_deps:
                 - torch
               services:
@@ -350,7 +354,7 @@ jobs:
       - name: checkout
         uses: actions/checkout@v4
 
-      - uses: extractions/setup-just@v1
+      - uses: extractions/setup-just@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -362,7 +366,7 @@ jobs:
         run: docker compose up --wait ${{ join(matrix.backend.services, ' ') }}
 
       - name: install poetry
-        run: pipx install 'poetry==1.7.1'
+        run: pipx install 'poetry==1.8.1'
 
       - name: install python
         uses: actions/setup-python@v5
@@ -485,7 +489,7 @@ jobs:
           sudo apt-get update -y -qq
           sudo apt-get install -qq -y build-essential libgeos-dev
 
-      - uses: extractions/setup-just@v1
+      - uses: extractions/setup-just@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -503,7 +507,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: install poetry
-        run: python -m pip install --upgrade pip 'poetry==1.7.1'
+        run: python -m pip install --upgrade pip 'poetry==1.8.1'
 
       - name: remove lonboard
         # it requires a version of pandas that min versions are not compatible with
@@ -568,7 +572,7 @@ jobs:
           distribution: microsoft
           java-version: 17
 
-      - uses: extractions/setup-just@v1
+      - uses: extractions/setup-just@v2
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
@@ -582,7 +586,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
 
       - name: install poetry
-        run: python -m pip install --upgrade pip 'poetry==1.7.1'
+        run: python -m pip install --upgrade pip 'poetry==1.8.1'
 
       - name: remove lonboard
         # it requires a version of pandas that pyspark is not compatible with

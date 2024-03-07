@@ -53,13 +53,11 @@ class ExasolCompiler(SQLGlotCompiler):
             ops.Covariance,
             ops.CumeDist,
             ops.DateAdd,
-            ops.DateDelta,
             ops.DateSub,
             ops.DateFromYMD,
             ops.DayOfWeekIndex,
             ops.DayOfWeekName,
             ops.ElementWiseVectorizedUDF,
-            ops.ExtractDayOfYear,
             ops.ExtractEpochSeconds,
             ops.ExtractQuarter,
             ops.ExtractWeekOfYear,
@@ -88,7 +86,6 @@ class ExasolCompiler(SQLGlotCompiler):
             ops.TimestampBucket,
             ops.TimestampDelta,
             ops.TimestampDiff,
-            ops.TimestampNow,
             ops.TimestampSub,
             ops.TimestampTruncate,
             ops.TypeOf,
@@ -172,3 +169,14 @@ class ExasolCompiler(SQLGlotCompiler):
 
     def visit_DateTruncate(self, op, *, arg, unit):
         return super().visit_TimestampTruncate(op, arg=arg, unit=unit)
+
+    def visit_DateDelta(self, op, *, part, left, right):
+        # Note: general delta handling could be done based on part (unit),
+        #       consider adapting this while implementing time based deltas.
+        #       * part = day -> days_between
+        #       * part = hour -> hours_between
+        #       * ...
+        return self.f.days_between(left, right)
+
+    def visit_ExtractDayOfYear(self, op, *, arg):
+        return self.cast(self.f.to_char(arg, "DDD"), op.dtype)

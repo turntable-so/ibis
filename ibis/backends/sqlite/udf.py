@@ -8,6 +8,7 @@ import operator
 from collections import defaultdict
 from typing import Any, Callable, NamedTuple
 from urllib.parse import parse_qs, urlsplit
+from uuid import uuid4
 
 try:
     import regex as re
@@ -222,6 +223,11 @@ def pi():
     return math.pi
 
 
+@udf(skip_if_exists=True, deterministic=False)
+def uuid():
+    return str(uuid4())
+
+
 # Additional UDFS
 
 
@@ -426,8 +432,7 @@ class _ibis_arbitrary(abc.ABC):
         self.value = None
 
     @abc.abstractmethod
-    def step(self, value):
-        ...
+    def step(self, value): ...
 
     def finalize(self) -> int | None:
         return self.value

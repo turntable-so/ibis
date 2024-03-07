@@ -106,17 +106,21 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         """
 
         url = urlparse(url)
-        database, schema = url.path[1:].split("/", 1)
-        query_params = parse_qs(url.query)
-        (warehouse,) = query_params.pop("warehouse", (None,))
-        connect_args = {
-            "user": url.username,
-            "password": url.password or "",
-            "account": url.hostname,
-            "warehouse": warehouse,
-            "database": database or "",
-            "schema": schema or "",
-        }
+        if url.path:
+            database, schema = url.path[1:].split("/", 1)
+            query_params = parse_qs(url.query)
+            (warehouse,) = query_params.pop("warehouse", (None,))
+            connect_args = {
+                "user": url.username,
+                "password": url.password or "",
+                "account": url.hostname,
+                "warehouse": warehouse,
+                "database": database or "",
+                "schema": schema or "",
+            }
+        else:
+            connect_args = {}
+            query_params = {}
 
         for name, value in query_params.items():
             if len(value) > 1:
@@ -243,7 +247,14 @@ $$ {defn["source"]} $$"""
             ),
         )
 
-        con = sc.connect(**connect_args, session_parameters=session_parameters)
+        con = sc.connect(**connect_args)
+
+        with contextlib.closing(con.cursor()) as cur:
+            cur.execute(
+                "ALTER SESSION SET {}".format(
+                    " ".join(f"{k} = {v!r}" for k, v in session_parameters.items())
+                )
+            )
 
         if create_object_udfs:
             database = con.database

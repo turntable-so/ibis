@@ -12,8 +12,6 @@ from ibis.backends.sql.datatypes import ImpalaType
 from ibis.backends.sql.dialects import Impala
 from ibis.backends.sql.rewrites import (
     rewrite_empty_order_by_window,
-    rewrite_first_to_first_value,
-    rewrite_last_to_last_value,
     rewrite_sample_as_filter,
 )
 
@@ -25,8 +23,6 @@ class ImpalaCompiler(SQLGlotCompiler):
     type_mapper = ImpalaType
     rewrites = (
         rewrite_sample_as_filter,
-        rewrite_first_to_first_value,
-        rewrite_last_to_last_value,
         rewrite_empty_order_by_window,
         *SQLGlotCompiler.rewrites,
     )
@@ -81,6 +77,7 @@ class ImpalaCompiler(SQLGlotCompiler):
         ops.Ln: "ln",
         ops.Log10: "log10",
         ops.Log2: "log2",
+        ops.RandomUUID: "uuid",
         ops.RStrip: "rtrim",
         ops.Strip: "trim",
         ops.TypeOf: "typeof",
@@ -241,11 +238,7 @@ class ImpalaCompiler(SQLGlotCompiler):
     def visit_ExtractUrlField(self, op, *, arg):
         return self.f.parse_url(arg, type(op).__name__[len("Extract") :].upper())
 
-    visit_ExtractAuthority = (
-        visit_ExtractHost
-    ) = (
-        visit_ExtractUserInfo
-    ) = (
+    visit_ExtractAuthority = visit_ExtractHost = visit_ExtractUserInfo = (
         visit_ExtractProtocol
     ) = visit_ExtractFile = visit_ExtractPath = visit_ExtractUrlField
 

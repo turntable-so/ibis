@@ -22,11 +22,13 @@ if TYPE_CHECKING:
     from pathlib import Path
 
     import pandas as pd
+    import polars as pl
     import pyarrow as pa
     import torch
 
     import ibis.expr.types as ir
     from ibis.backends import BaseBackend
+    from ibis.expr.visualize import EdgeAttributeGetter, NodeAttributeGetter
 
     TimeContext = tuple[pd.Timestamp, pd.Timestamp]
 
@@ -162,6 +164,10 @@ class Expr(Immutable, Coercible):
         *,
         label_edges: bool = False,
         verbose: bool = False,
+        node_attr: Mapping[str, str] | None = None,
+        node_attr_getter: NodeAttributeGetter | None = None,
+        edge_attr: Mapping[str, str] | None = None,
+        edge_attr_getter: EdgeAttributeGetter | None = None,
     ) -> None:
         """Visualize an expression as a GraphViz graph in the browser.
 
@@ -174,6 +180,36 @@ class Expr(Immutable, Coercible):
             Show operation input names as edge labels
         verbose
             Print the graphviz DOT code to stderr if [](`True`)
+        node_attr
+            Mapping of ``(attribute, value)`` pairs set for all nodes.
+            Options are specified by the ``graphviz`` Python library.
+        node_attr_getter
+            Callback taking a node and returning a mapping of ``(attribute, value)`` pairs
+            for that node. Options are specified by the ``graphviz`` Python library.
+        edge_attr
+            Mapping of ``(attribute, value)`` pairs set for all edges.
+            Options are specified by the ``graphviz`` Python library.
+        edge_attr_getter
+            Callback taking two adjacent nodes and returning a mapping of ``(attribute, value)`` pairs
+            for the edge between those nodes. Options are specified by the ``graphviz`` Python library.
+
+        Examples
+        --------
+        Open the visualization of an expression in default browser:
+
+        >>> import ibis
+        >>> import ibis.expr.operations as ops
+        >>> left = ibis.table(dict(a="int64", b="string"), name="left")
+        >>> right = ibis.table(dict(b="string", c="int64", d="string"), name="right")
+        >>> expr = left.inner_join(right, "b").select(left.a, b=right.c, c=right.d)
+        >>> expr.visualize(
+        ...     format="svg",
+        ...     label_edges=True,
+        ...     node_attr={"fontname": "Roboto Mono", "fontsize": "10"},
+        ...     node_attr_getter=lambda node: isinstance(node, ops.Field) and {"shape": "oval"},
+        ...     edge_attr={"fontsize": "8"},
+        ...     edge_attr_getter=lambda u, v: isinstance(u, ops.Field) and {"color": "red"},
+        ... )  # quartodoc: +SKIP # doctest: +SKIP
 
         Raises
         ------
@@ -183,7 +219,14 @@ class Expr(Immutable, Coercible):
         import ibis.expr.visualize as viz
 
         path = viz.draw(
-            viz.to_graph(self, label_edges=label_edges),
+            viz.to_graph(
+                self,
+                node_attr=node_attr,
+                node_attr_getter=node_attr_getter,
+                edge_attr=edge_attr,
+                edge_attr_getter=edge_attr_getter,
+                label_edges=label_edges,
+            ),
             format=format,
             verbose=verbose,
         )
@@ -426,6 +469,38 @@ class Expr(Immutable, Coercible):
         )
 
     @experimental
+    def to_polars(
+        self,
+        *,
+        params: Mapping[ir.Scalar, Any] | None = None,
+        limit: int | str | None = None,
+        **kwargs: Any,
+    ) -> pl.DataFrame:
+        """Execute expression and return results as a polars dataframe.
+
+        This method is eager and will execute the associated expression
+        immediately.
+
+        Parameters
+        ----------
+        params
+            Mapping of scalar parameter expressions to value.
+        limit
+            An integer to effect a specific row limit. A value of `None` means
+            "no limit". The default is in `ibis/config.py`.
+        kwargs
+            Keyword arguments
+
+        Returns
+        -------
+        DataFrame
+            A polars dataframe holding the results of the executed expression.
+        """
+        return self._find_backend(use_default=True).to_polars(
+            self, params=params, limit=limit, **kwargs
+        )
+
+    @experimental
     def to_pandas_batches(
         self,
         *,
@@ -592,10 +667,9 @@ class Expr(Immutable, Coercible):
 
     def unbind(self) -> ir.Table:
         """Return an expression built on `UnboundTable` instead of backend-specific objects."""
-        from ibis.common.deferred import _
-        from ibis.expr.analysis import c, p
+        from ibis.expr.rewrites import _, d, p
 
-        rule = p.DatabaseTable >> c.UnboundTable(
+        rule = p.DatabaseTable >> d.UnboundTable(
             name=_.name, schema=_.schema, namespace=_.namespace
         )
         return self.op().replace(rule).to_expr()
@@ -609,7 +683,7 @@ class Expr(Immutable, Coercible):
     def as_scalar(self) -> ir.Scalar:
         """Convert an expression to a scalar."""
         raise NotImplementedError(
-            f"{type(self)} expression cannot be converted into scalars"
+            f"{type(self)} expressions cannot be converted into scalars"
         )
 
 

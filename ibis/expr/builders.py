@@ -147,7 +147,6 @@ class WindowBuilder(Builder):
     end: Optional[RangeWindowBoundary] = None
     groupings: VarTuple[Union[str, Resolver, ops.Value]] = ()
     orderings: VarTuple[Union[str, Resolver, ops.Value]] = ()
-    max_lookback: Optional[ops.Value[dt.Interval]] = None
 
     @attribute
     def _table(self):
@@ -156,7 +155,6 @@ class WindowBuilder(Builder):
             self.end,
             *self.groupings,
             *self.orderings,
-            self.max_lookback,
         )
         valuerels = (v.relations for v in inputs if isinstance(v, ops.Value))
         relations = frozenset().union(*valuerels)
@@ -168,17 +166,12 @@ class WindowBuilder(Builder):
         else:
             raise IbisInputError("Window frame can only depend on a single relation")
 
-    def _maybe_cast_boundary(self, boundary, dtype):
-        if boundary.dtype == dtype:
-            return boundary
-        value = ops.Cast(boundary.value, dtype)
-        return boundary.copy(value=value)
-
     def _maybe_cast_boundaries(self, start, end):
         if start and end:
-            dtype = dt.higher_precedence(start.dtype, end.dtype)
-            start = self._maybe_cast_boundary(start, dtype)
-            end = self._maybe_cast_boundary(end, dtype)
+            if start.dtype.is_interval() and end.dtype.is_numeric():
+                return start, ops.Cast(end.value, start.dtype)
+            elif start.dtype.is_numeric() and end.dtype.is_interval():
+                return ops.Cast(start.value, end.dtype), end
         return start, end
 
     def _determine_how(self, start, end):
@@ -232,9 +225,6 @@ class WindowBuilder(Builder):
     def order_by(self, expr) -> Self:
         return self.copy(orderings=self.orderings + util.promote_tuple(expr))
 
-    def lookback(self, value) -> Self:
-        return self.copy(max_lookback=value)
-
     @annotated
     def bind(self, table: Optional[ops.Relation]):
         table = table or self._table
@@ -260,7 +250,6 @@ class WindowBuilder(Builder):
                 end=self.end,
                 group_by=groupings,
                 order_by=orderings,
-                max_lookback=self.max_lookback,
             )
         elif self.how == "range":
             return ops.RangeWindowFrame(

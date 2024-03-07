@@ -71,10 +71,14 @@ class WindowFrame(Value):
     shape = ds.columnar
 
     def __init__(self, start, end, **kwargs):
-        if start and end and start.dtype != end.dtype:
-            raise com.IbisTypeError(
-                "Window frame start and end boundaries must have the same datatype"
-            )
+        if start and end:
+            if not (
+                (start.dtype.is_interval() and end.dtype.is_interval())
+                or (start.dtype.is_numeric() and end.dtype.is_numeric())
+            ):
+                raise com.IbisTypeError(
+                    "Window frame start and end boundaries must have the same datatype"
+                )
         super().__init__(start=start, end=end, **kwargs)
 
     def dtype(self) -> dt.DataType:
@@ -82,13 +86,11 @@ class WindowFrame(Value):
 
     @property
     @abstractmethod
-    def start(self):
-        ...
+    def start(self): ...
 
     @property
     @abstractmethod
-    def end(self):
-        ...
+    def end(self): ...
 
 
 @public
@@ -96,21 +98,6 @@ class RowsWindowFrame(WindowFrame):
     how = "rows"
     start: Optional[WindowBoundary[dt.Integer]] = None
     end: Optional[WindowBoundary] = None
-    max_lookback: Optional[Value[dt.Interval]] = None
-
-    def __init__(self, max_lookback, order_by, **kwargs):
-        if max_lookback:
-            # TODO(kszucs): this should belong to a timeseries extension rather than
-            # the core window operation
-            if len(order_by) != 1:
-                raise com.IbisTypeError(
-                    "`max_lookback` window must be ordered by a single column"
-                )
-            if not order_by[0].dtype.is_timestamp():
-                raise com.IbisTypeError(
-                    "`max_lookback` window must be ordered by a timestamp column"
-                )
-        super().__init__(max_lookback=max_lookback, order_by=order_by, **kwargs)
 
 
 @public

@@ -1,15 +1,21 @@
-# Contribute to the Ibis codebase
+---
+title: "Contribute to the Ibis codebase"
+---
 
-## Getting started
+## Workflow
+
+### Getting started
 
 First, set up a [development environment](./01_environment.qmd).
 
-## Taking issues
+If you're developing on Mac M1 or M2, see [docs for setting up Colima](#set-up-colima).
+
+### Taking issues
 
 If you find an issue you want to work on, write a comment with the text
 `/take` on the issue. GitHub will then assign the issue to you.
 
-## Running the test suite
+### Running the test suite
 
 To run tests that do not require a backend:
 
@@ -17,15 +23,16 @@ To run tests that do not require a backend:
 pytest -m core
 ```
 
-### Backend test suites
+#### Backend test suites
 
-:::{.callout-tip}
-You may be able to skip this section
+::: {.callout-tip}
+## You may be able to skip this section
+
+If you haven't made changes to the core of ibis (e.g., `ibis/expr`) or any
+specific backends (`ibis/backends`) this material isn't necessary to
+follow to make a pull request. You can jump directly to the
+[Writing the commit](#writing-the-commit) section
 :::
-
-    If you haven't made changes to the core of ibis (e.g., `ibis/expr`)
-    or any specific backends (`ibis/backends`) this material isn't necessary to
-    follow to make a pull request.
 
 First, we need to download example data to run the tests successfully:
 
@@ -39,13 +46,21 @@ To run the tests for a specific backend (e.g. sqlite):
 pytest -m sqlite
 ```
 
-## Setting up non-trivial backends
+### Setting up non-trivial backends
+
+::: {.callout-note}
+## MacOS users on arm64 CPUs must use a different setup
+
+If you are working with an `arm64` architecture (Mac M1/M2) you can setup Docker
+with [Colima](https://github.com/abiosoft/colima). Refer to
+[set up colima](#set-up-colima). Or you can download Docker desktop.
+:::
 
 These client-server backends need to be started before testing them.
 They can be started with `docker compose` directly, or using the `just` tool.
 
 - ClickHouse: `just up clickhouse`
-- Exasol: `just up exasol`
+- Exasol: `just up exasol` (no `arm64` support)
 - Flink: `just up flink`
 - Impala: `just up impala`
 - SQL Server: `just up mssql`
@@ -56,7 +71,14 @@ They can be started with `docker compose` directly, or using the `just` tool.
 - Trino: `just up trino`
 - Druid: `just up druid`
 
-### Test the backend locally
+and then run the test suite for the backend you just started. For example,
+if you ran `just up postgres`:
+
+```sh
+pytest -m postgres
+```
+
+#### Test the backend locally
 
 If anything seems amiss with a backend, you can of course test it locally:
 
@@ -65,7 +87,7 @@ export PGPASSWORD=postgres
 psql -t -A -h localhost -U postgres -d ibis_testing -c "select 'success'"
 ```
 
-## Writing the commit
+### Writing the commit
 
 Ibis follows the [Conventional Commits](https://www.conventionalcommits.org/) structure.
 In brief, the commit summary should look like:
@@ -83,6 +105,131 @@ The type (e.g. `fix`) can be:
 
       fixes #4242
 
-## Submit a pull request
+### Submit a pull request
 
 Ibis follows the standard GitHub pull request process. The team will review the PR and merge when it's ready.
+
+## Colima setup for Mac M1/M2 users {#set-up-colima}
+
+[Colima](https://github.com/abiosoft/colima) is a container runtime that
+supports Mac M1 and M2 CPUs.
+
+If you are working with an M1 or M2 CPU architecture, you will need to
+run Docker to be able to test some backends supported by Ibis. With Colima[^1],
+you can run Docker on newer Macs without using Docker Desktop[^2].
+
+[^1]: [Installing Colima as a Docker Engine provider with `buildx` and `compose` plugins installed](https://aosolorzano.medium.com/installing-colima-as-a-docker-engine-provider-with-buildx-and-compose-plugins-installed-1ce8b3bae158)
+[^2]: [Goodbye Docker Desktop for Mac, Hello Colima](https://jacobtomlinson.dev/posts/2022/goodbye-docker-desktop-for-mac-hello-colima/)
+
+### Get started
+
+#### Uninstall Docker Desktop
+
+If you have Docker desktop installed, follow [^1] or [^2], both of them have
+a section on how to uninstall Docker Desktop.
+
+#### Install Docker client with [Homebrew](https://brew.sh/)
+
+Make sure your Homebrew installation is up to date.
+
+```bash
+$ brew install docker
+```
+
+#### Check installation by running
+
+```bash
+$ docker --version
+```
+
+Notice we haven't installed any Docker Engine yet, and only the Docker client
+information is displayed.
+
+#### Install Colima
+
+```bash
+$ brew install colima
+```
+
+#### Install Docker Compose plugin (optional)
+
+If you want to be able to run `docker compose` or run `just up`, follow these
+steps.
+
+The official [Docker
+documentation](https://docs.docker.com/compose/install/linux/) suggests
+running the following commands in a separate terminal:
+
+Replace the link on the `curl` step with the version you desired, find them here
+https://github.com/docker/compose/releases/
+
+```bash
+$ DOCKER_CONFIG=${DOCKER_CONFIG:-$HOME/.docker}
+$ mkdir -p $DOCKER_CONFIG/cli-plugins
+$ curl -SL https://github.com/docker/compose/releases/download/v2.24.6/docker-compose-darwin-aarch64 -o $DOCKER_CONFIG/cli-plugins/docker-compose
+```
+
+Then add execution permission to the downloaded binary:
+
+```bash
+$ chmod +x $DOCKER_CONFIG/cli-plugins/docker-compose
+```
+
+Check it worked:
+
+```bash
+$ docker compose version
+```
+
+#### Start Colima
+
+```bash
+$ colima start
+```
+
+You can now run `docker version` and you will see the engine.
+
+::: {.callout-note}
+## By default this launches containers with 2 CPUs, 2GB of RAM, and 60GB of disk space.
+
+You can modify this as well as the architecture by passing command line
+arguments (`--cpu`, `--memory`, `--disk`, and `--arch`) to `colima start`.
+:::
+
+```bash
+$ colima status
+$ colima list
+```
+
+In your Ibis clone
+
+```bash
+$ just up postgres
+```
+
+Once the `just` command finishes, you can run the tests by doing:
+
+```bash
+$ pytest -m postgres
+```
+
+Once you are done, you can stop the container by doing:
+
+```bash
+$ just down postgres
+```
+
+If you are done for the day, and want to avoid the Colima instance eating your
+resources, you will want to stop it.
+
+```bash
+$ colima stop
+```
+
+If you upgraded colima, you need to delete the existing instance. If you want to
+modify the allocation, you need to delete the existing instance too (unless
+you are going only up).
+
+```bash
+$ colima delete
+```

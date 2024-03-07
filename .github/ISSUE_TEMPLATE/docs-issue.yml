@@ -1,5 +1,5 @@
-name: Documentation Issue
-description: Open an issue about the Ibis documentation
+name: Documentation issue
+description: Open an issue about the Ibis documentation.
 title: "docs: "
 labels: ["docs"]
 body:

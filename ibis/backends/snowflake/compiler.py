@@ -20,8 +20,6 @@ from ibis.backends.sql.rewrites import (
     replace_log2,
     replace_log10,
     rewrite_empty_order_by_window,
-    rewrite_first_to_first_value,
-    rewrite_last_to_last_value,
 )
 
 
@@ -39,8 +37,6 @@ class SnowflakeCompiler(SQLGlotCompiler):
     rewrites = (
         exclude_unsupported_window_frame_from_row_number,
         exclude_unsupported_window_frame_from_ops,
-        rewrite_first_to_first_value,
-        rewrite_last_to_last_value,
         rewrite_empty_order_by_window,
         replace_log2,
         replace_log10,
@@ -80,6 +76,7 @@ class SnowflakeCompiler(SQLGlotCompiler):
         ops.Hash: "hash",
         ops.Median: "median",
         ops.Mode: "mode",
+        ops.RandomUUID: "uuid_string",
         ops.StringToTimestamp: "to_timestamp_tz",
         ops.TimeFromHMS: "time_from_parts",
         ops.TimestampFromYMDHMS: "timestamp_from_parts",

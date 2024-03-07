@@ -22,7 +22,7 @@ dependencies:
   - numpy >=1.15,<2
   - oracledb >=1.3.1
   - packaging >=21.3
-  - pandas >=1.2.5
+  - pandas >=1.2.5,<2.2
   - parsy >=2
   - pins >=0.8.2
   - pip
@@ -51,7 +51,7 @@ dependencies:
   - toolz >=0.11
   - trino-python-client >=0.321
   # geospatial
-  - leafmap >=0.29.6
+  - leafmap >=0.29.6,<0.31
   # streaming
   - kafka-python
   # test dependencies
@@ -69,6 +69,7 @@ dependencies:
   - pytest-xdist >=2.3.0,<4
   - requests >=2,<3
   # docs
+  - quarto >=1.4
   - altair >=5.0.1
   - distributed >=2022.9.1
   - ipykernel >=6.25.1
@@ -79,8 +80,6 @@ dependencies:
   - py-cpuinfo >=9
   - quartodoc >=0.6.1
   - seaborn
-  # needs >1.4 for the dashboard but not available yet
-  - quarto
   # dev utilities
   - codespell >=2.2.6
   - go-shfmt
@@ -94,4 +93,6 @@ dependencies:
   - taplo
   - tqdm >=4.66.1
   - just
-  # dependencies for lonboard
+  - pip
+  - pip:
+      - lonboard==0.4.0

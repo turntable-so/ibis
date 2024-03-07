@@ -14,10 +14,6 @@ from ibis.expr.operations.core import Column, Scalar, Value
 class Analytic(Value):
     shape = ds.columnar
 
-    @property
-    def __window_op__(self):
-        return self
-
 
 @public
 class ShiftBase(Analytic):
@@ -62,6 +58,7 @@ class RowNumber(RankBase):
     Examples
     --------
     >>> import ibis
+    >>> import ibis.expr.datatypes as dt
     >>> t = ibis.table([("values", dt.int64)])
     >>> w = ibis.window(order_by=t.values)
     >>> row_num = ibis.row_number().over(w)
@@ -90,24 +87,6 @@ class NTile(Analytic):
     buckets: Scalar[dt.Integer]
 
     dtype = dt.int64
-
-
-@public
-class FirstValue(Analytic):
-    """Retrieve the first element."""
-
-    arg: Column[dt.Any]
-
-    dtype = rlz.dtype_like("arg")
-
-
-@public
-class LastValue(Analytic):
-    """Retrieve the last element."""
-
-    arg: Column[dt.Any]
-
-    dtype = rlz.dtype_like("arg")
 
 
 @public

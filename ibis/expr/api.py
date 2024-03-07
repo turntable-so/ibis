@@ -9,7 +9,7 @@ import itertools
 import numbers
 import operator
 from collections import Counter
-from typing import TYPE_CHECKING, Any, NamedTuple, overload
+from typing import TYPE_CHECKING, Any, overload
 
 import ibis.expr.builders as bl
 import ibis.expr.datatypes as dt
@@ -44,11 +44,11 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
     from pathlib import Path
 
-    import numpy as np
     import pandas as pd
+    import polars as pl
     import pyarrow as pa
 
-    from ibis.common.typing import SupportsSchema
+    from ibis.expr.schema import SchemaLike
 
 __all__ = (
     "aggregate",
@@ -154,7 +154,6 @@ __all__ = (
     "read_parquet",
     "row_number",
     "rows_window",
-    "rows_with_max_lookback",
     "schema",
     "Schema",
     "selectors",
@@ -167,6 +166,7 @@ __all__ = (
     "trailing_range_window",
     "trailing_window",
     "union",
+    "uuid",
     "watermark",
     "where",
     "window",
@@ -266,7 +266,7 @@ def param(type: dt.DataType) -> ir.Scalar:
 
 
 def schema(
-    pairs: SupportsSchema | None = None,
+    pairs: SchemaLike | None = None,
     names: Iterable[str] | None = None,
     types: Iterable[str | dt.DataType] | None = None,
 ) -> sch.Schema:
@@ -310,7 +310,7 @@ _table_names = (f"unbound_table_{i:d}" for i in itertools.count())
 
 
 def table(
-    schema: SupportsSchema | None = None,
+    schema: SchemaLike | None = None,
     name: str | None = None,
 ) -> ir.Table:
     """Create a table literal or an abstract table without data.
@@ -352,7 +352,7 @@ def memtable(
     data,
     *,
     columns: Iterable[str] | None = None,
-    schema: SupportsSchema | None = None,
+    schema: SchemaLike | None = None,
     name: str | None = None,
 ) -> Table:
     """Construct an ibis table expression from in-memory data.
@@ -360,14 +360,15 @@ def memtable(
     Parameters
     ----------
     data
-        Any data accepted by the `pandas.DataFrame` constructor or a `pyarrow.Table`.
+        A table-like object (`pandas.DataFrame`, `pyarrow.Table`, or
+        `polars.DataFrame`), or any data accepted by the `pandas.DataFrame`
+        constructor (e.g. a list of dicts).
 
-        Examples of acceptable objects are a `pandas.DataFrame`, a `pyarrow.Table`,
-        a list of dicts of non-ibis Python objects, etc.
-        `ibis` objects, like `MapValue`, will result in an error.
+        Note that ibis objects (e.g. `MapValue`) may not be passed in as part
+        of `data` and will result in an error.
 
-        Do not depend on the underlying storage type (e.g., pyarrow.Table), it's subject
-        to change across non-major releases.
+        Do not depend on the underlying storage type (e.g., pyarrow.Table),
+        it's subject to change across non-major releases.
     columns
         Optional [](`typing.Iterable`) of [](`str`) column names. If provided,
         must match the number of columns in `data`.
@@ -441,7 +442,7 @@ def _memtable(
     data: pd.DataFrame | Any,
     *,
     columns: Iterable[str] | None = None,
-    schema: SupportsSchema | None = None,
+    schema: SchemaLike | None = None,
     name: str | None = None,
 ) -> Table:
     import pandas as pd
@@ -493,7 +494,7 @@ def _memtable_from_pyarrow_table(
     data: pa.Table,
     *,
     name: str | None = None,
-    schema: SupportsSchema | None = None,
+    schema: SchemaLike | None = None,
     columns: Iterable[str] | None = None,
 ):
     from ibis.formats.pyarrow import PyArrowTableProxy
@@ -505,6 +506,31 @@ def _memtable_from_pyarrow_table(
         name=name if name is not None else util.gen_name("pyarrow_memtable"),
         schema=sch.infer(data) if schema is None else schema,
         data=PyArrowTableProxy(data),
+    ).to_expr()
+
+
+@_memtable.register("polars.LazyFrame")
+def _memtable_from_polars_lazyframe(data: pl.LazyFrame, **kwargs):
+    return _memtable_from_polars_dataframe(data.collect(), **kwargs)
+
+
+@_memtable.register("polars.DataFrame")
+def _memtable_from_polars_dataframe(
+    data: pl.DataFrame,
+    *,
+    name: str | None = None,
+    schema: SchemaLike | None = None,
+    columns: Iterable[str] | None = None,
+):
+    from ibis.formats.polars import PolarsDataFrameProxy
+
+    if columns is not None:
+        assert schema is None, "if `columns` is not `None` then `schema` must be `None`"
+        schema = sch.Schema(dict(zip(columns, sch.infer(data).values())))
+    return ops.InMemoryTable(
+        name=name if name is not None else util.gen_name("polars_memtable"),
+        schema=sch.infer(data) if schema is None else schema,
+        data=PolarsDataFrameProxy(data),
     ).to_expr()
 
 
@@ -690,6 +716,25 @@ def random() -> ir.FloatingScalar:
     return ops.RandomScalar().to_expr()
 
 
+def uuid() -> ir.UUIDScalar:
+    """Return a random UUID version 4 value.
+
+    Similar to [('uuid.uuid4`) in the Python standard library.
+
+    Examples
+    --------
+    >>> from ibis.interactive import *
+    >>> ibis.uuid()  # doctest: +SKIP
+    UUID('e57e927b-aed2-483b-9140-dc32a26cad95')
+
+    Returns
+    -------
+    UUIDScalar
+        Random UUID value expression
+    """
+    return ops.RandomUUID().to_expr()
+
+
 @overload
 def timestamp(
     value_or_year: int | ir.IntegerValue | Deferred,
@@ -700,13 +745,11 @@ def timestamp(
     second: int | ir.IntegerValue | Deferred,
     /,
     timezone: str | None = None,
-) -> TimestampValue:
-    ...
+) -> TimestampValue: ...
 
 
 @overload
-def timestamp(value_or_year: Any, /, timezone: str | None = None) -> TimestampValue:
-    ...
+def timestamp(value_or_year: Any, /, timezone: str | None = None) -> TimestampValue: ...
 
 
 @deferrable
@@ -800,13 +843,11 @@ def date(
     month: int | ir.IntegerValue | Deferred,
     day: int | ir.IntegerValue | Deferred,
     /,
-) -> DateValue:
-    ...
+) -> DateValue: ...
 
 
 @overload
-def date(value_or_year: Any, /) -> DateValue:
-    ...
+def date(value_or_year: Any, /) -> DateValue: ...
 
 
 @deferrable
@@ -871,13 +912,11 @@ def time(
     minute: int | ir.IntegerValue | Deferred,
     second: int | ir.IntegerValue | Deferred,
     /,
-) -> TimeValue:
-    ...
+) -> TimeValue: ...
 
 
 @overload
-def time(value_or_hour: Any, /) -> TimeValue:
-    ...
+def time(value_or_hour: Any, /) -> TimeValue: ...
 
 
 @deferrable
@@ -1571,32 +1610,6 @@ def get_backend(expr: Expr | None = None) -> BaseBackend:
     return expr._find_backend(use_default=True)
 
 
-class RowsWithMaxLookback(NamedTuple):
-    rows: int
-    max_lookback: ir.IntervalValue
-
-
-def rows_with_max_lookback(
-    rows: int | np.integer, max_lookback: ir.IntervalValue
-) -> RowsWithMaxLookback:
-    """Create a bound preceding value for use with trailing window functions.
-
-    Parameters
-    ----------
-    rows
-        Number of rows
-    max_lookback
-        Maximum lookback in time
-
-    Returns
-    -------
-    RowsWithMaxLookback
-        A named tuple of rows and maximum look-back in time.
-
-    """
-    return RowsWithMaxLookback(rows, max_lookback)
-
-
 def window(
     preceding=None,
     following=None,
@@ -1638,12 +1651,6 @@ def window(
         A window frame
 
     """
-    if isinstance(preceding, RowsWithMaxLookback):
-        max_lookback = preceding.max_lookback
-        preceding = preceding.rows
-    else:
-        max_lookback = None
-
     has_rows = rows is not None
     has_range = range is not None
     has_between = between is not None
@@ -1653,12 +1660,7 @@ def window(
             "Must only specify either `rows`, `range`, `between` or `preceding`/`following`"
         )
 
-    builder = (
-        bl.LegacyWindowBuilder()
-        .group_by(group_by)
-        .order_by(order_by)
-        .lookback(max_lookback)
-    )
+    builder = bl.LegacyWindowBuilder().group_by(group_by).order_by(order_by)
     if has_rows:
         return builder.rows(*rows)
     elif has_range:
@@ -1696,17 +1698,10 @@ def rows_window(preceding=None, following=None, group_by=None, order_by=None):
         A window frame
 
     """
-    if isinstance(preceding, RowsWithMaxLookback):
-        max_lookback = preceding.max_lookback
-        preceding = preceding.rows
-    else:
-        max_lookback = None
-
     return (
         bl.LegacyWindowBuilder()
         .group_by(group_by)
         .order_by(order_by)
-        .lookback(max_lookback)
         .preceding_following(preceding, following, how="rows")
     )
 

@@ -5,6 +5,7 @@ import datetime
 import warnings
 from functools import partial
 from importlib.util import find_spec as _find_spec
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pandas as pd
@@ -18,6 +19,9 @@ from ibis.common.temporal import normalize_timezone
 from ibis.formats import DataMapper, SchemaMapper, TableProxy
 from ibis.formats.numpy import NumpyType
 from ibis.formats.pyarrow import PyArrowData, PyArrowSchema, PyArrowType
+
+if TYPE_CHECKING:
+    import polars as pl
 
 _has_arrow_dtype = hasattr(pd, "ArrowDtype")
 
@@ -172,13 +176,9 @@ class PandasData(DataMapper):
             return gpd.GeoSeries(s)
         return gpd.GeoSeries.from_wkb(s)
 
-    convert_Point = (
-        convert_LineString
-    ) = (
-        convert_Polygon
-    ) = (
-        convert_MultiLineString
-    ) = convert_MultiPoint = convert_MultiPolygon = convert_GeoSpatial
+    convert_Point = convert_LineString = convert_Polygon = convert_MultiLineString = (
+        convert_MultiPoint
+    ) = convert_MultiPolygon = convert_GeoSpatial
 
     @classmethod
     def convert_default(cls, s, dtype, pandas_type):
@@ -404,3 +404,11 @@ class PandasDataFrameProxy(TableProxy[pd.DataFrame]):
     def to_pyarrow(self, schema: sch.Schema) -> pa.Table:
         pyarrow_schema = PyArrowSchema.from_ibis(schema)
         return pa.Table.from_pandas(self.obj, schema=pyarrow_schema)
+
+    def to_polars(self, schema: sch.Schema) -> pl.DataFrame:
+        import polars as pl
+
+        from ibis.formats.polars import PolarsSchema
+
+        pl_schema = PolarsSchema.from_ibis(schema)
+        return pl.from_pandas(self.obj, schema_overrides=pl_schema)

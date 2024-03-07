@@ -260,7 +260,7 @@ class Backend(SQLBackend):
             month : int32
 
         """
-
+        psycopg2.extras.register_default_json(loads=lambda x: x)
         self.con = psycopg2.connect(
             host=host,
             port=port,
@@ -381,8 +381,7 @@ class Backend(SQLBackend):
         signature = list(map(split_name_type, signature))
 
         # dummy callable
-        def fake_func(*args, **kwargs):
-            ...
+        def fake_func(*args, **kwargs): ...
 
         fake_func.__name__ = name
         fake_func.__signature__ = inspect.Signature(

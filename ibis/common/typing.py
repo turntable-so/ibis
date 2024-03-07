@@ -4,17 +4,7 @@ import re
 import sys
 from abc import abstractmethod
 from itertools import zip_longest
-from types import ModuleType  # noqa: F401
-from typing import (
-    TYPE_CHECKING,
-    Any,
-    Generic,  # noqa: F401
-    Optional,
-    TypeVar,
-    Union,
-    get_args,
-    get_origin,
-)
+from typing import TYPE_CHECKING, Any, Optional, TypeVar, Union, get_args, get_origin
 from typing import get_type_hints as _get_type_hints
 
 from ibis.common.bases import Abstract
@@ -22,6 +12,7 @@ from ibis.common.caching import memoize
 
 if TYPE_CHECKING:
     from typing_extensions import Self
+
 
 if sys.version_info >= (3, 10):
     from types import UnionType
@@ -100,16 +91,10 @@ def get_type_params(obj: Any) -> dict[str, type]:
     Examples
     --------
     >>> from typing import Dict, List
-    >>>
-    >>> class MyList(List[T]):
-    ...     ...
-    >>>
+    >>> class MyList(List[T]): ...
     >>> get_type_params(MyList[int])
     {'T': <class 'int'>}
-    >>>
-    >>> class MyDict(Dict[T, U]):
-    ...     ...
-    >>>
+    >>> class MyDict(Dict[T, U]): ...
     >>> get_type_params(MyDict[int, str])
     {'T': <class 'int'>, 'U': <class 'str'>}
 
@@ -144,6 +129,7 @@ def get_bound_typevars(obj: Any) -> dict[TypeVar, tuple[str, type]]:
 
     Examples
     --------
+    >>> from typing import Generic
     >>> class MyStruct(Generic[T, U]):
     ...     a: T
     ...     b: U
@@ -154,8 +140,7 @@ def get_bound_typevars(obj: Any) -> dict[TypeVar, tuple[str, type]]:
     ...     a: T
     ...
     ...     @property
-    ...     def myprop(self) -> U:
-    ...         ...
+    ...     def myprop(self) -> U: ...
     >>> get_bound_typevars(MyStruct[float, bytes])
     {~T: ('a', <class 'float'>), ~U: ('myprop', <class 'bytes'>)}
 
@@ -260,8 +245,7 @@ class Sentinel(type):
         raise TypeError("Sentinels are not constructible")
 
 
-class CoercionError(Exception):
-    ...
+class CoercionError(Exception): ...
 
 
 class Coercible(Abstract):
@@ -274,5 +258,4 @@ class Coercible(Abstract):
 
     @classmethod
     @abstractmethod
-    def __coerce__(cls, value: Any, **kwargs: Any) -> Self:
-        ...
+    def __coerce__(cls, value: Any, **kwargs: Any) -> Self: ...

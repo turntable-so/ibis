@@ -9,7 +9,7 @@ clean:
 # lock dependencies without updating existing versions
 lock:
     #!/usr/bin/env bash
-    required_version="1.7.1"
+    required_version="1.8.1"
     version="$(poetry --version)"
     if ! grep -qF "${required_version}" <<< "${version}"; then
         >&2 echo "poetry version must be ${required_version}, got ${version}"
@@ -26,7 +26,7 @@ lock:
 # format code
 fmt:
     ruff format .
-    ruff --fix .
+    ruff check --fix .
 
 # run all non-backend tests; additional arguments are forwarded to pytest
 check *args:
@@ -98,7 +98,7 @@ download-data owner="ibis-project" repo="testing-data" rev="master":
 
 # start backends using docker compose; no arguments starts all backends
 up *backends:
-    docker compose up --wait {{ backends }}
+    docker compose up --build --wait {{ backends }}
 
 # stop and remove containers -> clean up dangling volumes -> start backends
 reup *backends:
