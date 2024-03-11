@@ -77,7 +77,6 @@ def test_date_extract(backend, alltypes, df, attr, expr_fn):
             "quarter",
             marks=[
                 pytest.mark.notyet(["oracle"], raises=OracleDatabaseError),
-                pytest.mark.notimpl(["exasol"], raises=com.OperationNotDefinedError),
             ],
         ),
         "hour",
@@ -144,7 +143,7 @@ def test_timestamp_extract(backend, alltypes, df, attr):
             id="day_of_week_full_name",
             marks=[
                 pytest.mark.notimpl(
-                    ["druid", "oracle", "exasol"],
+                    ["druid", "oracle"],
                     raises=com.OperationNotDefinedError,
                 ),
                 pytest.mark.broken(
@@ -241,7 +240,7 @@ def test_timestamp_extract_epoch_seconds(backend, alltypes, df):
     backend.assert_series_equal(result, expected)
 
 
-@pytest.mark.notimpl(["oracle", "exasol"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["oracle"], raises=com.OperationNotDefinedError)
 @pytest.mark.notimpl(
     ["druid"],
     raises=AttributeError,
@@ -343,7 +342,7 @@ PANDAS_UNITS = {
             "ms",
             marks=[
                 pytest.mark.notimpl(
-                    ["clickhouse", "mysql", "sqlite", "datafusion"],
+                    ["clickhouse", "mysql", "sqlite", "datafusion", "exasol"],
                     raises=com.UnsupportedOperationError,
                 ),
                 pytest.mark.broken(
@@ -357,7 +356,7 @@ PANDAS_UNITS = {
             "us",
             marks=[
                 pytest.mark.notimpl(
-                    ["clickhouse", "mysql", "sqlite", "trino", "datafusion"],
+                    ["clickhouse", "mysql", "sqlite", "trino", "datafusion", "exasol"],
                     raises=com.UnsupportedOperationError,
                 ),
                 pytest.mark.broken(
@@ -390,6 +389,7 @@ PANDAS_UNITS = {
                         "trino",
                         "mssql",
                         "datafusion",
+                        "exasol",
                     ],
                     raises=com.UnsupportedOperationError,
                 ),
@@ -412,7 +412,6 @@ PANDAS_UNITS = {
     raises=AttributeError,
     reason="AttributeError: 'StringColumn' object has no attribute 'truncate'",
 )
-@pytest.mark.notimpl(["exasol"], raises=com.OperationNotDefinedError)
 def test_timestamp_truncate(backend, alltypes, df, unit):
     expr = alltypes.timestamp_col.truncate(unit).name("tmp")
 
@@ -440,7 +439,7 @@ def test_timestamp_truncate(backend, alltypes, df, unit):
             marks=[
                 pytest.mark.notyet(["mysql"], raises=com.UnsupportedOperationError),
                 pytest.mark.broken(
-                    ["flink", "exasol"],
+                    ["flink"],
                     raises=AssertionError,
                     reason="Implemented, but behavior doesn't match other backends",
                 ),
@@ -1511,6 +1510,9 @@ def test_day_of_week_column(backend, alltypes, df):
             lambda t: t.timestamp_col.day_of_week.index().count(),
             lambda s: s.dt.dayofweek.count(),
             id="day_of_week_index",
+            marks=[
+                pytest.mark.notimpl(["exasol"], raises=com.OperationNotDefinedError)
+            ],
         ),
         param(
             lambda t: t.timestamp_col.day_of_week.full_name().length().sum(),
@@ -1532,7 +1534,6 @@ def test_day_of_week_column(backend, alltypes, df):
     raises=AttributeError,
     reason="'StringColumn' object has no attribute 'day_of_week'",
 )
-@pytest.mark.notimpl(["exasol"], raises=com.OperationNotDefinedError)
 def test_day_of_week_column_group_by(
     backend, alltypes, df, day_of_week_expr, day_of_week_pandas
 ):
@@ -1574,7 +1575,7 @@ def test_now_from_projection(alltypes):
     ts = result.now
     assert len(result) == n
     assert ts.nunique() == 1
-    assert ~pd.isna(ts.iat[0])
+    assert not pd.isna(ts.iat[0])
 
 
 DATE_BACKEND_TYPES = {
