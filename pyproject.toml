@@ -1,6 +1,6 @@
 [tool.poetry]
 name = "turntable-spoonbill"
-version = "9.0."
+version = "9.0.3"
 packages = [{ include = "ibis" }]
 include = ["ibis/examples/metadata.json", "ibis/examples/CITATIONS.md"]
 exclude = [
