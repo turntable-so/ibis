@@ -460,11 +460,11 @@ class SQLGlotCompiler(abc.ABC):
             alias = node.name if isinstance(node, ops.View) else f"t{next(counter)}"
             aliases[node] = alias
 
-            alias = sg.to_identifier(alias, quoted=self.quoted)
+            alias = sg.to_identifier(alias, quoted=self.quoted, copy=False)
             try:
-                return result.subquery(alias)
+                return result.subquery(alias, copy=False)
             except AttributeError:
-                return result.as_(alias, quoted=self.quoted)
+                return result.as_(alias, quoted=self.quoted, copy=False)
 
         # apply translate rules in topological order
         results = op.map(fn)
@@ -472,14 +472,16 @@ class SQLGlotCompiler(abc.ABC):
         # get the root node as a sqlglot select statement
         out = results[op]
         if isinstance(out, sge.Table):
-            out = sg.select(STAR).from_(out)
+            out = sg.select(STAR).from_(out, copy=False)
         elif isinstance(out, sge.Subquery):
             out = out.this
 
         # add cte definitions to the select statement
         for cte in ctes:
-            alias = sg.to_identifier(aliases[cte], quoted=self.quoted)
-            out = out.with_(alias, as_=results[cte].this, dialect=self.dialect)
+            alias = sg.to_identifier(aliases[cte], quoted=self.quoted, copy=False)
+            out = out.with_(
+                alias, as_=results[cte].this, dialect=self.dialect, copy=False
+            )
 
         return out
 
@@ -1098,18 +1100,20 @@ class SQLGlotCompiler(abc.ABC):
         result = parent
 
         if selections:
-            result = sg.select(*self._cleanup_names(selections)).from_(result)
+            result = sg.select(*self._cleanup_names(selections)).from_(
+                result, copy=False
+            )
 
         if predicates:
-            result = result.where(*predicates)
+            result = result.where(*predicates, copy=False)
 
         if sort_keys:
-            result = result.order_by(*sort_keys)
+            result = result.order_by(*sort_keys, copy=False)
 
         return result
 
     def visit_DummyTable(self, op, *, values):
-        return sg.select(*self._cleanup_names(values))
+        return sg.select(*self._cleanup_names(values), copy=False)
 
     def visit_UnboundTable(
         self, op, *, name: str, schema: sch.Schema, namespace: ops.Namespace
@@ -1140,12 +1144,12 @@ class SQLGlotCompiler(abc.ABC):
         return parent
 
     def visit_JoinChain(self, op, *, first, rest, values):
-        result = sg.select(*self._cleanup_names(values)).from_(first)
+        result = sg.select(*self._cleanup_names(values)).from_(first, copy=False)
 
         for link in rest:
             if isinstance(link, sge.Alias):
                 link = link.this
-            result = result.join(link)
+            result = result.join(link, copy=False)
         return result
 
     def visit_JoinLink(self, op, *, how, table, predicates):
@@ -1187,10 +1191,10 @@ class SQLGlotCompiler(abc.ABC):
     def visit_Aggregate(self, op, *, parent, groups, metrics):
         sel = sg.select(
             *self._cleanup_names(groups), *self._cleanup_names(metrics)
-        ).from_(parent)
+        ).from_(parent, copy=False)
 
         if groups:
-            sel = sel.group_by(*self._generate_groups(groups.values()))
+            sel = sel.group_by(*self._generate_groups(groups.values()), copy=False)
 
         return sel
 
@@ -1208,51 +1212,56 @@ class SQLGlotCompiler(abc.ABC):
         try:
             return parent.where(*predicates)
         except AttributeError:
-            return sg.select(STAR).from_(parent).where(*predicates)
+            return (
+                sg.select(STAR).from_(parent, copy=False).where(*predicates, copy=False)
+            )
 
     def visit_Sort(self, op, *, parent, keys):
         try:
             return parent.order_by(*keys)
         except AttributeError:
-            return sg.select(STAR).from_(parent).order_by(*keys)
+            return sg.select(STAR).from_(parent, copy=False).order_by(*keys, copy=False)
 
     def visit_Union(self, op, *, left, right, distinct):
         if isinstance(left, (sge.Table, sge.Subquery)):
-            left = sg.select(STAR).from_(left)
+            left = sg.select(STAR).from_(left, copy=False)
 
         if isinstance(right, (sge.Table, sge.Subquery)):
-            right = sg.select(STAR).from_(right)
+            right = sg.select(STAR).from_(right, copy=False)
 
         return sg.union(
             left.args.get("this", left),
             right.args.get("this", right),
             distinct=distinct,
+            copy=False,
         )
 
     def visit_Intersection(self, op, *, left, right, distinct):
         if isinstance(left, (sge.Table, sge.Subquery)):
-            left = sg.select(STAR).from_(left)
+            left = sg.select(STAR).from_(left, copy=False)
 
         if isinstance(right, (sge.Table, sge.Subquery)):
-            right = sg.select(STAR).from_(right)
+            right = sg.select(STAR).from_(right, copy=False)
 
         return sg.intersect(
             left.args.get("this", left),
             right.args.get("this", right),
             distinct=distinct,
+            copy=False,
         )
 
     def visit_Difference(self, op, *, left, right, distinct):
         if isinstance(left, (sge.Table, sge.Subquery)):
-            left = sg.select(STAR).from_(left)
+            left = sg.select(STAR).from_(left, copy=False)
 
         if isinstance(right, (sge.Table, sge.Subquery)):
-            right = sg.select(STAR).from_(right)
+            right = sg.select(STAR).from_(right, copy=False)
 
         return sg.except_(
             left.args.get("this", left),
             right.args.get("this", right),
             distinct=distinct,
+            copy=False,
         )
 
     def visit_Limit(self, op, *, parent, n, offset):
@@ -1261,37 +1270,39 @@ class SQLGlotCompiler(abc.ABC):
             result = parent.this
             alias = parent.alias
         else:
-            result = sg.select(STAR).from_(parent)
+            result = sg.select(STAR).from_(parent, copy=False)
             alias = None
 
         if isinstance(n, int):
-            result = result.limit(n)
+            result = result.limit(n, copy=False)
         elif n is not None:
-            result = result.limit(sg.select(n).from_(parent).subquery())
+            result = result.limit(
+                sg.select(n).from_(parent, copy=False).subquery(copy=False), copy=False
+            )
         else:
             assert n is None, n
             if self.no_limit_value is not None:
-                result = result.limit(self.no_limit_value)
+                result = result.limit(self.no_limit_value, copy=False)
 
         assert offset is not None, "offset is None"
 
         if not isinstance(offset, int):
             skip = offset
-            skip = sg.select(skip).from_(parent).subquery()
+            skip = sg.select(skip).from_(parent, copy=False).subquery(copy=False)
         elif not offset:
             if alias is not None:
-                return result.subquery(alias)
+                return result.subquery(alias, copy=False)
             return result
         else:
             skip = offset
 
         result = result.offset(skip)
         if alias is not None:
-            return result.subquery(alias)
+            return result.subquery(alias, copy=False)
         return result
 
     def visit_Distinct(self, op, *, parent):
-        return sg.select(STAR).distinct().from_(parent)
+        return sg.select(STAR).distinct().from_(parent, copy=False)
 
     def visit_DropNa(self, op, *, parent, how, subset):
         if subset is None:
@@ -1345,7 +1356,7 @@ class SQLGlotCompiler(abc.ABC):
             child = sg.select(STAR).from_(child)
 
         try:
-            return child.subquery(name)
+            return child.subquery(name, copy=False)
         except AttributeError:
             return child.as_(name)
 
@@ -1353,7 +1364,7 @@ class SQLGlotCompiler(abc.ABC):
         return sg.parse_one(query, read=self.dialect)
 
     def visit_SQLQueryResult(self, op, *, query, schema, source):
-        return sg.parse_one(query, dialect=self.dialect).subquery()
+        return sg.parse_one(query, dialect=self.dialect).subquery(copy=False)
 
     def visit_JoinTable(self, op, *, parent, index):
         return parent
