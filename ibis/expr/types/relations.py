@@ -4172,7 +4172,7 @@ class Table(Expr, _FixedTextJupyterMixin):
                     # `values` column
                     values_col.get_name() * more_than_one_value,
                     # values computed from `names`/`names_from`
-                    *keys,
+                    *[str(key) for key in keys],
                 )
                 key = names_sep.join(filter(None, key_components))
                 aggs[key] = arg if values_fill is None else arg.coalesce(values_fill)
