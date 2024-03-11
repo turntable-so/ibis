@@ -1,6 +1,9 @@
 name: Publish to turntable-spoonbill on PYPI
 
-on: push
+on:
+  release:
+    types:
+      - published
 
 jobs:
   build:
