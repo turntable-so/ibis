@@ -1047,7 +1047,7 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         return self.table(table_name)
 
     def attach(
-        self, path: str | Path, name: str | None = None, read_only: bool = False
+        self, path: str | Path, name: str | None = None, read_only: bool = False, sqlite: bool = False,  all_varchar: bool = False
     ) -> None:
         """Attach another DuckDB database to the current DuckDB session.
 
@@ -1067,10 +1067,20 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
             name = sg.to_identifier(name).sql(self.name)
             code += f" AS {name}"
 
-        if read_only:
-            code += " (READ_ONLY)"
-
-        self.con.execute(code).fetchall()
+        if sqlite:
+            if read_only:
+                code += " (TYPE sqlite, READ_ONLY)"
+            else:
+                code += " (TYPE sqlite)"
+            self.load_extension("sqlite")
+            with self._safe_raw_sql(f"SET GLOBAL sqlite_all_varchar={all_varchar}") as cur:
+                cur.execute(
+                    code
+                ).fetchall()
+        else:
+            if read_only:
+                code += " (READ_ONLY)"
+            self.con.execute(code).fetchall()
 
     def detach(self, name: str) -> None:
         """Detach a database from the current DuckDB session.
