@@ -84,8 +84,7 @@ class Field(Value):
         if name not in rel.schema:
             columns_formatted = ", ".join(map(repr, rel.schema.names))
             raise IbisTypeError(
-                f"Column {name!r} is not found in table. "
-                f"Existing columns: {columns_formatted}."
+                f"Column {name!r} is not found in table. \nExisting columns: {columns_formatted}."
             )
         super().__init__(rel=rel, name=name)
 
