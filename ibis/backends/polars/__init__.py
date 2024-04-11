@@ -20,6 +20,7 @@ from ibis.backends.pandas.rewrites import (
 )
 from ibis.backends.polars.compiler import translate
 from ibis.backends.sql.dialects import Polars
+from ibis.expr.rewrites import rewrite_stringslice
 from ibis.formats.polars import PolarsSchema
 from ibis.util import gen_name, normalize_filename
 
@@ -370,7 +371,7 @@ class Backend(BaseBackend, NoUrl):
         self._add_table(name, obj)
         return self.table(name)
 
-    def get_schema(self, table_name, database=None):
+    def get_schema(self, table_name):
         return self._tables[table_name].schema
 
     @classmethod
@@ -400,14 +401,24 @@ class Backend(BaseBackend, NoUrl):
 
         node = expr.as_table().op()
         node = node.replace(
-            rewrite_join | replace_parameter | bind_unbound_table,
+            rewrite_join | replace_parameter | bind_unbound_table | rewrite_stringslice,
             context={"params": params, "backend": self},
         )
 
         return translate(node, ctx=self._context)
 
     def _get_sql_string_view_schema(self, name, table, query) -> sch.Schema:
-        raise NotImplementedError("table.sql() not yet supported in polars")
+        import sqlglot as sg
+
+        cte = sg.parse_one(str(ibis.to_sql(table, dialect="postgres")), read="postgres")
+        parsed = sg.parse_one(query, read=self.dialect)
+        parsed.args["with"] = cte.args.pop("with", [])
+        parsed = parsed.with_(
+            sg.to_identifier(name, quoted=True), as_=cte, dialect=self.dialect
+        )
+
+        sql = parsed.sql(self.dialect)
+        return self._get_schema_using_query(sql)
 
     def _get_schema_using_query(self, query: str) -> sch.Schema:
         return PolarsSchema.to_ibis(self._context.execute(query).schema)

@@ -174,7 +174,6 @@ website:
 
         - section: Configuration
           contents:
-            - reference/ContextAdjustment.qmd
             - reference/Interactive.qmd
             - reference/Options.qmd
             - reference/Repr.qmd
@@ -428,9 +427,28 @@ quartodoc:
                 - strftime
                 - time
                 - truncate
-            - IntervalValue
+            - name: IntervalValue
+              dynamic: true
+              members:
+                - to_unit
+                - negate
+                - years
+                - quarters
+                - months
+                - weeks
+                - days
+                - hours
+                - minutes
+                - seconds
+                - milliseconds
+                - microseconds
+                - nanoseconds
             - DayOfWeek
             - name: now
+              package: ibis
+              dynamic: true
+              signature_name: full
+            - name: today
               package: ibis
               dynamic: true
               signature_name: full
@@ -604,7 +622,6 @@ quartodoc:
       desc: "Ibis configuration"
       package: ibis.config
       contents:
-        - ContextAdjustment
         - Interactive
         - Options
         - Repr

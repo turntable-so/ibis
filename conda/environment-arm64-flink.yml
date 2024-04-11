@@ -27,7 +27,7 @@ dependencies:
   - pins >=0.8.2
   - poetry-core >=1.0.0
   - poetry-dynamic-versioning >=0.18.0
-  - polars >=0.19
+  - polars >=0.20.17
   - psycopg2 >=2.8.4
   - pyarrow =11.0.0
   - pyarrow-tests
@@ -45,7 +45,7 @@ dependencies:
   - rich >=12.4.4
   - shapely>=2,<3
   - snowflake-connector-python >=3.0.2
-  - sqlglot >=18.7.0,<=20.11
+  - sqlglot >=22.5,<23.1
   - toolz >=0.11
   - trino-python-client >=0.321
   # geospatial
@@ -91,8 +91,8 @@ dependencies:
   - taplo
   - tqdm >=4.66.1
   - just
-  # needed for apache-flink=1.18.0
+  # needed for apache-flink >=1.18.0
   - py4j =0.10.9.7
   - pip
   - pip:
-      - apache-flink>=1.18.1
+      - apache-flink >=1.19.0

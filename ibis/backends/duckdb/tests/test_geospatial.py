@@ -32,17 +32,16 @@ def test_geospatial_point(zones, zones_gdf):
         param("n_points", {}, id="n_points"),
     ],
 )
-def test_geospatial_unary_snapshot(operation, keywords, snapshot):
+def test_geospatial_unary_snapshot(operation, keywords, assert_sql):
     t = ibis.table([("geom", "geometry")], name="t")
     expr = getattr(t.geom, operation)(**keywords).name("tmp")
-    snapshot.assert_match(ibis.to_sql(expr), "out.sql")
+    assert_sql(expr)
 
 
-def test_geospatial_dwithin(snapshot):
+def test_geospatial_dwithin(assert_sql):
     t = ibis.table([("geom", "geometry")], name="t")
     expr = t.geom.d_within(t.geom, 3.0).name("tmp")
-
-    snapshot.assert_match(ibis.to_sql(expr), "out.sql")
+    assert_sql(expr)
 
 
 # geospatial unary functions that return a non-geometry series
@@ -252,9 +251,8 @@ point_geom = ibis.literal((1, 0), type="point:geometry").name("p")
 
 
 @pytest.mark.parametrize("expr", [point, point_geom])
-def test_literal_geospatial_explicit(con, expr, snapshot):
-    result = str(con.compile(expr))
-    snapshot.assert_match(result, "out.sql")
+def test_literal_geospatial_explicit(con, expr, assert_sql):
+    assert_sql(expr)
 
 
 # test input data with shapely geometries
@@ -291,12 +289,13 @@ shp_multipolygon_0 = shapely.MultiPolygon([shp_polygon_0])
         ),
     ],
 )
-def test_literal_geospatial_inferred(con, shp, expected, snapshot):
-    result = str(con.compile(ibis.literal(shp).name("result")))
+def test_literal_geospatial_inferred(con, shp, expected, assert_sql):
+    expr = ibis.literal(shp).name("result")
+    result = con.compile(expr)
     name = type(shp).__name__.upper()
     pair = f"{name} {expected}"
     assert pair in result
-    snapshot.assert_match(result, "out.sql")
+    assert_sql(expr)
 
 
 @pytest.mark.skipif(
@@ -304,33 +303,40 @@ def test_literal_geospatial_inferred(con, shp, expected, snapshot):
     reason="nix on linux cannot download duckdb extensions or data due to sandboxing",
 )
 def test_load_geo_example(con):
+    pytest.importorskip("pins")
+
     t = ibis.examples.zones.fetch(backend=con)
     assert t.geom.type().is_geospatial()
 
 
 # For the next two tests we really want to ensure that
-# load_extenstion("spatial") hasn't been run yet. So we create a new connection
-# instead of using the  con fixture.
-
-# geospatial literal object,
-geo_line_lit = ibis.literal(
-    shapely.LineString([[0, 0], [1, 0], [1, 1]]), type="geometry"
-)
+# load_extenstion("spatial") hasn't been run yet, so we create a new connection
+# instead of using the con fixture.
 
 
-@pytest.mark.parametrize("geo_line_lit", [geo_line_lit])
-def test_geo_unop_geo_literals(geo_line_lit):
-    # GeoSpatialUnOp operation on a geospatial literal
-    con = ibis.duckdb.connect()
+@pytest.fixture(scope="session")
+def geo_line_lit():
+    return ibis.literal(shapely.LineString([[0, 0], [1, 0], [1, 1]]), type="geometry")
+
+
+@pytest.fixture(scope="session")
+def ext_dir(tmp_path_factory):
+    # this directory is necessary because of Windows extension downloads race
+    # condition
+    return tmp_path_factory.mktemp("extensions")
+
+
+def test_geo_unop_geo_literals(ext_dir, geo_line_lit):
+    """GeoSpatialUnOp operation on a geospatial literal"""
+    con = ibis.duckdb.connect(extension_directory=ext_dir)
     expr = geo_line_lit.length()
 
     assert con.execute(expr) == 2
 
 
-@pytest.mark.parametrize("geo_line_lit", [geo_line_lit])
-def test_geo_binop_geo_literals(geo_line_lit):
-    # GeoSpatialBinOp operation on a geospatial literal
-    con = ibis.duckdb.connect()
+def test_geo_binop_geo_literals(ext_dir, geo_line_lit):
+    """GeoSpatialBinOp operation on a geospatial literal"""
+    con = ibis.duckdb.connect(extension_directory=ext_dir)
     expr = geo_line_lit.distance(shapely.Point(0, 0))
 
     assert con.execute(expr) == 0

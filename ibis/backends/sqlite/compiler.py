@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+
 import sqlglot as sg
 import sqlglot.expressions as sge
 from public import public
@@ -12,6 +14,7 @@ from ibis.backends.sql.datatypes import SQLiteType
 from ibis.backends.sql.dialects import SQLite
 from ibis.backends.sql.rewrites import rewrite_sample_as_filter
 from ibis.common.temporal import DateUnit, IntervalUnit
+from ibis.expr.rewrites import rewrite_stringslice
 
 
 @public
@@ -20,7 +23,11 @@ class SQLiteCompiler(SQLGlotCompiler):
 
     dialect = SQLite
     type_mapper = SQLiteType
-    rewrites = (rewrite_sample_as_filter, *SQLGlotCompiler.rewrites)
+    rewrites = (
+        rewrite_sample_as_filter,
+        rewrite_stringslice,
+        *SQLGlotCompiler.rewrites,
+    )
 
     NAN = NULL
     POS_INF = sge.Literal.number("1e999")
@@ -68,6 +75,7 @@ class SQLiteCompiler(SQLGlotCompiler):
     )
 
     SIMPLE_OPS = {
+        ops.Arbitrary: "_ibis_first",
         ops.RegexReplace: "_ibis_regex_replace",
         ops.RegexExtract: "_ibis_regex_extract",
         ops.RegexSearch: "_ibis_regex_search",
@@ -86,14 +94,12 @@ class SQLiteCompiler(SQLGlotCompiler):
         ops.ExtractUserInfo: "_ibis_extract_user_info",
         ops.BitwiseXor: "_ibis_xor",
         ops.BitwiseNot: "_ibis_inv",
-        ops.Modulus: "mod",
-        ops.Log10: "log10",
         ops.TypeOf: "typeof",
         ops.BitOr: "_ibis_bit_or",
         ops.BitAnd: "_ibis_bit_and",
         ops.BitXor: "_ibis_bit_xor",
-        ops.First: "_ibis_arbitrary_first",
-        ops.Last: "_ibis_arbitrary_last",
+        ops.First: "_ibis_first",
+        ops.Last: "_ibis_last",
         ops.Mode: "_ibis_mode",
         ops.Time: "time",
         ops.Date: "date",
@@ -105,6 +111,18 @@ class SQLiteCompiler(SQLGlotCompiler):
         if where is not None:
             return sge.Filter(this=expr, expression=sge.Where(this=where))
         return expr
+
+    def visit_Log10(self, op, *, arg):
+        return self.f.anon.log10(arg)
+
+    def visit_Log2(self, op, *, arg):
+        return self.f.anon.log2(arg)
+
+    def visit_Log(self, op, *, arg, base):
+        func = self.f.anon.log
+        if base is None:
+            base = math.e
+        return func(base, arg)
 
     def visit_Cast(self, op, *, arg, to) -> sge.Cast:
         if to.is_timestamp():
@@ -201,14 +219,6 @@ class SQLiteCompiler(SQLGlotCompiler):
     def visit_Cot(self, op, *, arg):
         return 1 / self.f.tan(arg)
 
-    def visit_Arbitrary(self, op, *, arg, how, where):
-        if op.how == "heavy":
-            raise com.OperationNotDefinedError(
-                "how='heavy' not implemented for the SQLite backend"
-            )
-
-        return self._aggregate(f"_ibis_arbitrary_{how}", arg, where=where)
-
     def visit_ArgMin(self, *args, **kwargs):
         return self._visit_arg_reduction("min", *args, **kwargs)
 
@@ -260,6 +270,9 @@ class SQLiteCompiler(SQLGlotCompiler):
                 seconds,
             )
         )
+
+    def visit_Modulus(self, op, *, left, right):
+        return self.f.anon.mod(left, right)
 
     def _temporal_truncate(self, func, arg, unit):
         modifiers = {

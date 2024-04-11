@@ -292,15 +292,15 @@ def test_mutate(table):
             table.b.sum().name("x2"),
             (_.a + 2).name("x3"),
             lambda _: (_.a + 3).name("x4"),
-            4,
-            "five",
+            ibis.literal(4),
+            ibis.literal("five"),
         ],
         kw1=(table.a + 6),
         kw2=table.b.sum(),
         kw3=(_.a + 7),
         kw4=lambda _: (_.a + 8),
-        kw5=9,
-        kw6="ten",
+        kw5=ibis.literal(9),
+        kw6=ibis.literal("ten"),
     )
     expected = table[
         table,
@@ -984,7 +984,7 @@ def test_asof_join_with_by():
         )
         assert join_without_by.op() == expected
 
-    join_with_by = api.asof_join(left, right, "time", by="key")
+    join_with_predicates = api.asof_join(left, right, "time", predicates="key")
     with join_tables(left, right) as (r1, r2):
         expected = ops.JoinChain(
             first=r1,
@@ -1000,7 +1000,7 @@ def test_asof_join_with_by():
                 "value2": r2.value2,
             },
         )
-        assert join_with_by.op() == expected
+        assert join_with_predicates.op() == expected
 
 
 @pytest.mark.parametrize(
@@ -2065,7 +2065,7 @@ def test_invalid_distinct_empty_key():
 
 def test_unbind_with_namespace():
     schema = ibis.schema({"a": "int"})
-    ns = ops.Namespace(database="db", schema="sch")
+    ns = ops.Namespace(catalog="catalog", database="database")
 
     t_op = ops.DatabaseTable(name="t", schema=schema, source=None, namespace=ns)
     t = t_op.to_expr()

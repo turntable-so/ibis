@@ -12,12 +12,13 @@ import ibis
 import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
-from ibis.backends.sql.compiler import FALSE, NULL, STAR, TRUE, SQLGlotCompiler
+from ibis.backends.sql.compiler import FALSE, NULL, STAR, SQLGlotCompiler
 from ibis.backends.sql.datatypes import PySparkType
 from ibis.backends.sql.dialects import PySpark
 from ibis.backends.sql.rewrites import FirstValue, LastValue, p
 from ibis.common.patterns import replace
 from ibis.config import options
+from ibis.expr.rewrites import rewrite_stringslice
 from ibis.util import gen_name
 
 
@@ -50,7 +51,7 @@ class PySparkCompiler(SQLGlotCompiler):
 
     dialect = PySpark
     type_mapper = PySparkType
-    rewrites = (offset_to_filter, *SQLGlotCompiler.rewrites)
+    rewrites = (offset_to_filter, *SQLGlotCompiler.rewrites, rewrite_stringslice)
 
     UNSUPPORTED_OPERATIONS = frozenset(
         (
@@ -223,33 +224,26 @@ class PySparkCompiler(SQLGlotCompiler):
         return self.f.count(sge.Distinct(expressions=cols))
 
     def visit_FirstValue(self, op, *, arg):
-        return self.f.first(arg, TRUE)
+        return sge.IgnoreNulls(this=self.f.first(arg))
 
     def visit_LastValue(self, op, *, arg):
-        return self.f.last(arg, TRUE)
+        return sge.IgnoreNulls(this=self.f.last(arg))
 
     def visit_First(self, op, *, arg, where):
         if where is not None:
             arg = self.if_(where, arg, NULL)
-        return self.f.first(arg, TRUE)
+        return sge.IgnoreNulls(this=self.f.first(arg))
 
     def visit_Last(self, op, *, arg, where):
         if where is not None:
             arg = self.if_(where, arg, NULL)
-        return self.f.last(arg, TRUE)
+        return sge.IgnoreNulls(this=self.f.last(arg))
 
-    def visit_Arbitrary(self, op, *, arg, how, where):
+    def visit_Arbitrary(self, op, *, arg, where):
+        # For Spark>=3.4 we could use any_value here
         if where is not None:
             arg = self.if_(where, arg, NULL)
-        if how == "first":
-            return self.f.first(arg, TRUE)
-        elif how == "last":
-            return self.f.last(arg, TRUE)
-        else:
-            raise com.UnsupportedOperationError(
-                f"PySpark backend does not support arbitrary with how={how}. "
-                "Supported values are `first` and `last`."
-            )
+        return sge.IgnoreNulls(this=self.f.first(arg))
 
     def visit_Median(self, op, *, arg, where):
         return self.agg.percentile(arg, 0.5, where=where)
@@ -411,7 +405,7 @@ class PySparkCompiler(SQLGlotCompiler):
         path = self.f.format_string(fmt, index)
         return self.f.get_json_object(arg, path)
 
-    def visit_Window(self, op, *, func, group_by, order_by, **kwargs):
+    def visit_WindowFunction(self, op, *, func, group_by, order_by, **kwargs):
         if isinstance(op.func, ops.Analytic) and not isinstance(
             op.func, (FirstValue, LastValue)
         ):
@@ -423,7 +417,7 @@ class PySparkCompiler(SQLGlotCompiler):
                 order = sge.Order(expressions=[NULL])
             return sge.Window(this=func, partition_by=group_by, order=order)
         else:
-            return super().visit_Window(
+            return super().visit_WindowFunction(
                 op, func=func, group_by=group_by, order_by=order_by, **kwargs
             )
 

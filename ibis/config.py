@@ -42,20 +42,6 @@ class Config(Annotable):
         return self._with_temporary(options)
 
 
-class ContextAdjustment(Config):
-    """Options related to time context adjustment.
-
-    Attributes
-    ----------
-    time_col : str
-        Name of the timestamp column for execution with a `timecontext`. See
-        `ibis/expr/timecontext.py` for details.
-
-    """
-
-    time_col: str = "time"
-
-
 class SQL(Config):
     """SQL-related options.
 
@@ -119,9 +105,11 @@ class Repr(Config):
         SQLQueryResult operations.
     show_types : bool
         Show the inferred type of value expressions in the repr.
+    show_variables : bool
+        Show the variables in the repr instead of generated names. This is
+        an advanced option and may not work in all scenarios.
     interactive : bool
         Options controlling the interactive repr.
-
     """
 
     depth: Optional[PosInt] = None
@@ -129,6 +117,7 @@ class Repr(Config):
     table_rows: PosInt = 10
     query_text_length: PosInt = 80
     show_types: bool = False
+    show_variables: bool = False
     interactive: Interactive = Interactive()
 
 
@@ -150,8 +139,6 @@ class Options(Config):
     default_backend : Optional[ibis.backends.BaseBackend]
         The default backend to use for execution, defaults to DuckDB if not
         set.
-    context_adjustment : ContextAdjustment
-        Options related to time context adjustment.
     sql: SQL
         SQL-related options.
     clickhouse : Config | None
@@ -173,7 +160,6 @@ class Options(Config):
     verbose_log: Optional[Callable] = None
     graphviz_repr: bool = False
     default_backend: Optional[Any] = None
-    context_adjustment: ContextAdjustment = ContextAdjustment()
     sql: SQL = SQL()
     clickhouse: Optional[Config] = None
     dask: Optional[Config] = None

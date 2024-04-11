@@ -30,8 +30,6 @@ if TYPE_CHECKING:
     from ibis.backends import BaseBackend
     from ibis.expr.visualize import EdgeAttributeGetter, NodeAttributeGetter
 
-    TimeContext = tuple[pd.Timestamp, pd.Timestamp]
-
 
 class _FixedTextJupyterMixin(JupyterMixin):
     """JupyterMixin adds a spurious newline to text, this fixes the issue."""
@@ -54,7 +52,7 @@ class Expr(Immutable, Coercible):
         if not opts.interactive:
             from rich.text import Text
 
-            return console.render(Text(self._repr()), options=options)
+            return console.render(Text(repr(self)), options=options)
         return self.__interactive_rich_console__(console, options)
 
     def __interactive_rich_console__(self, console, options):
@@ -76,34 +74,36 @@ class Expr(Immutable, Coercible):
             raise CoercionError("Unable to coerce value to an expression")
 
     def __repr__(self) -> str:
-        if not opts.interactive:
-            return self._repr()
+        from ibis.expr.format import get_defining_scope, pretty
 
-        from ibis.expr.types.pretty import simple_console
+        if opts.repr.show_variables:
+            scope = get_defining_scope(self)
+        else:
+            scope = None
 
-        with simple_console.capture() as capture:
-            try:
-                simple_console.print(self)
-            except TranslationError as e:
-                lines = [
-                    "Translation to backend failed",
-                    f"Error message: {e!r}",
-                    "Expression repr follows:",
-                    self._repr(),
-                ]
-                return "\n".join(lines)
-        return capture.get().rstrip()
+        if opts.interactive:
+            from ibis.expr.types.pretty import simple_console
+
+            with simple_console.capture() as capture:
+                try:
+                    simple_console.print(self)
+                except TranslationError as e:
+                    lines = [
+                        "Translation to backend failed",
+                        f"Error message: {e!r}",
+                        "Expression repr follows:",
+                        pretty(self, scope=scope),
+                    ]
+                    return "\n".join(lines)
+            return capture.get().rstrip()
+        else:
+            return pretty(self, scope=scope)
 
     def __reduce__(self):
         return (self.__class__, (self._arg,))
 
     def __hash__(self):
         return hash((self.__class__, self._arg))
-
-    def _repr(self) -> str:
-        from ibis.expr.format import pretty
-
-        return pretty(self)
 
     def equals(self, other):
         """Return whether this expression is _structurally_ equivalent to `other`.
@@ -322,9 +322,9 @@ class Expr(Immutable, Coercible):
             if has_unbound:
                 raise IbisError(
                     "Expression contains unbound tables and therefore cannot "
-                    "be executed. Use ibis.<backend>.execute(expr) or "
-                    "assign a backend instance to "
-                    "`ibis.options.default_backend`."
+                    "be executed. Use `<backend>.execute(expr)` to execute "
+                    "against an explicit backend, or rebuild the expression "
+                    "using bound tables instead."
                 )
             default = _default_backend() if use_default else None
             if default is None:
@@ -341,7 +341,6 @@ class Expr(Immutable, Coercible):
     def execute(
         self,
         limit: int | str | None = "default",
-        timecontext: TimeContext | None = None,
         params: Mapping[ir.Value, Any] | None = None,
         **kwargs: Any,
     ):
@@ -352,28 +351,20 @@ class Expr(Immutable, Coercible):
         limit
             An integer to effect a specific row limit. A value of `None` means
             "no limit". The default is in `ibis/config.py`.
-        timecontext
-            Defines a time range of `(begin, end)`. When defined, the execution
-            will only compute result for data inside the time range. The time
-            range is inclusive of both endpoints. This is conceptually same as
-            a time filter.
-            The time column must be named `'time'` and should preserve
-            across the expression. For example, if that column is dropped then
-            execute will result in an error.
         params
             Mapping of scalar parameter expressions to value
         kwargs
             Keyword arguments
         """
         return self._find_backend(use_default=True).execute(
-            self, limit=limit, timecontext=timecontext, params=params, **kwargs
+            self, limit=limit, params=params, **kwargs
         )
 
     def compile(
         self,
         limit: int | None = None,
-        timecontext: TimeContext | None = None,
         params: Mapping[ir.Value, Any] | None = None,
+        pretty: bool = False,
     ):
         """Compile to an execution target.
 
@@ -382,19 +373,13 @@ class Expr(Immutable, Coercible):
         limit
             An integer to effect a specific row limit. A value of `None` means
             "no limit". The default is in `ibis/config.py`.
-        timecontext
-            Defines a time range of `(begin, end)`. When defined, the execution
-            will only compute result for data inside the time range. The time
-            range is inclusive of both endpoints. This is conceptually same as
-            a time filter.
-            The time column must be named `'time'` and should preserve
-            across the expression. For example, if that column is dropped then
-            execute will result in an error.
         params
             Mapping of scalar parameter expressions to value
+        pretty
+            In case of SQL backends, return a pretty formatted SQL query.
         """
         return self._find_backend().compile(
-            self, limit=limit, timecontext=timecontext, params=params
+            self, limit=limit, params=params, pretty=pretty
         )
 
     @experimental
@@ -631,9 +616,7 @@ class Expr(Immutable, Coercible):
         params
             Mapping of scalar parameter expressions to value.
         **kwargs
-            Additional keyword arguments passed to pyarrow.csv.CSVWriter
-
-        https://arrow.apache.org/docs/python/generated/pyarrow.csv.CSVWriter.html
+            Additional keyword arguments passed to deltalake.writer.write_deltalake method
         """
         self._find_backend(use_default=True).to_delta(self, path, **kwargs)
 

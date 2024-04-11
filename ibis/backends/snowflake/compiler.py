@@ -21,6 +21,7 @@ from ibis.backends.sql.rewrites import (
     replace_log10,
     rewrite_empty_order_by_window,
 )
+from ibis.expr.rewrites import rewrite_stringslice
 
 
 class SnowflakeFuncGen(FuncGen):
@@ -38,6 +39,7 @@ class SnowflakeCompiler(SQLGlotCompiler):
         exclude_unsupported_window_frame_from_row_number,
         exclude_unsupported_window_frame_from_ops,
         rewrite_empty_order_by_window,
+        rewrite_stringslice,
         replace_log2,
         replace_log10,
         *SQLGlotCompiler.rewrites,
@@ -56,8 +58,8 @@ class SnowflakeCompiler(SQLGlotCompiler):
     )
 
     SIMPLE_OPS = {
-        ops.Any: "max",
         ops.All: "min",
+        ops.Any: "max",
         ops.ArrayDistinct: "array_distinct",
         ops.ArrayFlatten: "array_flatten",
         ops.ArrayIndex: "get",
@@ -164,6 +166,9 @@ class SnowflakeCompiler(SQLGlotCompiler):
             return sge.HexString(this=value.hex())
         return super().visit_Literal(op, value=value, dtype=dtype)
 
+    def visit_Arbitrary(self, op, *, arg, where):
+        return self.f.get(self.agg.array_agg(arg, where=where), 0)
+
     def visit_Cast(self, op, *, arg, to):
         if to.is_struct() or to.is_map():
             return self.if_(self.f.is_object(arg), arg, NULL)
@@ -198,7 +203,7 @@ class SnowflakeCompiler(SQLGlotCompiler):
     def visit_Map(self, op, *, keys, values):
         return self.if_(
             sg.and_(self.f.is_array(keys), self.f.is_array(values)),
-            self.f.udf.object_from_arrays(keys, values),
+            self.f.arrays_to_object(keys, values),
             NULL,
         )
 
@@ -324,7 +329,11 @@ class SnowflakeCompiler(SQLGlotCompiler):
         )
 
     def visit_ArrayZip(self, op, *, arg):
-        return self.f.udf.array_zip(self.f.array(*arg))
+        return self.if_(
+            sg.not_(sg.or_(*(arr.is_(NULL) for arr in arg))),
+            self.f.udf.array_zip(self.f.array(*arg)),
+            NULL,
+        )
 
     def visit_DayOfWeekName(self, op, *, arg):
         return sge.Case(
@@ -375,15 +384,6 @@ class SnowflakeCompiler(SQLGlotCompiler):
             )
 
         return self.f.time_slice(arg, interval.value, interval.dtype.unit.name)
-
-    def visit_Arbitrary(self, op, *, arg, how, where):
-        if how == "first":
-            return self.f.get(self.agg.array_agg(arg, where=where), 0)
-        elif how == "last":
-            expr = self.agg.array_agg(arg, where=where)
-            return self.f.get(expr, self.f.array_size(expr) - 1)
-        else:
-            raise com.UnsupportedOperationError("how must be 'first' or 'last'")
 
     def visit_ArraySlice(self, op, *, arg, start, stop):
         if start is None:
@@ -480,7 +480,7 @@ class SnowflakeCompiler(SQLGlotCompiler):
         # boolxor accepts numerics ... and returns a boolean? wtf?
         return self.f.boolxor(self.cast(left, dt.int8), self.cast(right, dt.int8))
 
-    def visit_Window(self, op, *, how, func, start, end, group_by, order_by):
+    def visit_WindowFunction(self, op, *, how, func, start, end, group_by, order_by):
         if start is None:
             start = {}
         if end is None:

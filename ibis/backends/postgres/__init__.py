@@ -11,10 +11,8 @@ from operator import itemgetter
 from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import parse_qs, urlparse
 
-import psycopg2
 import sqlglot as sg
 import sqlglot.expressions as sge
-from psycopg2 import extras
 
 import ibis
 import ibis.common.exceptions as com
@@ -24,14 +22,13 @@ import ibis.expr.operations as ops
 import ibis.expr.schema as sch
 import ibis.expr.types as ir
 from ibis import util
+from ibis.backends import CanCreateDatabase, CanCreateSchema, CanListCatalog
 from ibis.backends.postgres.compiler import PostgresCompiler
 from ibis.backends.sql import SQLBackend
 from ibis.backends.sql.compiler import TRUE, C, ColGen, F
 from ibis.common.exceptions import InvalidDecoratorError
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-
     import pandas as pd
     import pyarrow as pa
 
@@ -42,7 +39,7 @@ def _verify_source_line(func_name: str, line: str):
     return line
 
 
-class Backend(SQLBackend):
+class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
     name = "postgres"
     compiler = PostgresCompiler()
     supports_python_udfs = True
@@ -63,7 +60,6 @@ class Backend(SQLBackend):
             A backend instance
 
         """
-
         url = urlparse(url)
         database, *schema = url.path[1:].split("/", 1)
         query_params = parse_qs(url.query)
@@ -73,6 +69,7 @@ class Backend(SQLBackend):
             "host": url.hostname,
             "database": database or "",
             "schema": schema[0] if schema else "",
+            "port": url.port,
         }
 
         for name, value in query_params.items():
@@ -101,9 +98,14 @@ class Backend(SQLBackend):
         if "password" in kwargs and kwargs["password"] is None:
             del kwargs["password"]
 
+        if "port" in kwargs and kwargs["port"] is None:
+            del kwargs["port"]
+
         return self.connect(**kwargs)
 
     def _register_in_memory_table(self, op: ops.InMemoryTable) -> None:
+        from psycopg2.extras import execute_batch
+
         schema = op.schema
         if null_columns := [col for col, dtype in schema.items() if dtype.is_null()]:
             raise exc.IbisTypeError(
@@ -150,9 +152,10 @@ class Backend(SQLBackend):
             specs = ", ".join(repeat("%s", len(columns)))
             table = sg.table(name, quoted=quoted)
             sql = f"INSERT INTO {table.sql(self.dialect)} ({cols}) VALUES ({specs})"
+
             with self.begin() as cur:
                 cur.execute(create_stmt_sql)
-                extras.execute_batch(cur, sql, data, 128)
+                execute_batch(cur, sql, data, 128)
 
     @contextlib.contextmanager
     def begin(self):
@@ -260,7 +263,11 @@ class Backend(SQLBackend):
             month : int32
 
         """
+        import psycopg2
+        import psycopg2.extras
+
         psycopg2.extras.register_default_json(loads=lambda x: x)
+
         self.con = psycopg2.connect(
             host=host,
             port=port,
@@ -275,7 +282,10 @@ class Backend(SQLBackend):
             cur.execute("SET TIMEZONE = UTC")
 
     def list_tables(
-        self, like: str | None = None, schema: str | None = None
+        self,
+        like: str | None = None,
+        schema: str | None = None,
+        database: tuple[str, str] | str | None = None,
     ) -> list[str]:
         """List the tables in the database.
 
@@ -284,24 +294,57 @@ class Backend(SQLBackend):
         like
             A pattern to use for listing tables.
         schema
-            The schema to perform the list against.
+            [deprecated] The schema to perform the list against.
+        database
+            Database to list tables from. Default behavior is to show tables in
+            the current database.
 
-            ::: {.callout-warning}
-            ## `schema` refers to database hierarchy
+            ::: {.callout-note}
+            ## Ibis does not use the word `schema` to refer to database hierarchy.
 
-            The `schema` parameter does **not** refer to the column names and
-            types of `table`.
+            A collection of tables is referred to as a `database`.
+            A collection of `database` is referred to as a `catalog`.
+
+            These terms are mapped onto the corresponding features in each
+            backend (where available), regardless of whether the backend itself
+            uses the same terminology.
             :::
 
         """
+        if schema is not None:
+            self._warn_schema()
+
+        if schema is not None and database is not None:
+            raise ValueError(
+                "Using both the `schema` and `database` kwargs is not supported. "
+                "`schema` is deprecated and will be removed in Ibis 10.0"
+                "\nUse the `database` kwarg with one of the following patterns:"
+                '\ndatabase="database"'
+                '\ndatabase=("catalog", "database")'
+                '\ndatabase="catalog.database"',
+            )
+        elif schema is not None:
+            table_loc = schema
+        elif database is not None:
+            table_loc = database
+        else:
+            table_loc = (self.current_catalog, self.current_database)
+
+        table_loc = self._to_sqlglot_table(table_loc)
+
         conditions = [TRUE]
 
-        if schema is not None:
-            conditions = C.table_schema.eq(sge.convert(schema))
+        if (db := table_loc.args["db"]) is not None:
+            db.args["quoted"] = False
+            db = db.sql(dialect=self.name)
+            conditions.append(C.table_schema.eq(db))
+        if (catalog := table_loc.args["catalog"]) is not None:
+            catalog.args["quoted"] = False
+            catalog = catalog.sql(dialect=self.name)
+            conditions.append(C.table_catalog.eq(catalog))
 
-        col = "table_name"
         sql = (
-            sg.select(col)
+            sg.select("table_name")
             .from_(sg.table("tables", db="information_schema"))
             .distinct()
             .where(*conditions)
@@ -311,14 +354,48 @@ class Backend(SQLBackend):
         with self._safe_raw_sql(sql) as cur:
             out = cur.fetchall()
 
+        # Include temporary tables only if no database has been explicitly specified
+        # to avoid temp tables showing up in all calls to `list_tables`
+        if db == "public":
+            out += self._fetch_temp_tables()
+
         return self._filter_with_like(map(itemgetter(0), out), like)
 
-    def list_databases(self, like=None) -> list[str]:
+    def _fetch_temp_tables(self):
+        # postgres temporary tables are stored in a separate schema
+        # so we need to independently grab them and return them along with
+        # the existing results
+
+        sql = (
+            sg.select("table_name")
+            .from_(sg.table("tables", db="information_schema"))
+            .distinct()
+            .where(C.table_type.eq("LOCAL TEMPORARY"))
+            .sql(self.dialect)
+        )
+
+        with self._safe_raw_sql(sql) as cur:
+            out = cur.fetchall()
+
+        return out
+
+    def list_catalogs(self, like=None) -> list[str]:
         # http://dba.stackexchange.com/a/1304/58517
-        dbs = (
+        cats = (
             sg.select(C.datname)
             .from_(sg.table("pg_database", db="pg_catalog"))
             .where(sg.not_(C.datistemplate))
+        )
+        with self._safe_raw_sql(cats) as cur:
+            catalogs = list(map(itemgetter(0), cur))
+
+        return self._filter_with_like(catalogs, like)
+
+    def list_databases(
+        self, *, like: str | None = None, catalog: str | None = None
+    ) -> list[str]:
+        dbs = sg.select(C.schema_name).from_(
+            sg.table("schemata", db="information_schema")
         )
         with self._safe_raw_sql(dbs) as cur:
             databases = list(map(itemgetter(0), cur))
@@ -326,13 +403,13 @@ class Backend(SQLBackend):
         return self._filter_with_like(databases, like)
 
     @property
-    def current_database(self) -> str:
+    def current_catalog(self) -> str:
         with self._safe_raw_sql(sg.select(F.current_database())) as cur:
             (db,) = cur.fetchone()
         return db
 
     @property
-    def current_schema(self) -> str:
+    def current_database(self) -> str:
         with self._safe_raw_sql(sg.select(F.current_schema())) as cur:
             (schema,) = cur.fetchone()
         return schema
@@ -461,7 +538,11 @@ $$""".format(**self._get_udf_source(udf_node))
                 pass
 
     def get_schema(
-        self, name: str, schema: str | None = None, database: str | None = None
+        self,
+        name: str,
+        *,
+        catalog: str | None = None,
+        database: str | None = None,
     ):
         a = ColGen(table="a")
         c = ColGen(table="c")
@@ -489,7 +570,7 @@ $$""".format(**self._get_udf_source(udf_node))
             .where(
                 a.attnum > 0,
                 sg.not_(a.attisdropped),
-                n.nspname.eq(schema) if schema is not None else TRUE,
+                n.nspname.eq(database) if database is not None else TRUE,
                 c.relname.eq(name),
             )
             .order_by(a.attnum)
@@ -510,7 +591,7 @@ $$""".format(**self._get_udf_source(udf_node))
             }
         )
 
-    def _metadata(self, query: str) -> Iterable[tuple[str, dt.DataType]]:
+    def _get_schema_using_query(self, query: str) -> sch.Schema:
         name = util.gen_name(f"{self.name}_metadata")
 
         create_stmt = sge.Create(
@@ -526,39 +607,39 @@ $$""".format(**self._get_udf_source(udf_node))
         with self._safe_raw_sql(create_stmt):
             pass
         try:
-            yield from self.get_schema(name).items()
+            return self.get_schema(name)
         finally:
             with self._safe_raw_sql(drop_stmt):
                 pass
 
-    def create_schema(
-        self, name: str, database: str | None = None, force: bool = False
+    def create_database(
+        self, name: str, catalog: str | None = None, force: bool = False
     ) -> None:
-        if database is not None and database != self.current_database:
+        if catalog is not None and catalog != self.current_catalog:
             raise exc.UnsupportedOperationError(
-                f"{self.name} does not support creating a schema in a different database"
+                f"{self.name} does not support creating a database in a different catalog"
             )
         sql = sge.Create(
-            kind="SCHEMA", this=sg.table(name, catalog=database), exists=force
+            kind="SCHEMA", this=sg.table(name, catalog=catalog), exists=force
         )
         with self._safe_raw_sql(sql):
             pass
 
-    def drop_schema(
+    def drop_database(
         self,
         name: str,
-        database: str | None = None,
+        catalog: str | None = None,
         force: bool = False,
         cascade: bool = False,
     ) -> None:
-        if database is not None and database != self.current_database:
+        if catalog is not None and catalog != self.current_catalog:
             raise exc.UnsupportedOperationError(
-                f"{self.name} does not support dropping a schema in a different database"
+                f"{self.name} does not support dropping a database in a different catalog"
             )
 
         sql = sge.Drop(
             kind="SCHEMA",
-            this=sg.table(name, catalog=database),
+            this=sg.table(name, catalog=catalog),
             exists=force,
             cascade=cascade,
         )
@@ -600,13 +681,6 @@ $$""".format(**self._get_udf_source(udf_node))
         if obj is None and schema is None:
             raise ValueError("Either `obj` or `schema` must be specified")
 
-        if database is not None and database != self.current_database:
-            raise com.UnsupportedOperationError(
-                f"Creating tables in other databases is not supported by {self.name}"
-            )
-        else:
-            database = None
-
         properties = []
 
         if temp:
@@ -642,7 +716,7 @@ $$""".format(**self._get_udf_source(udf_node))
         else:
             temp_name = name
 
-        table = sg.table(temp_name, catalog=database, quoted=self.compiler.quoted)
+        table = sg.table(temp_name, db=database, quoted=self.compiler.quoted)
         target = sge.Schema(this=table, expressions=column_defs)
 
         create_stmt = sge.Create(
@@ -666,7 +740,7 @@ $$""".format(**self._get_udf_source(udf_node))
                 )
 
         if schema is None:
-            return self.table(name, schema=database)
+            return self.table(name, database=database)
 
         # preserve the input schema if it was provided
         return ops.DatabaseTable(
@@ -677,20 +751,11 @@ $$""".format(**self._get_udf_source(udf_node))
         self,
         name: str,
         database: str | None = None,
-        schema: str | None = None,
         force: bool = False,
     ) -> None:
-        if database is not None and database != self.current_database:
-            raise com.UnsupportedOperationError(
-                f"Droppping tables in other databases is not supported by {self.name}"
-            )
-        else:
-            database = None
         drop_stmt = sg.exp.Drop(
             kind="TABLE",
-            this=sg.table(
-                name, db=schema, catalog=database, quoted=self.compiler.quoted
-            ),
+            this=sg.table(name, db=database, quoted=self.compiler.quoted),
             exists=force,
         )
         with self._safe_raw_sql(drop_stmt):
@@ -702,6 +767,9 @@ $$""".format(**self._get_udf_source(udf_node))
             yield result
 
     def raw_sql(self, query: str | sg.Expression, **kwargs: Any) -> Any:
+        import psycopg2
+        import psycopg2.extras
+
         with contextlib.suppress(AttributeError):
             query = query.sql(dialect=self.dialect)
 
@@ -711,11 +779,11 @@ $$""".format(**self._get_udf_source(udf_node))
         try:
             # try to load hstore, uuid and ipaddress extensions
             with contextlib.suppress(psycopg2.ProgrammingError):
-                extras.register_hstore(cursor)
+                psycopg2.extras.register_hstore(cursor)
             with contextlib.suppress(psycopg2.ProgrammingError):
-                extras.register_uuid(conn_or_curs=cursor)
+                psycopg2.extras.register_uuid(conn_or_curs=cursor)
             with contextlib.suppress(psycopg2.ProgrammingError):
-                extras.register_ipaddress(cursor)
+                psycopg2.extras.register_ipaddress(cursor)
         except Exception:
             cursor.close()
             raise
@@ -742,4 +810,4 @@ $$""".format(**self._get_udf_source(udf_node))
 
         if conversions:
             table_expr = table_expr.mutate(**conversions)
-        return super()._to_sqlglot(table_expr, limit=limit, params=params)
+        return super()._to_sqlglot(table_expr, limit=limit, params=params, **kwargs)

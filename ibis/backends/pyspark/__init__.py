@@ -165,10 +165,10 @@ class Backend(SQLBackend, CanCreateDatabase):
     def disconnect(self) -> None:
         self._session.stop()
 
-    def _metadata(self, query: str):
+    def _get_schema_using_query(self, query: str) -> sch.Schema:
         cursor = self.raw_sql(query)
         struct_dtype = PySparkType.to_ibis(cursor.query.schema)
-        return struct_dtype.items()
+        return sch.Schema(struct_dtype)
 
     @property
     def version(self):
@@ -200,6 +200,16 @@ class Backend(SQLBackend, CanCreateDatabase):
     def list_tables(
         self, like: str | None = None, database: str | None = None
     ) -> list[str]:
+        """List the tables in the database.
+
+        Parameters
+        ----------
+        like
+            A pattern to use for listing tables.
+        database
+            Database to list tables from. Default behavior is to show tables in
+            the current database.
+        """
         tables = [
             row.tableName
             for row in self._session.sql(
@@ -306,14 +316,17 @@ class Backend(SQLBackend, CanCreateDatabase):
             database does not exist
 
         """
-        sql = sge.Drop(kind="DATABASE", exist=force, this=sg.to_identifier(name))
+        sql = sge.Drop(
+            kind="DATABASE", exist=force, this=sg.to_identifier(name), cascade=force
+        )
         with self._safe_raw_sql(sql):
             pass
 
     def get_schema(
         self,
         table_name: str,
-        schema: str | None = None,
+        *,
+        catalog: str | None = None,
         database: str | None = None,
     ) -> sch.Schema:
         """Return a Schema object for the indicated table and database.
@@ -322,12 +335,10 @@ class Backend(SQLBackend, CanCreateDatabase):
         ----------
         table_name
             Table name. May be fully qualified
-        schema
-            Spark does not have a schema argument for its table() method,
-            so this must be None
+        catalog
+            Unsupported in PySpark backend.
         database
-            Spark does not have a database argument for its table() method,
-            so this must be None
+            Database to use to get the active database.
 
         Returns
         -------
@@ -335,11 +346,6 @@ class Backend(SQLBackend, CanCreateDatabase):
             An ibis schema
 
         """
-        if schema is not None:
-            raise com.UnsupportedArgumentError(
-                "Spark does not support the `schema` argument for `get_schema`"
-            )
-
         with self._active_database(database):
             df = self._session.table(table_name)
             struct = PySparkType.to_ibis(df.schema)
@@ -414,7 +420,6 @@ class Backend(SQLBackend, CanCreateDatabase):
         obj: ir.Table,
         *,
         database: str | None = None,
-        schema: str | None = None,
         overwrite: bool = False,
     ) -> ir.Table:
         """Create a temporary Spark view from a table expression.
@@ -427,8 +432,6 @@ class Backend(SQLBackend, CanCreateDatabase):
             Expression to use for the view
         database
             Database name
-        schema
-            Schema name
         overwrite
             Replace an existing view of the same name if it exists
 
@@ -439,9 +442,7 @@ class Backend(SQLBackend, CanCreateDatabase):
 
         """
         src = sge.Create(
-            this=sg.table(
-                name, db=schema, catalog=database, quoted=self.compiler.quoted
-            ),
+            this=sg.table(name, db=database, quoted=self.compiler.quoted),
             kind="TEMPORARY VIEW",
             replace=overwrite,
             expression=self.compile(obj),

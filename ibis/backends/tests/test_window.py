@@ -71,14 +71,15 @@ def pandas_ntile(x, bucket: int):
     )
 
 
-@reduction(input_type=[dt.double], output_type=dt.double)
-def mean_udf(s):
-    return s.mean()
+with pytest.warns(FutureWarning, match="v9.0"):
 
+    @reduction(input_type=[dt.double], output_type=dt.double)
+    def mean_udf(s):
+        return s.mean()
 
-@analytic(input_type=[dt.double], output_type=dt.double)
-def calc_zscore(s):
-    return (s - s.mean()) / s.std()
+    @analytic(input_type=[dt.double], output_type=dt.double)
+    def calc_zscore(s):
+        return (s - s.mean()) / s.std()
 
 
 @pytest.mark.parametrize(
@@ -922,11 +923,6 @@ def test_ungrouped_unbounded_window(
 @pytest.mark.notimpl(["snowflake"], raises=SnowflakeProgrammingError)
 @pytest.mark.notimpl(
     ["impala"], raises=ImpalaHiveServer2Error, reason="limited RANGE support"
-)
-@pytest.mark.notyet(
-    ["clickhouse"],
-    reason="RANGE OFFSET frame for 'DB::ColumnNullable' ORDER BY column is not implemented",
-    raises=ClickHouseDatabaseError,
 )
 @pytest.mark.notyet(["mssql"], raises=PyODBCProgrammingError)
 @pytest.mark.broken(

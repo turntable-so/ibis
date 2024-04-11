@@ -25,6 +25,7 @@ import ibis.expr.types as ir
 from ibis import util
 from ibis.backends import BaseBackend, CanCreateDatabase
 from ibis.backends.clickhouse.compiler import ClickHouseCompiler
+from ibis.backends.clickhouse.converter import ClickHousePandasData
 from ibis.backends.sql import SQLBackend
 from ibis.backends.sql.compiler import C
 
@@ -153,7 +154,6 @@ class Backend(SQLBackend, CanCreateDatabase):
         """
         if settings is None:
             settings = {}
-        settings.setdefault("session_timezone", "UTC")
 
         self.con = cc.get_client(
             host=host,
@@ -165,6 +165,7 @@ class Backend(SQLBackend, CanCreateDatabase):
             client_name=client_name,
             query_limit=0,
             compress=compression,
+            settings=settings,
             **kwargs,
         )
 
@@ -198,6 +199,17 @@ class Backend(SQLBackend, CanCreateDatabase):
     def list_tables(
         self, like: str | None = None, database: str | None = None
     ) -> list[str]:
+        """List the tables in the database.
+
+        Parameters
+        ----------
+        like
+            A pattern to use for listing tables.
+        database
+            Database to list tables from. Default behavior is to show tables in
+            the current database.
+        """
+
         query = sg.select(C.name).from_(sg.table("tables", db="system"))
 
         if database is None:
@@ -380,11 +392,10 @@ class Backend(SQLBackend, CanCreateDatabase):
         else:
             df.columns = list(schema.names)
 
-        # TODO: remove the extra conversion
-        #
-        # the extra __pandas_result__ call is to work around slight differences
-        # in single column conversion and whole table conversion
-        return expr.__pandas_result__(table.__pandas_result__(df))
+        # TODO: remove the extra conversion by passing the converter to
+        # __pandas_result__, a la `__pandas_result__(df, converter)`
+        df = ClickHousePandasData.convert_table(df, schema=schema)
+        return expr.__pandas_result__(df)
 
     def insert(
         self,
@@ -451,7 +462,11 @@ class Backend(SQLBackend, CanCreateDatabase):
         self.con.close()
 
     def get_schema(
-        self, table_name: str, database: str | None = None, schema: str | None = None
+        self,
+        table_name: str,
+        *,
+        catalog: str | None = None,
+        database: str | None = None,
     ) -> sch.Schema:
         """Return a Schema object for the indicated table and database.
 
@@ -460,10 +475,10 @@ class Backend(SQLBackend, CanCreateDatabase):
         table_name
             May **not** be fully qualified. Use `database` if you want to
             qualify the identifier.
+        catalog
+            Catalog name, not supported by ClickHouse
         database
             Database name
-        schema
-            Schema name, not supported by ClickHouse
 
         Returns
         -------
@@ -471,9 +486,9 @@ class Backend(SQLBackend, CanCreateDatabase):
             Ibis schema
 
         """
-        if schema is not None:
+        if catalog is not None:
             raise com.UnsupportedBackendFeatureError(
-                "`schema` namespaces are not supported by clickhouse"
+                "`catalog` namespaces are not supported by clickhouse"
             )
         query = sge.Describe(this=sg.table(table_name, db=database))
         with self._safe_raw_sql(query) as results:
@@ -482,17 +497,15 @@ class Backend(SQLBackend, CanCreateDatabase):
             dict(zip(names, map(self.compiler.type_mapper.from_string, types)))
         )
 
-    def _metadata(self, query: str) -> sch.Schema:
+    def _get_schema_using_query(self, query: str) -> sch.Schema:
         name = util.gen_name("clickhouse_metadata")
         with closing(self.raw_sql(f"CREATE VIEW {name} AS {query}")):
             pass
         try:
-            with closing(self.raw_sql(f"DESCRIBE {name}")) as results:
-                names, types, *_ = results.result_columns
+            return self.get_schema(name)
         finally:
             with closing(self.raw_sql(f"DROP VIEW {name}")):
                 pass
-        return zip(names, map(self.compiler.type_mapper.from_string, types))
 
     def create_database(
         self, name: str, *, force: bool = False, engine: str = "Atomic"
@@ -639,7 +652,7 @@ class Backend(SQLBackend, CanCreateDatabase):
             this=sg.table(name, db=database),
             expressions=[
                 sge.ColumnDef(
-                    this=sg.to_identifier(name),
+                    this=sg.to_identifier(name, quoted=self.compiler.quoted),
                     kind=self.compiler.type_mapper.from_ibis(typ),
                 )
                 for name, typ in schema.items()

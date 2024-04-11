@@ -26,6 +26,7 @@ from ibis.backends.tests.errors import (
     MySQLProgrammingError,
     OracleDatabaseError,
     PsycoPg2InternalError,
+    Py4JJavaError,
     PyDruidProgrammingError,
     PyODBCDataError,
     PyODBCProgrammingError,
@@ -519,11 +520,6 @@ def test_dropna_table(backend, alltypes, how, subset):
     backend.assert_frame_equal(result, expected)
 
 
-def test_select_sort_sort(alltypes):
-    query = alltypes[alltypes.year, alltypes.bool_col]
-    query = query.order_by(query.year).order_by(query.bool_col)
-
-
 @pytest.mark.parametrize(
     "key, df_kwargs",
     [
@@ -789,7 +785,7 @@ def test_uncorrelated_subquery(backend, batting, batting_df):
 
 
 def test_int_column(alltypes):
-    expr = alltypes.mutate(x=1).x
+    expr = alltypes.mutate(x=ibis.literal(1)).x
     result = expr.execute()
     assert expr.type() == dt.int8
     assert result.dtype == np.int8
@@ -856,6 +852,11 @@ def test_typeof(con):
     reason="https://github.com/risingwavelabs/risingwave/issues/1343",
 )
 @pytest.mark.xfail_version(dask=["dask<2024.2.0"])
+@pytest.mark.notyet(
+    ["mssql"],
+    raises=PyODBCProgrammingError,
+    reason="naked IN queries are not supported",
+)
 def test_isin_uncorrelated(
     backend, batting, awards_players, batting_df, awards_players_df
 ):
@@ -1117,33 +1118,11 @@ def test_pivot_wider(backend):
         ),
     ],
 )
-@pytest.mark.parametrize(
-    "keep",
-    [
-        "first",
-        param(
-            "last",
-            marks=pytest.mark.notimpl(
-                ["bigquery", "trino"],
-                raises=com.UnsupportedOperationError,
-                reason="backend doesn't support how='last'",
-            ),
-        ),
-    ],
-)
+@pytest.mark.parametrize("keep", ["first", "last"])
 @pytest.mark.notimpl(
     ["druid", "impala", "oracle"],
-    raises=(
-        NotImplementedError,
-        OracleDatabaseError,
-        com.OperationNotDefinedError,
-    ),
+    raises=(NotImplementedError, OracleDatabaseError, com.OperationNotDefinedError),
     reason="arbitrary not implemented in the backend",
-)
-@pytest.mark.notimpl(
-    ["datafusion"],
-    raises=com.OperationNotDefinedError,
-    reason="backend doesn't implement window functions",
 )
 @pytest.mark.notimpl(
     ["polars"],
@@ -1152,7 +1131,7 @@ def test_pivot_wider(backend):
 )
 @pytest.mark.notimpl(
     ["flink"],
-    raises=com.OperationNotDefinedError,
+    raises=Py4JJavaError,
     reason="backend doesn't implement deduplication",
 )
 @pytest.mark.notimpl(
@@ -1215,18 +1194,13 @@ def test_distinct_on_keep(backend, on, keep):
     raises=com.OperationNotDefinedError,
 )
 @pytest.mark.notimpl(
-    ["datafusion"],
-    raises=com.OperationNotDefinedError,
-    reason="backend doesn't implement window functions",
-)
-@pytest.mark.notimpl(
     ["polars"],
     raises=com.OperationNotDefinedError,
     reason="backend doesn't implement ops.WindowFunction",
 )
 @pytest.mark.notimpl(
     ["flink"],
-    raises=com.OperationNotDefinedError,
+    raises=Py4JJavaError,
     reason="backend doesn't implement deduplication",
 )
 @pytest.mark.notimpl(
@@ -1307,7 +1281,6 @@ def test_hashbytes(backend, alltypes):
         "clickhouse",
         "dask",
         "datafusion",
-        "exasol",
         "flink",
         "impala",
         "mysql",
@@ -1537,6 +1510,11 @@ def test_try_cast_func(con, from_val, to_type, func):
                     reason="doesn't support OFFSET without ORDER BY",
                 ),
                 pytest.mark.notyet(["oracle"], raises=com.UnsupportedArgumentError),
+                pytest.mark.never(
+                    ["mssql"],
+                    raises=PyODBCProgrammingError,
+                    reason="sqlglot generates code that requires > 0 fetch rows",
+                ),
             ],
         ),
         param(
@@ -1548,11 +1526,6 @@ def test_try_cast_func(con, from_val, to_type, func):
                     ["bigquery"],
                     raises=GoogleBadRequest,
                     reason="bigquery doesn't support OFFSET without LIMIT",
-                ),
-                pytest.mark.notyet(
-                    ["mssql"],
-                    raises=PyODBCProgrammingError,
-                    reason="mssql doesn't support OFFSET without LIMIT",
                 ),
                 pytest.mark.notyet(["exasol"], raises=ExaQueryError),
                 pytest.mark.never(
@@ -1580,6 +1553,11 @@ def test_try_cast_func(con, from_val, to_type, func):
                     reason="doesn't support OFFSET without ORDER BY",
                 ),
                 pytest.mark.notyet(["oracle"], raises=com.UnsupportedArgumentError),
+                pytest.mark.never(
+                    ["mssql"],
+                    raises=PyODBCProgrammingError,
+                    reason="sqlglot generates code that requires > 0 fetch rows",
+                ),
             ],
         ),
         param(
@@ -1622,8 +1600,25 @@ def test_static_table_slice(backend, slc, expected_count_fn):
         # negative stop
         param(slice(-3, -2), lambda _: 1, id="[-3:-2]"),
         # positive stop
-        param(slice(-4000, 7000), lambda _: 3700, id="[-4000:7000]"),
-        param(slice(-3, 2), lambda _: 0, id="[-3:2]"),
+        param(
+            slice(-4000, 7000),
+            lambda _: 3700,
+            id="[-4000:7000]",
+            marks=[pytest.mark.notyet("clickhouse", raises=ClickHouseDatabaseError)],
+        ),
+        param(
+            slice(-3, 2),
+            lambda _: 0,
+            id="[-3:2]",
+            marks=[
+                pytest.mark.never(
+                    ["mssql"],
+                    raises=PyODBCProgrammingError,
+                    reason="sqlglot generates code that requires > 0 fetch rows",
+                ),
+                pytest.mark.notyet("clickhouse", raises=ClickHouseDatabaseError),
+            ],
+        ),
         ##################
         ### POSITIVE start
         # negative stop
@@ -1658,11 +1653,6 @@ def test_static_table_slice(backend, slc, expected_count_fn):
     reason="backend doesn't support dynamic limit/offset",
 )
 @pytest.mark.notimpl(["exasol"], raises=ExaQueryError)
-@pytest.mark.notyet(
-    ["clickhouse"],
-    raises=ClickHouseDatabaseError,
-    reason="clickhouse doesn't support dynamic limit/offset",
-)
 @pytest.mark.notyet(["druid"], reason="druid doesn't support dynamic limit/offset")
 @pytest.mark.notyet(["polars"], reason="polars doesn't support dynamic limit/offset")
 @pytest.mark.notyet(
@@ -1713,11 +1703,6 @@ def test_dynamic_table_slice(backend, slc, expected_count_fn):
     reason="backend doesn't support dynamic limit/offset",
 )
 @pytest.mark.notimpl(["exasol"], raises=ExaQueryError)
-@pytest.mark.notyet(
-    ["clickhouse"],
-    raises=ClickHouseDatabaseError,
-    reason="clickhouse doesn't support dynamic limit/offset",
-)
 @pytest.mark.notyet(["druid"], reason="druid doesn't support dynamic limit/offset")
 @pytest.mark.notyet(["polars"], reason="polars doesn't support dynamic limit/offset")
 @pytest.mark.notyet(
@@ -1740,7 +1725,7 @@ def test_dynamic_table_slice(backend, slc, expected_count_fn):
 @pytest.mark.notyet(
     ["mssql"],
     reason="doesn't support dynamic limit/offset; compiles incorrectly in sqlglot",
-    raises=AssertionError,
+    raises=PyODBCProgrammingError,
 )
 @pytest.mark.notimpl(
     ["risingwave"],
@@ -1868,6 +1853,12 @@ def test_select_mutate_with_dict(backend):
     backend.assert_frame_equal(result, expected)
 
 
+def test_select_scalar(alltypes):
+    res = alltypes.select(y=ibis.literal(1)).limit(3).execute()
+    assert len(res.y) == 3
+    assert (res.y == 1).all()
+
+
 @pytest.mark.broken(["mssql", "oracle"], reason="incorrect syntax")
 def test_isnull_equality(con, backend, monkeypatch):
     monkeypatch.setattr(ibis.options, "default_backend", con)
@@ -1884,8 +1875,7 @@ def test_isnull_equality(con, backend, monkeypatch):
     ["druid"],
     raises=PyDruidProgrammingError,
     reason=(
-        "Query could not be planned. A possible reason is [SQL query requires ordering a "
-        "table by non-time column [[id]], which is not supported."
+        "Query could not be planned. SQL query requires ordering a table by time column"
     ),
 )
 def test_subsequent_overlapping_order_by(con, backend, alltypes, df):
@@ -1898,3 +1888,105 @@ def test_subsequent_overlapping_order_by(con, backend, alltypes, df):
     result = con.execute(ts2)
     expected = df.sort_values("id", ascending=False).reset_index(drop=True)
     backend.assert_frame_equal(result, expected)
+
+
+@pytest.mark.broken(
+    ["druid"],
+    raises=PyDruidProgrammingError,
+    reason=(
+        "Query could not be planned. SQL query requires ordering a table by time column"
+    ),
+)
+@pytest.mark.broken(
+    ["dask"],
+    raises=(AssertionError, NotImplementedError),
+    reason=(
+        "dask doesn't support deterministic .sort_values(); "
+        "for older dask versions sorting by multiple columns is not supported"
+    ),
+)
+def test_select_sort_sort(backend, alltypes, df):
+    t = alltypes
+    expr = t.order_by(t.year, t.id.desc()).order_by(t.bool_col)
+
+    result = expr.execute().reset_index(drop=True)
+
+    expected = df.sort_values(
+        ["bool_col", "year", "id"], ascending=[True, True, False], kind="mergesort"
+    ).reset_index(drop=True)
+
+    expected1 = (
+        df.sort_values(["year", "id"], ascending=[True, False], kind="mergesort")
+        .sort_values(["bool_col"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+
+    backend.assert_frame_equal(expected, expected1)
+    backend.assert_frame_equal(result, expected)
+
+
+@pytest.mark.broken(
+    ["druid"],
+    raises=PyDruidProgrammingError,
+    reason=(
+        "Query could not be planned. SQL query requires ordering a table by time column"
+    ),
+)
+@pytest.mark.broken(
+    ["dask"],
+    raises=(AssertionError, NotImplementedError),
+    reason=(
+        "dask doesn't support deterministic .sort_values(); "
+        "for older dask versions sorting by multiple columns is not supported"
+    ),
+    strict=False,
+)
+def test_select_sort_sort_deferred(backend, alltypes, df):
+    t = alltypes
+
+    expr = t.order_by(t.tinyint_col, t.bool_col, t.id).order_by(
+        _.bool_col.asc(), (_.tinyint_col + 1).desc()
+    )
+    result = expr.execute().reset_index(drop=True)
+
+    df = df.assign(tinyint_col_plus=df.tinyint_col + 1)
+    expected = (
+        df.sort_values(
+            ["bool_col", "tinyint_col_plus", "tinyint_col", "id"],
+            ascending=[True, False, True, True],
+            kind="mergesort",
+        )
+        .drop(columns=["tinyint_col_plus"])
+        .reset_index(drop=True)
+    )
+    expected1 = (
+        df.sort_values(
+            ["tinyint_col", "bool_col", "id"],
+            ascending=[True, True, True],
+            kind="mergesort",
+        )
+        .sort_values(
+            ["bool_col", "tinyint_col_plus"], ascending=[True, False], kind="mergesort"
+        )
+        .drop(columns=["tinyint_col_plus"])
+        .reset_index(drop=True)
+    )
+
+    backend.assert_frame_equal(expected, expected1)
+    backend.assert_frame_equal(result, expected)
+
+
+@pytest.mark.notimpl(
+    ["pandas", "dask"], raises=IndexError, reason="NaN isn't treated as NULL"
+)
+@pytest.mark.notimpl(
+    ["druid"],
+    raises=AttributeError,
+    reason="inserting three rows into druid is difficult",
+)
+def test_topk_counts_null(con):
+    t = con.tables.topk
+    tk = t.x.topk(10)
+    tkf = tk.filter(_.x.isnull())[1]
+    result = con.to_pyarrow(tkf)
+    assert result[0].as_py() == 1

@@ -689,7 +689,7 @@ def test_array_unique(con, input, expected):
 
 @builtin_array
 @pytest.mark.notimpl(
-    ["datafusion", "flink", "polars"],
+    ["flink", "polars"],
     raises=com.OperationNotDefinedError,
 )
 @pytest.mark.broken(
@@ -709,7 +709,7 @@ def test_array_sort(con):
 
 
 @builtin_array
-@pytest.mark.notimpl(["datafusion", "polars"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
 @pytest.mark.parametrize(
     ("a", "b", "expected_array"),
     [
@@ -728,6 +728,11 @@ def test_array_sort(con):
                     ["bigquery"],
                     raises=GoogleBadRequest,
                     reason="BigQuery doesn't support arrays with null elements",
+                ),
+                pytest.mark.notyet(
+                    ["datafusion"],
+                    raises=AssertionError,
+                    reason="DataFusion transforms null elements to NAN",
                 ),
             ],
         ),
@@ -752,7 +757,7 @@ def test_array_union(con, a, b, expected_array):
 
 @builtin_array
 @pytest.mark.notimpl(
-    ["dask", "datafusion", "pandas", "polars", "flink"],
+    ["dask", "pandas", "polars", "flink"],
     raises=com.OperationNotDefinedError,
 )
 @pytest.mark.notimpl(
@@ -796,11 +801,6 @@ def test_array_intersect(con, data):
 
 
 @builtin_array
-@pytest.mark.notimpl(
-    ["clickhouse"],
-    raises=ClickHouseDatabaseError,
-    reason="ClickHouse won't accept dicts for struct type values",
-)
 @pytest.mark.notimpl(["postgres"], raises=PsycoPg2SyntaxError)
 @pytest.mark.notimpl(["risingwave"], raises=PsycoPg2InternalError)
 @pytest.mark.notimpl(["datafusion", "flink"], raises=com.OperationNotDefinedError)
@@ -818,8 +818,7 @@ def test_unnest_struct(con):
     tm.assert_series_equal(result, expected)
 
 
-@builtin_array
-@pytest.mark.notimpl(
+array_zip_notimpl = pytest.mark.notimpl(
     [
         "dask",
         "datafusion",
@@ -833,6 +832,10 @@ def test_unnest_struct(con):
     ],
     raises=com.OperationNotDefinedError,
 )
+
+
+@builtin_array
+@array_zip_notimpl
 def test_zip(backend):
     t = backend.array_types
 
@@ -849,6 +852,33 @@ def test_zip(backend):
     s = res.execute()
     assert len(s[0][0]) == len(res.type().value_type)
     assert len(x[0]) == len(s[0])
+
+
+@builtin_array
+@array_zip_notimpl
+@pytest.mark.notyet(
+    "clickhouse",
+    raises=ClickHouseDatabaseError,
+    reason="clickhouse nested types can't be null",
+)
+@pytest.mark.never(
+    "bigquery",
+    raises=AssertionError,
+    reason="BigQuery converts NULLs with array type to an empty array",
+)
+@pytest.mark.parametrize(
+    "fn",
+    [
+        param(lambda a, b: a.zip(b), id="non-null-zip-null"),
+        param(lambda a, b: b.zip(a), id="null-zip-non-null"),
+        param(lambda _, b: b.zip(b), id="null-zip-null"),
+    ],
+)
+def test_zip_null(con, fn):
+    a = ibis.literal([1, 2, 3], type="array<int64>")
+    b = ibis.literal(None, type="array<int64>")
+    expr = fn(a, b)
+    assert con.execute(expr) is None
 
 
 @builtin_array

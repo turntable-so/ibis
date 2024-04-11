@@ -1,29 +1,20 @@
 from __future__ import annotations
 
 import contextlib
+import getpass
 
 import pandas as pd
+import pandas.testing as tm
 import pytest
 import sqlglot as sg
 from pytest import param
 
 import ibis
+import ibis.backends.sql.dialects  # to load dialects
 import ibis.common.exceptions as com
 from ibis import _
 from ibis.backends import _get_backend_names
-
-# import here to load the dialect in to sqlglot so we can use it for transpilation
-from ibis.backends.sql.dialects import (  # noqa: F401
-    MSSQL,
-    DataFusion,
-    Druid,
-    Exasol,
-    Flink,
-    Impala,
-    Polars,
-    PySpark,
-    RisingWave,
-)
+from ibis.backends.tests.base import PYTHON_SHORT_VERSION
 from ibis.backends.tests.errors import (
     ExaQueryError,
     GoogleBadRequest,
@@ -36,7 +27,7 @@ dot_sql_never = pytest.mark.never(
 )
 
 _NAMES = {
-    "bigquery": "ibis_gbq_testing.functional_alltypes",
+    "bigquery": f"ibis_gbq_testing_{getpass.getuser()}_{PYTHON_SHORT_VERSION}.functional_alltypes",
     "exasol": '"functional_alltypes"',
 }
 
@@ -86,7 +77,11 @@ def test_con_dot_sql(backend, con, schema):
     backend.assert_series_equal(result.astype(expected.dtype), expected)
 
 
-@pytest.mark.notyet(["polars"], raises=PolarsComputeError)
+@pytest.mark.notyet(
+    ["polars"],
+    raises=PolarsComputeError,
+    reason="polars doesn't support quoted identifiers referencing CTEs",
+)
 @pytest.mark.notyet(
     ["bigquery"], raises=GoogleBadRequest, reason="requires a qualified name"
 )
@@ -128,7 +123,11 @@ def test_table_dot_sql(backend):
     assert pytest.approx(result) == expected
 
 
-@pytest.mark.notyet(["polars"], raises=PolarsComputeError)
+@pytest.mark.notyet(
+    ["polars"],
+    raises=PolarsComputeError,
+    reason="polars doesn't support quoted identifiers referencing CTEs",
+)
 @pytest.mark.notyet(
     ["bigquery"], raises=GoogleBadRequest, reason="requires a qualified name"
 )
@@ -324,12 +323,38 @@ def mem_t(con):
 
 
 @dot_sql_never
-@pytest.mark.notyet(["polars"], raises=NotImplementedError)
-def test_cte(con, mem_t):
-    t = con.table(mem_t)
-    foo = t.alias("foo")
-    assert foo.schema() == t.schema()
-    assert foo.count().execute() == t.count().execute()
+@pytest.mark.notyet(
+    ["polars"],
+    raises=PolarsComputeError,
+    reason="polars doesn't support selecting from quoted identifiers referencing CTEs",
+)
+@pytest.mark.notyet(
+    ["druid"],
+    raises=KeyError,
+    reason="upstream does not preserve column names in schema inference",
+)
+def test_cte(alltypes, df):
+    expr = alltypes.alias("ft").sql(
+        'SELECT "string_col", CAST(COUNT(*) AS BIGINT) "n" FROM "ft" GROUP BY "string_col"',
+        dialect="duckdb",
+    )
+    result = expr.to_pandas().set_index("string_col").sort_index()
 
-    expr = foo.sql('SELECT count(*) "x" FROM "foo"', dialect="duckdb")
-    assert expr.execute().iat[0, 0] == t.count().execute()
+    expected = (
+        df.groupby("string_col")
+        .size()
+        .reset_index(name="n")
+        .set_index("string_col")
+        .sort_index()
+    )
+
+    tm.assert_frame_equal(result, expected)
+
+
+@dot_sql_never
+def test_bare_minimum(con, alltypes, df):
+    """Test that a backend that supports dot sql can do the most basic thing."""
+
+    name = _NAMES.get(con.name, "functional_alltypes").replace('"', "")
+    expr = alltypes.sql(f'SELECT COUNT(*) AS "n" FROM "{name}"', dialect="duckdb")
+    assert expr.to_pandas().iat[0, 0] == len(df)

@@ -183,9 +183,11 @@ class JoinChain(Relation):
 
     def __init__(self, first, rest, values):
         allowed_parents = {first}
-        assert first.index == 0
         for join in rest:
-            assert join.table.index == len(allowed_parents)
+            if join.table in allowed_parents:
+                raise IntegrityError(
+                    f"Cannot add {join.table!r} to the join chain, it is already in the chain"
+                )
             allowed_parents.add(join.table)
             _check_integrity(join.predicates, allowed_parents)
         _check_integrity(values.values(), allowed_parents)
@@ -312,8 +314,8 @@ class PhysicalTable(Relation):
 
 @public
 class Namespace(Concrete):
+    catalog: Optional[str] = None
     database: Optional[str] = None
-    schema: Optional[str] = None
 
 
 @public

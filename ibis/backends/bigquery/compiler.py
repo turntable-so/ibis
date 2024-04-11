@@ -12,7 +12,7 @@ import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
 from ibis import util
-from ibis.backends.sql.compiler import NULL, STAR, SQLGlotCompiler, paren
+from ibis.backends.sql.compiler import NULL, STAR, SQLGlotCompiler
 from ibis.backends.sql.datatypes import BigQueryType, BigQueryUDFType
 from ibis.backends.sql.rewrites import (
     exclude_unsupported_window_frame_from_ops,
@@ -21,6 +21,7 @@ from ibis.backends.sql.rewrites import (
     rewrite_sample_as_filter,
 )
 from ibis.common.temporal import DateUnit, IntervalUnit, TimestampUnit, TimeUnit
+from ibis.expr.rewrites import rewrite_stringslice
 
 _NAME_REGEX = re.compile(r'[^!"$()*,./;?@[\\\]^`{}~\n]+')
 
@@ -34,6 +35,7 @@ class BigQueryCompiler(SQLGlotCompiler):
         exclude_unsupported_window_frame_from_ops,
         exclude_unsupported_window_frame_from_row_number,
         exclude_unsupported_window_frame_from_rank,
+        rewrite_stringslice,
         *SQLGlotCompiler.rewrites,
     )
 
@@ -71,6 +73,7 @@ class BigQueryCompiler(SQLGlotCompiler):
     )
 
     SIMPLE_OPS = {
+        ops.Arbitrary: "any_value",
         ops.StringAscii: "ascii",
         ops.BitAnd: "bit_and",
         ops.BitOr: "bit_or",
@@ -496,14 +499,6 @@ class BigQueryCompiler(SQLGlotCompiler):
         array = self.f.array_reverse(self.f.array_agg(sge.IgnoreNulls(this=arg)))
         return array[self.f.safe_offset(0)]
 
-    def visit_Arbitrary(self, op, *, arg, how, where):
-        if how != "first":
-            raise com.UnsupportedOperationError(
-                f"{how!r} value not supported for arbitrary in BigQuery"
-            )
-
-        return self.agg.any_value(arg, where=where)
-
     def visit_ArrayFilter(self, op, *, arg, body, param):
         return self.f.array(
             sg.select(param).from_(self._unnest(arg, as_=param)).where(body)
@@ -569,16 +564,6 @@ class BigQueryCompiler(SQLGlotCompiler):
         lhs = sg.select(lname).from_(self._unnest(left, as_=lname))
         rhs = sg.select(rname).from_(self._unnest(right, as_=rname))
         return self.f.array(sg.intersect(lhs, rhs, distinct=True))
-
-    def visit_Substring(self, op, *, arg, start, length):
-        if isinstance(op.length, ops.Literal) and (value := op.length.value) < 0:
-            raise com.IbisInputError(
-                f"Length parameter must be a non-negative value; got {value}"
-            )
-        suffix = (length,) * (length is not None)
-        if_pos = self.f.substr(arg, start + 1, *suffix)
-        if_neg = self.f.substr(arg, self.f.length(arg) + start + 1, *suffix)
-        return self.if_(start >= 0, if_pos, if_neg)
 
     def visit_RegexExtract(self, op, *, arg, pattern, index):
         matches = self.f.regexp_contains(arg, pattern)
@@ -704,10 +689,10 @@ class BigQueryCompiler(SQLGlotCompiler):
         return self.f.count(STAR)
 
     def visit_Degrees(self, op, *, arg):
-        return paren(180 * arg / self.f.acos(-1))
+        return sge.paren(180 * arg / self.f.acos(-1), copy=False)
 
     def visit_Radians(self, op, *, arg):
-        return paren(self.f.acos(-1) * arg / 180)
+        return sge.paren(self.f.acos(-1) * arg / 180, copy=False)
 
     def visit_CountDistinct(self, op, *, arg, where):
         if where is not None:

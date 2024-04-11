@@ -76,7 +76,7 @@ class Backend(SQLBackend, CanCreateDatabase, NoUrl):
     def raw_sql(self, query: str) -> TableResult:
         return self._table_env.execute_sql(query)
 
-    def _metadata(self, query: str):
+    def _get_schema_using_query(self, query: str) -> sch.Schema:
         from pyflink.table.types import create_arrow_schema
 
         table = self._table_env.sql_query(query)
@@ -84,8 +84,7 @@ class Backend(SQLBackend, CanCreateDatabase, NoUrl):
         pa_schema = create_arrow_schema(
             schema.get_field_names(), schema.get_field_data_types()
         )
-        # sort of wasteful, but less code to write
-        return sch.Schema.from_pyarrow(pa_schema).items()
+        return sch.Schema.from_pyarrow(pa_schema)
 
     def list_databases(self, like: str | None = None) -> list[str]:
         databases = self._table_env.list_databases()
@@ -255,15 +254,16 @@ class Backend(SQLBackend, CanCreateDatabase, NoUrl):
             name,
             schema=schema,
             source=self,
-            namespace=ops.Namespace(schema=catalog, database=database),
+            namespace=ops.Namespace(catalog=catalog, database=database),
         )
         return node.to_expr()
 
     def get_schema(
         self,
         table_name: str,
-        database: str | None = None,
+        *,
         catalog: str | None = None,
+        database: str | None = None,
     ) -> sch.Schema:
         """Return a Schema object for the indicated table and database.
 
@@ -271,10 +271,10 @@ class Backend(SQLBackend, CanCreateDatabase, NoUrl):
         ----------
         table_name : str
             Table name.
-        database : str, optional
-            Database name.
         catalog : str, optional
             Catalog name.
+        database : str, optional
+            Database name.
 
         Returns
         -------
@@ -329,13 +329,21 @@ class Backend(SQLBackend, CanCreateDatabase, NoUrl):
     _compile_python_udf = _register_udf
 
     def compile(
-        self, expr: ir.Expr, params: Mapping[ir.Expr, Any] | None = None, **_: Any
+        self,
+        expr: ir.Expr,
+        params: Mapping[ir.Expr, Any] | None = None,
+        pretty: bool = False,
+        **_: Any,
     ) -> Any:
         """Compile an Ibis expression to Flink."""
-        return super().compile(expr, params=params)  # Discard `limit` and other kwargs.
+        return super().compile(
+            expr, params=params, pretty=pretty
+        )  # Discard `limit` and other kwargs.
 
-    def _to_sql(self, expr: ir.Expr, **kwargs: Any) -> str:
-        return str(self.compile(expr, **kwargs))
+    def _to_sqlglot(
+        self, expr: ir.Expr, params: Mapping[ir.Expr, Any] | None = None, **_: Any
+    ) -> str:
+        return super()._to_sqlglot(expr, params=params)
 
     def execute(self, expr: ir.Expr, **kwargs: Any) -> Any:
         """Execute an expression."""

@@ -59,6 +59,8 @@ class PandasType(NumpyType):
     def from_ibis(cls, dtype):
         if dtype.is_timestamp() and dtype.timezone:
             return pdt.DatetimeTZDtype("ns", dtype.timezone)
+        elif dtype.is_date():
+            return np.dtype("M8[s]")
         elif dtype.is_interval():
             return np.dtype(f"timedelta64[{dtype.unit.short}]")
         else:
@@ -92,9 +94,7 @@ class PandasData(DataMapper):
         return PyArrowData.infer_column(s)
 
     @classmethod
-    def infer_table(cls, df, schema=None):
-        schema = schema if schema is not None else {}
-
+    def infer_table(cls, df):
         pairs = []
         for column_name in df.dtypes.keys():
             if not isinstance(column_name, str):
@@ -102,15 +102,12 @@ class PandasData(DataMapper):
                     "Column names must be strings to use the pandas backend"
                 )
 
-            if column_name in schema:
-                ibis_dtype = schema[column_name]
+            pandas_column = df[column_name]
+            pandas_dtype = pandas_column.dtype
+            if pandas_dtype == np.object_:
+                ibis_dtype = cls.infer_column(pandas_column)
             else:
-                pandas_column = df[column_name]
-                pandas_dtype = pandas_column.dtype
-                if pandas_dtype == np.object_:
-                    ibis_dtype = cls.infer_column(pandas_column)
-                else:
-                    ibis_dtype = PandasType.to_ibis(pandas_dtype)
+                ibis_dtype = PandasType.to_ibis(pandas_dtype)
 
             pairs.append((column_name, ibis_dtype))
 

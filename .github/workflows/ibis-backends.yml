@@ -42,6 +42,49 @@ env:
   HYPOTHESIS_PROFILE: "ci"
 
 jobs:
+  test_bigquery_lite:
+    name: BigQuery ${{ matrix.os }} python-${{ matrix.python-version }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-latest
+          - windows-latest
+        python-version:
+          - "3.9"
+          - "3.11"
+    steps:
+      - name: checkout
+        uses: actions/checkout@v4
+
+      - name: install poetry
+        run: pipx install 'poetry==1.8.2'
+
+      - name: install python
+        uses: actions/setup-python@v5
+        id: install_python
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: install ibis
+        run: poetry install --without dev --without docs --extras bigquery
+
+      - uses: extractions/setup-just@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: run simple bigquery unit tests
+        run: just ci-check ibis/backends/bigquery/tests/unit
+
+      - name: upload code coverage
+        if: success()
+        continue-on-error: true
+        uses: codecov/codecov-action@v4
+        with:
+          flags: backend,bigquery,${{ runner.os }},python-${{ steps.install_python.outputs.python-version }}
+          token: ${{ secrets.CODECOV_TOKEN }}
+
   test_backends:
     name: ${{ matrix.backend.title }} ${{ matrix.os }} python-${{ matrix.python-version }}
     runs-on: ${{ matrix.os }}
@@ -61,12 +104,18 @@ jobs:
             extras:
               - duckdb
               - deltalake
-              - geospatial
               - examples
               - decompiler
               - polars
             additional_deps:
               - torch
+          # TODO: remove this duckdb job once the next duckdb_spatial is released
+          - name: duckdb
+            title: DuckDB + Geospatial
+            extras:
+              - geospatial
+            additional_deps:
+              - "duckdb==0.9.2"
           - name: clickhouse
             title: ClickHouse
             services:
@@ -185,22 +234,9 @@ jobs:
             extras:
               - flink
             additional_deps:
-              - apache-flink
+              - "'apache-flink < 1.20.0'"
             services:
               - flink
-        include:
-          - os: ubuntu-latest
-            python-version: "3.10"
-            backend:
-              name: flink
-              title: Flink
-              serial: true
-              extras:
-                - flink
-              additional_deps:
-                - apache-flink
-              services:
-                - flink
         exclude:
           - os: windows-latest
             backend:
@@ -314,19 +350,7 @@ jobs:
               extras:
                 - flink
               additional_deps:
-                - apache-flink
-              services:
-                - flink
-          - os: ubuntu-latest
-            python-version: "3.11"
-            backend:
-              name: flink
-              title: Flink
-              serial: true
-              extras:
-                - flink
-              additional_deps:
-                - apache-flink
+                - "'apache-flink < 1.20.0'"
               services:
                 - flink
           - os: windows-latest
@@ -373,7 +397,6 @@ jobs:
         id: install_python
         with:
           python-version: ${{ matrix.python-version }}
-          cache: poetry
 
       - name: install ibis
         run: poetry install --without dev --without docs --extras "${{ join(matrix.backend.extras, ' ') }}"
@@ -416,6 +439,7 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           flags: backend,${{ matrix.backend.name }},${{ runner.os }},python-${{ steps.install_python.outputs.python-version }}
+          token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Show docker compose logs on fail
         if: matrix.backend.services != null && failure()
@@ -432,7 +456,7 @@ jobs:
           - windows-latest
         python-version:
           - "3.9"
-          - "3.11"
+          - "3.11.8"
         backend:
           - name: dask
             title: Dask
@@ -466,7 +490,7 @@ jobs:
               extras:
                 - postgres
                 - geospatial
-          - python-version: "3.11"
+          - python-version: "3.11.8"
             backend:
               name: postgres
               title: PostgreSQL
@@ -541,6 +565,7 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           flags: backend,${{ matrix.backend.name }},${{ runner.os }},python-${{ steps.install_python.outputs.python-version }}
+          token: ${{ secrets.CODECOV_TOKEN }}
 
       - name: Show docker compose logs on fail
         if: matrix.backend.services != null && failure()
@@ -630,6 +655,7 @@ jobs:
         uses: codecov/codecov-action@v4
         with:
           flags: backend,pyspark,${{ runner.os }},python-${{ steps.install_python.outputs.python-version }}
+          token: ${{ secrets.CODECOV_TOKEN }}
 
   backends:
     # this job exists so that we can use a single job from this workflow to gate merging

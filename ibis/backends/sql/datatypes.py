@@ -125,6 +125,15 @@ _to_sqlglot_types = {
     dt.Time: typecode.TIME,
 }
 
+_geotypes = {
+    "POINT": dt.Point,
+    "LINESTRING": dt.LineString,
+    "POLYGON": dt.Polygon,
+    "MULTIPOINT": dt.MultiPoint,
+    "MULTILINESTRING": dt.MultiLineString,
+    "MULTIPOLYGON": dt.MultiPolygon,
+}
+
 
 class SqlglotType(TypeMapper):
     dialect: str | None = None
@@ -285,7 +294,7 @@ class SqlglotType(TypeMapper):
         cls, arg: sge.DataTypeParam | None = None
     ) -> sge.DataType:
         if arg is not None:
-            return getattr(dt, str(arg))(nullable=cls.default_nullable)
+            return _geotypes[str(arg).upper()](nullable=cls.default_nullable)
         return dt.GeoSpatial(geotype="geometry", nullable=cls.default_nullable)
 
     @classmethod
@@ -316,7 +325,11 @@ class SqlglotType(TypeMapper):
     @classmethod
     def _from_ibis_Struct(cls, dtype: dt.Struct) -> sge.DataType:
         fields = [
-            sge.ColumnDef(this=str(name), kind=cls.from_ibis(field))
+            sge.ColumnDef(
+                # always quote struct fields to allow reserved words as field names
+                this=sg.to_identifier(name, quoted=True),
+                kind=cls.from_ibis(field),
+            )
             for name, field in dtype.items()
         ]
         return sge.DataType(this=typecode.STRUCT, expressions=fields, nested=True)

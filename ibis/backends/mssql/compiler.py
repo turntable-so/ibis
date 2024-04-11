@@ -15,7 +15,6 @@ from ibis.backends.sql.compiler import (
     STAR,
     TRUE,
     SQLGlotCompiler,
-    paren,
 )
 from ibis.backends.sql.datatypes import MSSQLType
 from ibis.backends.sql.dialects import MSSQL
@@ -27,6 +26,7 @@ from ibis.backends.sql.rewrites import (
     rewrite_sample_as_filter,
 )
 from ibis.common.deferred import var
+from ibis.expr.rewrites import rewrite_stringslice
 
 y = var("y")
 start = var("start")
@@ -46,14 +46,10 @@ end = var("end")
 # * Boolean expressions MUST be used in a WHERE clause, i.e., SELECT * FROM t WHERE 1 is not allowed
 
 
-@replace(
-    p.WindowFunction(
-        p.Reduction & ~p.ReductionVectorizedUDF, frame=y @ p.WindowFrame(order_by=())
-    )
-)
-def rewrite_rows_range_order_by_window(_, y, **kwargs):
+@replace(p.WindowFunction(p.Reduction & ~p.ReductionVectorizedUDF, order_by=()))
+def rewrite_rows_range_order_by_window(_, **kwargs):
     # MSSQL requires an order by in a window frame that has either ROWS or RANGE
-    return _.copy(frame=y.copy(order_by=(_.func.arg,)))
+    return _.copy(order_by=(_.func.arg,))
 
 
 @public
@@ -67,13 +63,14 @@ class MSSQLCompiler(SQLGlotCompiler):
         exclude_unsupported_window_frame_from_ops,
         exclude_unsupported_window_frame_from_row_number,
         rewrite_rows_range_order_by_window,
+        rewrite_stringslice,
         *SQLGlotCompiler.rewrites,
     )
+    copy_func_args = True
 
     UNSUPPORTED_OPERATIONS = frozenset(
         (
             ops.ApproxMedian,
-            ops.Arbitrary,
             ops.ArgMax,
             ops.ArgMin,
             ops.ArrayCollect,
@@ -189,7 +186,16 @@ class MSSQLCompiler(SQLGlotCompiler):
 
         Thanks to @arkanovicz for this glorious hack.
         """
-        return paren(self.f.len(self.f.concat("A", arg, "Z")) - 2)
+        return sge.paren(self.f.len(self.f.concat("A", arg, "Z")) - 2, copy=False)
+
+    def visit_Substring(self, op, *, arg, start, length):
+        start += 1
+        start = self.if_(start >= 1, start, start + self.f.length(arg))
+        if length is None:
+            # We don't need to worry about if start + length is greater than the
+            # length of the string, MSSQL will just return the rest of the string
+            length = self.f.length(arg)
+        return self.f.substring(arg, start, length)
 
     def visit_GroupConcat(self, op, *, arg, sep, where):
         if where is not None:
@@ -457,3 +463,23 @@ class MSSQLCompiler(SQLGlotCompiler):
         if where is not None:
             arg = self.if_(where, arg, NULL)
         return sge.Min(this=arg)
+
+    def visit_Select(self, op, *, parent, selections, predicates, sort_keys):
+        # if we've constructed a useless projection return the parent relation
+        if not selections and not predicates and not sort_keys:
+            return parent
+
+        result = parent
+
+        if selections:
+            result = sg.select(*self._cleanup_names(selections), copy=False).from_(
+                result, copy=False
+            )
+
+        if predicates:
+            result = result.where(*predicates, copy=True)
+
+        if sort_keys:
+            result = result.order_by(*sort_keys, copy=False)
+
+        return result

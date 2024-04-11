@@ -45,21 +45,37 @@ def test_simple_aggregate_execute(alltypes):
 
 
 def test_list_tables(con):
-    assert con.list_tables()
+    result = set(con.list_tables())
+
+    assert {"astronauts", "batting", "diamonds", "functional_alltypes"} <= result
     assert len(con.list_tables(like="functional")) == 1
 
+    assert len(con.list_tables(like="rw_")) == 0
+    result = set(con.list_tables(database="rw_catalog"))
 
-def test_compile_toplevel(snapshot):
+    assert {"rw_schemas", "rw_tables", "rw_types", "rw_users"} <= result
+    assert len(con.list_tables(like="astronauts", database="rw_catalog")) == 0
+
+
+def test_compile_toplevel(assert_sql):
     t = ibis.table([("foo", "double")], name="t0")
 
     expr = t.foo.sum()
-    result = ibis.postgres.compile(expr)
-    snapshot.assert_match(str(result), "out.sql")
+    assert_sql(expr)
+
+
+def test_list_catalogs(con):
+    assert RISINGWAVE_TEST_DB is not None
+    assert RISINGWAVE_TEST_DB in con.list_catalogs()
 
 
 def test_list_databases(con):
-    assert RISINGWAVE_TEST_DB is not None
-    assert RISINGWAVE_TEST_DB in con.list_databases()
+    assert con.list_databases() == [
+        "information_schema",
+        "pg_catalog",
+        "public",
+        "rw_catalog",
+    ]
 
 
 def test_create_and_drop_table(con, temp_table):

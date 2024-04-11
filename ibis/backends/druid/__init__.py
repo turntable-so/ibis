@@ -7,7 +7,7 @@ import json
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
-import pydruid
+import pydruid.db
 import sqlglot as sg
 
 import ibis.common.exceptions as com
@@ -97,28 +97,35 @@ class Backend(SQLBackend):
             cur.execute(query, *args, **kwargs)
             yield cur
 
-    def _metadata(self, query: str) -> Iterable[tuple[str, dt.DataType]]:
+    def _get_schema_using_query(self, query: str) -> sch.Schema:
         with self._safe_raw_sql(f"EXPLAIN PLAN FOR {query}") as result:
             [(row, *_)] = result.fetchall()
 
         (plan,) = json.loads(row)
+
+        schema = {}
+
         for column in plan["signature"]:
             name, typ = column["name"], column["type"]
             if name == "__time":
                 dtype = dt.timestamp
             else:
                 dtype = DruidType.from_string(typ)
-            yield name, dtype
+            schema[name] = dtype
+        return sch.Schema(schema)
 
     def get_schema(
-        self, table_name: str, schema: str | None = None, database: str | None = None
+        self,
+        table_name: str,
+        *,
+        catalog: str | None = None,
+        database: str | None = None,
     ) -> sch.Schema:
-        name_type_pairs = self._metadata(
+        return self._get_schema_using_query(
             sg.select(STAR)
-            .from_(sg.table(table_name, db=schema, catalog=database))
+            .from_(sg.table(table_name, db=database, catalog=catalog))
             .sql(self.dialect)
         )
-        return sch.Schema.from_tuples(name_type_pairs)
 
     def _fetch_from_cursor(self, cursor, schema: sch.Schema) -> pd.DataFrame:
         import pandas as pd
@@ -154,6 +161,16 @@ class Backend(SQLBackend):
     def list_tables(
         self, like: str | None = None, database: str | None = None
     ) -> list[str]:
+        """List the tables in the database.
+
+        Parameters
+        ----------
+        like
+            A pattern to use for listing tables.
+        database
+            Database to list tables from. Default behavior is to show tables in
+            the current database.
+        """
         t = sg.table("TABLES", db="INFORMATION_SCHEMA", quoted=True)
         c = self.compiler
         query = sg.select(sg.column("TABLE_NAME", quoted=True)).from_(t).sql(c.dialect)

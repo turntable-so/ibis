@@ -382,7 +382,7 @@ def test_mutate_scalar_with_window_after_join(npartitions):
 
     joined = left.outer_join(right, left.ints == right.group)
     proj = joined[left, right.value]
-    expr = proj.mutate(sum=proj.value.sum(), const=1)
+    expr = proj.mutate(sum=proj.value.sum(), const=ibis.literal(1))
     result = expr.execute()
     result = result.sort_values(["ints", "value"]).reset_index(drop=True)
     expected = (
@@ -473,14 +473,15 @@ def test_window_on_and_by_key_as_window_input(t, df):
     )
 
     # Test UDF
+    with pytest.warns(FutureWarning, match="v9.0"):
 
-    @reduction(input_type=[dt.int64], output_type=dt.int64)
-    def count(v):
-        return len(v)
+        @reduction(input_type=[dt.int64], output_type=dt.int64)
+        def count(v):
+            return len(v)
 
-    @reduction(input_type=[dt.int64, dt.int64], output_type=dt.int64)
-    def count_both(v1, v2):
-        return len(v1)
+        @reduction(input_type=[dt.int64, dt.int64], output_type=dt.int64)
+        def count_both(v1, v2):
+            return len(v1)
 
     tm.assert_series_equal(
         count(t[order_by]).over(row_window).execute(),

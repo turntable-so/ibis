@@ -10,8 +10,6 @@ import ibis.common.exceptions as com
 
 # import the pandas execution module to register dispatched implementations of
 # execute_node that the dask backend will later override
-import ibis.expr.operations as ops
-import ibis.expr.schema as sch
 import ibis.expr.types as ir
 from ibis import util
 from ibis.backends import NoUrl
@@ -68,11 +66,7 @@ class Backend(BasePandasBackend, NoUrl):
     def version(self):
         return dask.__version__
 
-    def _validate_args(self, expr, limit, timecontext):
-        if timecontext is not None:
-            raise com.UnsupportedArgumentError(
-                "The Dask backend does not support timecontext"
-            )
+    def _validate_args(self, expr, limit):
         if limit != "default" and limit is not None:
             raise com.UnsupportedArgumentError(
                 "limit parameter to execute is not yet implemented in the "
@@ -88,11 +82,11 @@ class Backend(BasePandasBackend, NoUrl):
         expr: ir.Expr,
         params: dict | None = None,
         limit: int | None = None,
-        timecontext=None,
+        **kwargs,
     ):
         from ibis.backends.dask.executor import DaskExecutor
 
-        self._validate_args(expr, limit, timecontext)
+        self._validate_args(expr, limit)
         params = params or {}
         params = {k.op() if isinstance(k, ir.Expr) else k: v for k, v in params.items()}
 
@@ -103,12 +97,11 @@ class Backend(BasePandasBackend, NoUrl):
         expr: ir.Expr,
         params: Mapping[ir.Expr, object] | None = None,
         limit: str = "default",
-        timecontext=None,
         **kwargs,
     ):
         from ibis.backends.dask.executor import DaskExecutor
 
-        self._validate_args(expr, limit, timecontext)
+        self._validate_args(expr, limit)
         params = params or {}
         params = {k.op() if isinstance(k, ir.Expr) else k: v for k, v in params.items()}
 
@@ -172,11 +165,14 @@ class Backend(BasePandasBackend, NoUrl):
         self.dictionary[table_name] = df
         return self.table(table_name)
 
-    def table(self, name: str, schema: sch.Schema | None = None):
-        df = self.dictionary[name]
-        schema = schema or self.schemas.get(name, None)
-        schema = PandasData.infer_table(df.head(1), schema=schema)
-        return ops.DatabaseTable(name, schema, self).to_expr()
+    def get_schema(self, table_name, *, database=None):
+        try:
+            schema = self.schemas[table_name]
+        except KeyError:
+            df = self.dictionary[table_name]
+            self.schemas[table_name] = schema = PandasData.infer_table(df.head(1))
+
+        return schema
 
     def _convert_object(self, obj) -> dd.DataFrame:
         if isinstance(obj, dd.DataFrame):

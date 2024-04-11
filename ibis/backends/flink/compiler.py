@@ -8,7 +8,7 @@ import sqlglot.expressions as sge
 import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
-from ibis.backends.sql.compiler import NULL, STAR, SQLGlotCompiler, paren
+from ibis.backends.sql.compiler import NULL, STAR, SQLGlotCompiler
 from ibis.backends.sql.datatypes import FlinkType
 from ibis.backends.sql.dialects import Flink
 from ibis.backends.sql.rewrites import (
@@ -17,6 +17,7 @@ from ibis.backends.sql.rewrites import (
     exclude_unsupported_window_frame_from_row_number,
     rewrite_sample_as_filter,
 )
+from ibis.expr.rewrites import rewrite_stringslice
 
 
 class FlinkCompiler(SQLGlotCompiler):
@@ -28,6 +29,7 @@ class FlinkCompiler(SQLGlotCompiler):
         exclude_unsupported_window_frame_from_row_number,
         exclude_unsupported_window_frame_from_ops,
         exclude_unsupported_window_frame_from_rank,
+        rewrite_stringslice,
         *SQLGlotCompiler.rewrites,
     )
 
@@ -35,7 +37,6 @@ class FlinkCompiler(SQLGlotCompiler):
         (
             ops.AnalyticVectorizedUDF,
             ops.ApproxMedian,
-            ops.Arbitrary,
             ops.ArgMax,
             ops.ArgMin,
             ops.ArrayCollect,
@@ -302,7 +303,7 @@ class FlinkCompiler(SQLGlotCompiler):
     def visit_MapGet(self, op, *, arg, key, default):
         if default is NULL:
             default = self.cast(default, op.dtype)
-        return self.f.coalesce(arg[key], default)
+        return self.f.coalesce(arg[self.cast(key, op.arg.dtype.key_type)], default)
 
     def visit_ArraySlice(self, op, *, arg, start, stop):
         args = [arg, self.if_(start >= 0, start + 1, start)]
@@ -455,6 +456,9 @@ class FlinkCompiler(SQLGlotCompiler):
     def visit_TimestampNow(self, op):
         return self.v.current_timestamp
 
+    def visit_DateNow(self, op):
+        return self.v.current_date
+
     def visit_TimestampBucket(self, op, *, arg, interval, offset):
         unit = op.interval.dtype.unit.name
         unit_var = self.v[unit]
@@ -467,12 +471,12 @@ class FlinkCompiler(SQLGlotCompiler):
         bucket_width = op.interval.value
         unit_func = self.f["dayofmonth" if unit.upper() == "DAY" else unit]
 
-        arg = self.f.anon.timestampadd(unit_var, -paren(offset), arg)
+        arg = self.f.anon.timestampadd(unit_var, -sge.paren(offset, copy=False), arg)
         mod = unit_func(arg) % bucket_width
 
         return self.f.anon.timestampadd(
             unit_var,
-            -paren(mod) + offset,
+            -sge.paren(mod, copy=False) + offset,
             self.v[f"FLOOR({arg.sql(self.dialect)} TO {unit_var.sql(self.dialect)})"],
         )
 
@@ -543,7 +547,11 @@ class FlinkCompiler(SQLGlotCompiler):
         return self.f.count(sge.Distinct(expressions=[arg]))
 
     def visit_MapContains(self, op: ops.MapContains, *, arg, key):
-        return self.f.array_contains(self.f.map_keys(arg), key)
+        key_type = op.arg.dtype.key_type
+        return self.f.array_contains(
+            self.cast(self.f.map_keys(arg), dt.Array(value_type=key_type)),
+            self.cast(key, key_type),
+        )
 
     def visit_Map(self, op: ops.Map, *, keys, values):
         return self.cast(self.f.map_from_arrays(keys, values), op.dtype)
@@ -559,3 +567,6 @@ class FlinkCompiler(SQLGlotCompiler):
         values = self.f.array_concat(left_values, right_values)
 
         return self.cast(self.f.map_from_arrays(keys, values), op.dtype)
+
+    def visit_StructColumn(self, op, *, names, values):
+        return self.cast(sge.Struct(expressions=list(values)), op.dtype)

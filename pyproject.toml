@@ -47,7 +47,7 @@ pyarrow-hotfix = ">=0.4,<1"
 python-dateutil = ">=2.8.2,<3"
 pytz = ">=2022.7"
 rich = ">=12.4.4,<14"
-sqlglot = ">=19.3.0,<=20.11"
+sqlglot = ">=22.5,<23.1"
 toolz = ">=0.11,<1"
 typing-extensions = ">=4.3.0,<5"
 black = { version = ">=22.1.0,<25", optional = true }
@@ -56,7 +56,7 @@ clickhouse-connect = { version = ">=0.5.23,<1", optional = true, extras = [
   "numpy",
   "pandas",
 ] }
-dask = { version = ">=2022.9.1", optional = true, extras = [
+dask = { version = ">=2022.9.1,<2024.3.0", optional = true, extras = [
   "array",
   "dataframe",
 ] }
@@ -72,7 +72,8 @@ impyla = { version = ">=0.17,<1", optional = true }
 oracledb = { version = ">=1.3.1,<3", optional = true }
 packaging = { version = ">=21.3,<25", optional = true }
 pins = { version = ">=0.8.3,<1", extras = ["gcs"], optional = true }
-polars = { version = ">=0.19.3,<1", optional = true }
+fsspec = { version = "<2024.3.0", optional = true }
+polars = { version = ">=0.20.17,<1", optional = true }
 psycopg2 = { version = ">=2.8.4,<3", optional = true }
 pydata-google-auth = { version = ">=1.4.0,<2", optional = true }
 # we don't use sqlalchemy, but pydruid inadvertently requires it,
@@ -112,7 +113,7 @@ packaging = ">=21.3,<25"
 pytest = ">=8.0.2,<9"
 pytest-benchmark = ">=3.4.1,<5"
 pytest-clarity = ">=1.0.1,<2"
-pytest-cov = ">=3.0.0,<5"
+pytest-cov = ">=3.0.0,<6"
 pytest-httpserver = ">=1.0.5,<2"
 pytest-mock = ">=3.6.1,<4"
 pytest-randomly = ">=3.10.1,<4"
@@ -126,7 +127,7 @@ tomli = ">=2.0.1,<3"
 altair = { version = ">=5.0.1,<6", python = ">=3.10,<3.13" }
 distributed = { version = ">=2022.9.1", python = ">=3.10,<3.13" }
 ipykernel = { version = ">=6.25.1,<7", python = ">=3.10,<3.13" }
-itables = { version = ">=1.6.3,<1.7", python = ">=3.10,<3.13" }
+itables = { version = ">=1.6.3,<2.1", python = ">=3.10,<3.13" }
 nbclient = { version = ">=0.8.0,<1", python = ">=3.10,<3.13" }
 plotly = { version = ">=5.16.1,<6", python = ">=3.10,<3.13" }
 plotnine = { version = ">=0.12.2,<1", python = ">=3.10,<3.13" }
@@ -139,36 +140,6 @@ leafmap = { version = ">=0.29.6,<0.31", python = ">=3.10,<3.13" }
 lonboard = { version = "==0.4.0", python = ">=3.10,<3.13" }
 
 [tool.poetry.extras]
-# generate the `all` extra using nix run '.#gen-all-extras'
-all = [
-  "black",
-  "clickhouse-connect",
-  "dask",
-  "datafusion",
-  "db-dtypes",
-  "deltalake",
-  "duckdb",
-  "geopandas",
-  "google-cloud-bigquery",
-  "google-cloud-bigquery-storage",
-  "graphviz",
-  "impyla",
-  "oracledb",
-  "packaging",
-  "pins",
-  "polars",
-  "psycopg2",
-  "pydata-google-auth",
-  "pydruid",
-  "pyexasol",
-  "pymysql",
-  "pyodbc",
-  "pyspark",
-  "regex",
-  "shapely",
-  "snowflake-connector-python",
-  "trino",
-]
 bigquery = [
   "db-dtypes",
   "google-cloud-bigquery",
@@ -182,7 +153,6 @@ druid = ["pydruid"]
 duckdb = ["duckdb"]
 exasol = ["pyexasol"]
 flink = []
-geospatial = ["geopandas", "shapely"]
 impala = ["impyla"]
 mssql = ["pyodbc"]
 mysql = ["pymysql"]
@@ -191,7 +161,7 @@ pandas = ["regex"]
 polars = ["polars", "packaging"]
 postgres = ["psycopg2"]
 pyspark = ["pyspark", "packaging"]
-snowflake = ["snowflake-connector-python", "packaging"]
+snowflake = ["snowflake-connector-python"]
 sqlite = ["regex"]
 risingwave = ["psycopg2"]
 trino = ["trino"]
@@ -199,7 +169,8 @@ trino = ["trino"]
 visualization = ["graphviz"]
 decompiler = ["black"]
 deltalake = ["deltalake"]
-examples = ["pins"]
+examples = ["pins", "fsspec"]
+geospatial = ["geopandas", "shapely"]
 
 [tool.poetry.plugins."ibis.backends"]
 bigquery = "ibis.backends.bigquery"

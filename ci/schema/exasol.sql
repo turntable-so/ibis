@@ -48,7 +48,7 @@ CREATE OR REPLACE TABLE EXASOL."awards_players"
     "yearID"   BIGINT,
     "lgID"     VARCHAR(256),
     "tie"      VARCHAR(256),
-    "notest"   VARCHAR(256)
+    "notes"   VARCHAR(256)
 );
 
 CREATE OR REPLACE TABLE EXASOL."functional_alltypes"
@@ -87,3 +87,6 @@ INSERT INTO "win" VALUES
     ('a', 2, 0),
     ('a', 3, 1),
     ('a', 4, 1);
+
+CREATE OR REPLACE TABLE EXASOL."topk" ("x" BIGINT);
+INSERT INTO "topk" VALUES (1), (1), (NULL);

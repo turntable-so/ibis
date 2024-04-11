@@ -20,6 +20,25 @@ import ibis.common.exceptions as com
 
 @public
 class ArrayValue(Value):
+    """An Array is a variable-length sequence of values of a single type.
+
+    Examples
+    --------
+    >>> import ibis
+    >>> ibis.options.interactive = True
+    >>> ibis.memtable({"a": [[1, None, 3], [4], [], None]})
+    ┏━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃ a                    ┃
+    ┡━━━━━━━━━━━━━━━━━━━━━━┩
+    │ array<int64>         │
+    ├──────────────────────┤
+    │ [1, None, ... +1]    │
+    │ [4]                  │
+    │ []                   │
+    │ NULL                 │
+    └──────────────────────┘
+    """
+
     def length(self) -> ir.IntegerValue:
         """Compute the length of an array.
 
@@ -740,18 +759,7 @@ class ArrayValue(Value):
         --------
         >>> import ibis
         >>> ibis.options.interactive = True
-        >>> t = ibis.memtable({"arr": [[1, 3, 3], [], [42, 42], None]})
-        >>> t
-        ┏━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ arr                  ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<int64>         │
-        ├──────────────────────┤
-        │ [1, 3, ... +1]       │
-        │ []                   │
-        │ [42, 42]             │
-        │ NULL                 │
-        └──────────────────────┘
+        >>> t = ibis.memtable({"arr": [[1, 3, 3], [], [42, 42, None], None]})
         >>> t.arr.unique()
         ┏━━━━━━━━━━━━━━━━━━━━━━┓
         ┃ ArrayDistinct(arr)   ┃
@@ -760,7 +768,7 @@ class ArrayValue(Value):
         ├──────────────────────┤
         │ [3, 1]               │
         │ []                   │
-        │ [42]                 │
+        │ [42, None]           │
         │ NULL                 │
         └──────────────────────┘
         """
@@ -910,13 +918,19 @@ class ArrayValue(Value):
         -------
         Array
             Array of structs where each struct field is an element of each input
-            array.
+            array. The fields are named `f1`, `f2`, `f3`, etc.
 
         Examples
         --------
         >>> import ibis
         >>> ibis.options.interactive = True
-        >>> t = ibis.memtable({"numbers": [[3, 2], [], None], "strings": [["a", "c"], None, ["e"]]})
+        >>> ibis.options.repr.interactive.max_depth = 2
+        >>> t = ibis.memtable(
+        ...     {
+        ...         "numbers": [[3, 2], [6, 7], [], None],
+        ...         "strings": [["a", "c"], ["d"], [], ["x", "y"]],
+        ...     }
+        ... )
         >>> t
         ┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┓
         ┃ numbers              ┃ strings              ┃
@@ -924,30 +938,21 @@ class ArrayValue(Value):
         │ array<int64>         │ array<string>        │
         ├──────────────────────┼──────────────────────┤
         │ [3, 2]               │ ['a', 'c']           │
-        │ []                   │ NULL                 │
-        │ NULL                 │ ['e']                │
+        │ [6, 7]               │ ['d']                │
+        │ []                   │ []                   │
+        │ NULL                 │ ['x', 'y']           │
         └──────────────────────┴──────────────────────┘
-        >>> expr = t.numbers.zip(t.strings)
-        >>> expr
-        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayZip()                           ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<struct<f1: int64, f2: string>> │
-        ├──────────────────────────────────────┤
-        │ [{...}, {...}]                       │
-        │ []                                   │
-        │ [{...}]                              │
-        └──────────────────────────────────────┘
-        >>> expr.unnest()
-        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayZip()                    ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-        │ struct<f1: int64, f2: string> │
-        ├───────────────────────────────┤
-        │ {'f1': 3, 'f2': 'a'}          │
-        │ {'f1': 2, 'f2': 'c'}          │
-        │ {'f1': None, 'f2': 'e'}       │
-        └───────────────────────────────┘
+        >>> t.numbers.zip(t.strings)
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayZip()                                    ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<struct<f1: int64, f2: string>>          │
+        ├───────────────────────────────────────────────┤
+        │ [{'f1': 3, 'f2': 'a'}, {'f1': 2, 'f2': 'c'}]  │
+        │ [{'f1': 6, 'f2': 'd'}, {'f1': 7, 'f2': None}] │
+        │ []                                            │
+        │ NULL                                          │
+        └───────────────────────────────────────────────┘
         """
 
         return ops.ArrayZip((self, other, *others)).to_expr()
@@ -1065,10 +1070,14 @@ class ArrayColumn(Column, ArrayValue):
 def array(values: Iterable[V]) -> ArrayValue:
     """Create an array expression.
 
+    If any values are [column expressions](../concepts/datatypes.qmd) the
+    result will be a column. Otherwise the result will be a
+    [scalar](../concepts/datatypes.qmd).
+
     Parameters
     ----------
     values
-        An iterable of Ibis expressions or a list of Python literals
+        An iterable of Ibis expressions or Python literals
 
     Returns
     -------
@@ -1076,7 +1085,7 @@ def array(values: Iterable[V]) -> ArrayValue:
 
     Examples
     --------
-    Create an array from scalar values
+    Create an array scalar from scalar values
 
     >>> import ibis
     >>> ibis.options.interactive = True

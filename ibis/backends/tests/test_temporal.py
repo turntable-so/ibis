@@ -81,16 +81,7 @@ def test_date_extract(backend, alltypes, df, attr, expr_fn):
         ),
         "hour",
         "minute",
-        param(
-            "second",
-            marks=[
-                pytest.mark.broken(
-                    ["exasol"],
-                    raises=AssertionError,
-                    reason="seems like exasol might be rounding",
-                )
-            ],
-        ),
+        "second",
     ],
 )
 @pytest.mark.notimpl(
@@ -123,7 +114,7 @@ def test_timestamp_extract(backend, alltypes, df, attr):
             id="millisecond",
             marks=[
                 pytest.mark.notimpl(
-                    ["druid", "oracle", "exasol"], raises=com.OperationNotDefinedError
+                    ["druid", "oracle"], raises=com.OperationNotDefinedError
                 ),
             ],
         ),
@@ -199,7 +190,6 @@ def test_timestamp_extract_microseconds(backend, alltypes, df):
     reason="'StringColumn' object has no attribute 'millisecond'",
 )
 @pytest.mark.broken(["sqlite"], raises=AssertionError)
-@pytest.mark.notimpl(["exasol"], raises=com.OperationNotDefinedError)
 def test_timestamp_extract_milliseconds(backend, alltypes, df):
     expr = alltypes.timestamp_col.millisecond().name("millisecond")
     result = expr.execute()
@@ -220,7 +210,6 @@ def test_timestamp_extract_milliseconds(backend, alltypes, df):
     raises=GoogleBadRequest,
     reason="UNIX_SECONDS does not support DATETIME arguments",
 )
-@pytest.mark.notimpl(["exasol"], raises=com.OperationNotDefinedError)
 @pytest.mark.broken(
     ["dask", "pandas"],
     raises=AssertionError,
@@ -1140,11 +1129,11 @@ no_mixed_timestamp_comparisons = [
         raises=TypeError,
         reason="Invalid comparison between dtype=datetime64[ns, UTC] and datetime",
     ),
-    pytest.mark.never(
-        ["duckdb"],
+    pytest.mark.xfail_version(
+        duckdb=["duckdb>=0.10"],
         raises=DuckDBBinderException,
         # perhaps we should consider disallowing this in ibis as well
-        reason="DuckDB doesn't allow comparing timestamp with and without timezones",
+        reason="DuckDB doesn't allow comparing timestamp with and without timezones starting at version 0.10",
     ),
 ]
 
@@ -1247,7 +1236,7 @@ def test_interval_add_cast_column(backend, alltypes, df):
         ),
         param(
             lambda t: (
-                t.mutate(suffix="%d")
+                t.mutate(suffix=ibis.literal("%d"))
                 .select(formatted=lambda t: t.timestamp_col.strftime("%Y%m" + t.suffix))
                 .formatted
             ),
@@ -1555,19 +1544,14 @@ def test_day_of_week_column_group_by(
     backend.assert_frame_equal(result, expected, check_dtype=False)
 
 
-@pytest.mark.notimpl(
-    ["datafusion", "druid", "oracle"], raises=com.OperationNotDefinedError
-)
+@pytest.mark.notimpl(["datafusion"], raises=com.OperationNotDefinedError)
 def test_now(con):
     expr = ibis.now()
     result = con.execute(expr.name("tmp"))
     assert isinstance(result, datetime.datetime)
 
 
-@pytest.mark.notimpl(["polars"], reason="assert 1 == 5", raises=AssertionError)
-@pytest.mark.notimpl(
-    ["datafusion", "druid", "oracle"], raises=com.OperationNotDefinedError
-)
+@pytest.mark.notimpl(["datafusion"], raises=com.OperationNotDefinedError)
 def test_now_from_projection(alltypes):
     n = 2
     expr = alltypes.select(now=ibis.now()).limit(n)
@@ -1576,6 +1560,20 @@ def test_now_from_projection(alltypes):
     assert len(result) == n
     assert ts.nunique() == 1
     assert not pd.isna(ts.iat[0])
+
+
+def test_today(con):
+    result = con.execute(ibis.today())
+    assert isinstance(result, datetime.date)
+
+
+def test_today_from_projection(alltypes):
+    expr = alltypes.select(today=ibis.today()).limit(2).today
+    ts = expr.execute()
+    assert len(ts) == 2
+    assert ts.nunique() == 1
+    years = expr.year().execute()
+    assert years.nunique() == 1
 
 
 DATE_BACKEND_TYPES = {
@@ -1592,17 +1590,14 @@ DATE_BACKEND_TYPES = {
 }
 
 
-@pytest.mark.notimpl(["pandas", "dask", "exasol"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(
+    ["pandas", "dask", "exasol", "risingwave"], raises=com.OperationNotDefinedError
+)
 @pytest.mark.notimpl(
     ["druid"], raises=PyDruidProgrammingError, reason="SQL parse failed"
 )
 @pytest.mark.notimpl(
     ["oracle"], raises=OracleDatabaseError, reason="ORA-00936 missing expression"
-)
-@pytest.mark.notimpl(
-    ["risingwave"],
-    raises=com.OperationNotDefinedError,
-    reason="function make_date(integer, integer, integer) does not exist",
 )
 def test_date_literal(con, backend):
     expr = ibis.date(2022, 2, 4)
@@ -1633,11 +1628,6 @@ TIMESTAMP_BACKEND_TYPES = {
     raises=com.OperationNotDefinedError,
 )
 @pytest.mark.notyet(["impala"], raises=com.OperationNotDefinedError)
-@pytest.mark.notimpl(
-    ["risingwave"],
-    raises=PsycoPg2InternalError,
-    reason="function make_timestamp(integer, integer, integer, integer, integer, integer) does not exist",
-)
 def test_timestamp_literal(con, backend):
     expr = ibis.timestamp(2022, 2, 4, 16, 20, 0)
     result = con.execute(expr)
@@ -1691,11 +1681,6 @@ def test_timestamp_literal(con, backend):
         "<NUMERIC>, <NUMERIC>, <NUMERIC>, <NUMERIC>)"
     ),
 )
-@pytest.mark.notimpl(
-    ["risingwave"],
-    raises=PsycoPg2InternalError,
-    reason="function make_timestamp(integer, integer, integer, integer, integer, integer) does not exist",
-)
 def test_timestamp_with_timezone_literal(con, timezone, expected):
     expr = ibis.timestamp(2022, 2, 4, 16, 20, 0).cast(dt.Timestamp(timezone=timezone))
     result = con.execute(expr)
@@ -1724,11 +1709,6 @@ TIME_BACKEND_TYPES = {
     ["clickhouse", "impala", "exasol"], raises=com.OperationNotDefinedError
 )
 @pytest.mark.notimpl(["druid"], raises=com.OperationNotDefinedError)
-@pytest.mark.notimpl(
-    ["risingwave"],
-    raises=PsycoPg2InternalError,
-    reason="function make_time(integer, integer, integer) does not exist",
-)
 def test_time_literal(con, backend):
     expr = ibis.time(16, 20, 0)
     result = con.execute(expr)
@@ -1847,7 +1827,9 @@ def test_interval_literal(con, backend):
         assert con.execute(expr.typeof()) == INTERVAL_BACKEND_TYPES[backend_name]
 
 
-@pytest.mark.notimpl(["pandas", "dask", "exasol"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(
+    ["pandas", "dask", "exasol", "risingwave"], raises=com.OperationNotDefinedError
+)
 @pytest.mark.broken(
     ["druid"],
     raises=AttributeError,
@@ -1855,11 +1837,6 @@ def test_interval_literal(con, backend):
 )
 @pytest.mark.broken(
     ["oracle"], raises=OracleDatabaseError, reason="ORA-00936: missing expression"
-)
-@pytest.mark.notimpl(
-    ["risingwave"],
-    raises=com.OperationNotDefinedError,
-    reason="function make_date(integer, integer, integer) does not exist",
 )
 def test_date_column_from_ymd(backend, con, alltypes, df):
     c = alltypes.timestamp_col
@@ -1881,11 +1858,6 @@ def test_date_column_from_ymd(backend, con, alltypes, df):
     reason="StringColumn' object has no attribute 'year'",
 )
 @pytest.mark.notyet(["impala", "oracle"], raises=com.OperationNotDefinedError)
-@pytest.mark.notimpl(
-    ["risingwave"],
-    raises=PsycoPg2InternalError,
-    reason="function make_timestamp(smallint, smallint, smallint, smallint, smallint, smallint) does not exist",
-)
 def test_timestamp_column_from_ymdhms(backend, con, alltypes, df):
     c = alltypes.timestamp_col
     expr = ibis.timestamp(
@@ -1932,7 +1904,6 @@ def test_date_column_from_iso(backend, con, alltypes, df):
 
 
 @pytest.mark.notimpl(["druid", "oracle"], raises=com.OperationNotDefinedError)
-@pytest.mark.notimpl(["exasol"], raises=com.OperationNotDefinedError)
 def test_timestamp_extract_milliseconds_with_big_value(con):
     timestamp = ibis.timestamp("2021-01-01 01:30:59.333456")
     millis = timestamp.millisecond()

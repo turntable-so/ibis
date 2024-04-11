@@ -11,18 +11,13 @@ import sqlglot.expressions as sge
 import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
-from ibis.backends.sql.compiler import (
-    FALSE,
-    NULL,
-    STAR,
-    SQLGlotCompiler,
-    paren,
-)
+from ibis.backends.sql.compiler import FALSE, NULL, STAR, SQLGlotCompiler
 from ibis.backends.sql.datatypes import DataFusionType
 from ibis.backends.sql.dialects import DataFusion
 from ibis.backends.sql.rewrites import rewrite_sample_as_filter
 from ibis.common.temporal import IntervalUnit, TimestampUnit
 from ibis.expr.operations.udf import InputType
+from ibis.expr.rewrites import rewrite_stringslice
 from ibis.formats.pyarrow import PyArrowType
 
 
@@ -31,20 +26,20 @@ class DataFusionCompiler(SQLGlotCompiler):
 
     dialect = DataFusion
     type_mapper = DataFusionType
-    rewrites = (rewrite_sample_as_filter, *SQLGlotCompiler.rewrites)
+    rewrites = (
+        rewrite_sample_as_filter,
+        rewrite_stringslice,
+        *SQLGlotCompiler.rewrites,
+    )
 
     UNSUPPORTED_OPERATIONS = frozenset(
         (
-            ops.Arbitrary,
             ops.ArgMax,
             ops.ArgMin,
             ops.ArrayDistinct,
             ops.ArrayFilter,
             ops.ArrayFlatten,
-            ops.ArrayIntersect,
             ops.ArrayMap,
-            ops.ArraySort,
-            ops.ArrayUnion,
             ops.ArrayZip,
             ops.BitwiseNot,
             ops.Clip,
@@ -64,9 +59,7 @@ class DataFusionCompiler(SQLGlotCompiler):
             ops.TimestampNow,
             ops.TypeOf,
             ops.Unnest,
-            ops.EndsWith,
             ops.StringToTimestamp,
-            ops.Levenshtein,
         )
     )
 
@@ -84,6 +77,9 @@ class DataFusionCompiler(SQLGlotCompiler):
         ops.StringLength: "character_length",
         ops.RandomUUID: "uuid",
         ops.RegexSplit: "regex_split",
+        ops.EndsWith: "ends_with",
+        ops.ArrayIntersect: "array_intersect",
+        ops.ArrayUnion: "array_union",
     }
 
     def _aggregate(self, funcname: str, *args, where):
@@ -152,11 +148,11 @@ class DataFusionCompiler(SQLGlotCompiler):
             return self.f.arrow_cast(arg, f"{PyArrowType.from_ibis(to)}".capitalize())
         return self.cast(arg, to)
 
-    def visit_Substring(self, op, *, arg, start, length):
-        start = self.if_(start < 0, self.f.length(arg) + start + 1, start + 1)
-        if length is not None:
-            return self.f.substr(arg, start, length)
-        return self.f.substr(arg, start)
+    def visit_Arbitrary(self, op, *, arg, where):
+        cond = ~arg.is_(None)
+        if where is not None:
+            cond &= where
+        return self.agg.first_value(arg, where=cond)
 
     def visit_Variance(self, op, *, arg, how, where):
         if how == "sample":
@@ -261,7 +257,7 @@ class DataFusionCompiler(SQLGlotCompiler):
 
     def visit_DayOfWeekName(self, op, *, arg):
         return sg.exp.Case(
-            this=paren(self.f.date_part("dow", arg) + 6) % 7,
+            this=sge.paren(self.f.date_part("dow", arg) + 6, copy=False) % 7,
             ifs=list(starmap(self.if_, enumerate(calendar.day_name))),
         )
 
@@ -438,7 +434,7 @@ class DataFusionCompiler(SQLGlotCompiler):
     def visit_Aggregate(self, op, *, parent, groups, metrics):
         """Support `GROUP BY` expressions in `SELECT` since DataFusion does not."""
         quoted = self.quoted
-        metrics = tuple(starmap(self._dedup_name, metrics.items()))
+        metrics = tuple(self._cleanup_names(metrics))
 
         if groups:
             # datafusion doesn't support count distinct aggregations alongside
@@ -459,7 +455,7 @@ class DataFusionCompiler(SQLGlotCompiler):
                 )
             )
             table = (
-                sg.select(*cols, *starmap(self._dedup_name, groups.items()))
+                sg.select(*cols, *self._cleanup_names(groups))
                 .from_(parent)
                 .subquery(parent.alias)
             )

@@ -943,6 +943,19 @@ def test_simple_math_functions_columns(
                     reason="function log10(numeric, numeric) does not exist",
                 ),
             ],
+            id="log2-explicit",
+        ),
+        param(
+            lambda t: t.double_col.add(1).log2(),
+            lambda t: np.log2(t.double_col + 1),
+            marks=[
+                pytest.mark.notimpl(["druid"], raises=PyDruidProgrammingError),
+                pytest.mark.notimpl(
+                    ["risingwave"],
+                    raises=PsycoPg2InternalError,
+                    reason="function log10(numeric, numeric) does not exist",
+                ),
+            ],
             id="log2",
         ),
         param(
@@ -1402,7 +1415,6 @@ flink_no_bitwise = pytest.mark.notyet(
         param(lambda t: t.int_col, lambda _: 3, id="col_scalar"),
     ],
 )
-@pytest.mark.notimpl(["exasol"], raises=ExaQueryError)
 @flink_no_bitwise
 def test_bitwise_columns(backend, con, alltypes, df, op, left_fn, right_fn):
     expr = op(left_fn(alltypes), right_fn(alltypes)).name("tmp")
@@ -1439,7 +1451,6 @@ def test_bitwise_columns(backend, con, alltypes, df, op, left_fn, right_fn):
     ],
 )
 @pytest.mark.notimpl(["oracle"], raises=OracleDatabaseError)
-@pytest.mark.notimpl(["exasol"], raises=ExaQueryError)
 @flink_no_bitwise
 def test_bitwise_shift(backend, alltypes, df, op, left_fn, right_fn):
     expr = op(left_fn(alltypes), right_fn(alltypes)).name("tmp")
@@ -1481,7 +1492,6 @@ def test_bitwise_shift(backend, alltypes, df, op, left_fn, right_fn):
     ("left", "right"),
     [param(4, L(2), id="int_col"), param(L(4), 2, id="col_int")],
 )
-@pytest.mark.notimpl(["exasol"], raises=ExaQueryError)
 @flink_no_bitwise
 def test_bitwise_scalars(con, op, left, right):
     expr = op(left, right)

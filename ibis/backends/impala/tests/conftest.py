@@ -113,6 +113,12 @@ class TestConf(BackendTest):
                 ('a', 4, 1)
             """
         )
+
+        con.drop_table("topk", database="ibis_testing", force=True)
+        con.create_table(
+            "topk", schema=ibis.schema({"x": "int64"}), database="ibis_testing"
+        )
+        con.raw_sql("INSERT INTO ibis_testing.topk VALUES (1), (1), (NULL)")
         assert con.list_tables(database="ibis_testing")
 
     def postload(self, **kw):

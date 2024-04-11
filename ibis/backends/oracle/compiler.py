@@ -20,6 +20,7 @@ from ibis.backends.sql.rewrites import (
     rewrite_empty_order_by_window,
     rewrite_sample_as_filter,
 )
+from ibis.expr.rewrites import rewrite_stringslice
 
 
 @public
@@ -33,6 +34,7 @@ class OracleCompiler(SQLGlotCompiler):
         exclude_unsupported_window_frame_from_ops,
         rewrite_empty_order_by_window,
         rewrite_sample_as_filter,
+        rewrite_stringslice,
         replace_log2,
         replace_log10,
         *SQLGlotCompiler.rewrites,
@@ -49,7 +51,6 @@ class OracleCompiler(SQLGlotCompiler):
 
     UNSUPPORTED_OPERATIONS = frozenset(
         (
-            ops.Arbitrary,
             ops.ArgMax,
             ops.ArgMin,
             ops.ArrayCollect,
@@ -69,7 +70,6 @@ class OracleCompiler(SQLGlotCompiler):
             ops.TimeDelta,
             ops.DateDelta,
             ops.TimestampDelta,
-            ops.TimestampNow,
             ops.TimestampFromYMDHMS,
             ops.TimeFromHMS,
             ops.IntervalFromInteger,
@@ -238,7 +238,7 @@ class OracleCompiler(SQLGlotCompiler):
         return self.visit_node(ops.Pi()) * arg / 180
 
     def visit_Modulus(self, op, *, left, right):
-        return self.f.mod(left, right)
+        return self.f.anon.mod(left, right)
 
     def visit_Levenshtein(self, op, *, left, right):
         # Not using FuncGen here because of dotted function call
@@ -368,7 +368,7 @@ class OracleCompiler(SQLGlotCompiler):
 
     visit_TimestampTruncate = visit_DateTruncate
 
-    def visit_Window(self, op, *, how, func, start, end, group_by, order_by):
+    def visit_WindowFunction(self, op, *, how, func, start, end, group_by, order_by):
         # Oracle has two (more?) types of analytic functions you can use inside OVER.
         #
         # The first group accepts an "analytic clause" which is decomposed into the

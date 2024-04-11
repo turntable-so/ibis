@@ -16,6 +16,7 @@ from ibis.backends.sql.rewrites import (
     rewrite_empty_order_by_window,
     rewrite_sample_as_filter,
 )
+from ibis.expr.rewrites import rewrite_stringslice
 
 
 class ExasolCompiler(SQLGlotCompiler):
@@ -29,6 +30,7 @@ class ExasolCompiler(SQLGlotCompiler):
         exclude_unsupported_window_frame_from_rank,
         exclude_unsupported_window_frame_from_row_number,
         rewrite_empty_order_by_window,
+        rewrite_stringslice,
         *SQLGlotCompiler.rewrites,
     )
 
@@ -36,7 +38,6 @@ class ExasolCompiler(SQLGlotCompiler):
         (
             ops.AnalyticVectorizedUDF,
             ops.ApproxMedian,
-            ops.Arbitrary,
             ops.ArgMax,
             ops.ArgMin,
             ops.ArrayCollect,
@@ -57,7 +58,6 @@ class ExasolCompiler(SQLGlotCompiler):
             ops.DateFromYMD,
             ops.DayOfWeekIndex,
             ops.ElementWiseVectorizedUDF,
-            ops.ExtractEpochSeconds,
             ops.First,
             ops.IntervalFromInteger,
             ops.IsInf,
@@ -92,7 +92,6 @@ class ExasolCompiler(SQLGlotCompiler):
 
     SIMPLE_OPS = {
         ops.Log10: "log10",
-        ops.Modulus: "mod",
         ops.All: "min",
         ops.Any: "max",
     }
@@ -118,6 +117,9 @@ class ExasolCompiler(SQLGlotCompiler):
     def _gen_valid_name(name: str) -> str:
         """Exasol does not allow dots in quoted column names."""
         return name.replace(".", "_")
+
+    def visit_Modulus(self, op, *, left, right):
+        return self.f.anon.mod(left, right)
 
     def visit_NonNullLiteral(self, op, *, value, dtype):
         if dtype.is_date():
@@ -152,7 +154,20 @@ class ExasolCompiler(SQLGlotCompiler):
         return self.f.locate(needle, haystack) > 0
 
     def visit_ExtractSecond(self, op, *, arg):
-        return self.f.floor(self.cast(self.f.extract(self.v.second, arg), op.dtype))
+        return self.cast(self.f.floor(self.f.extract(self.v.second, arg)), op.dtype)
+
+    def visit_ExtractMillisecond(self, op, *, arg):
+        return self.cast(
+            (
+                self.f.extract(self.v.second, arg)
+                - self.f.floor(self.f.extract(self.v.second, arg))
+            )
+            * 1000,
+            op.dtype,
+        )
+
+    def visit_ExtractEpochSeconds(self, op, *, arg):
+        return self.f.floor(self.f.posix_time(self.cast(arg, dt.timestamp)))
 
     def visit_StringConcat(self, op, *, arg):
         any_args_null = (a.is_(NULL) for a in arg)
@@ -203,3 +218,33 @@ class ExasolCompiler(SQLGlotCompiler):
 
     def visit_ExtractQuarter(self, op, *, arg):
         return self.cast(self.f.to_char(arg, "Q"), op.dtype)
+
+    def visit_HexDigest(self, op, *, arg, how):
+        ibis2exasol = {
+            "md5": "hash_md5",
+            "sha1": "hash_sha[1]",
+            "sha256": "hash_sha256",
+            "sha512": "hash_sha512",
+        }
+        how = how.lower()
+        if how not in ibis2exasol:
+            raise com.UnsupportedOperationError(
+                f"Unsupported hashing algorithm ({how})"
+            )
+        func = self.f[ibis2exasol[how]]
+        return func(arg)
+
+    def visit_BitwiseLeftShift(self, op, *, left, right):
+        return self.cast(self.f.bit_lshift(left, right), op.dtype)
+
+    def visit_BitwiseRightShift(self, op, *, left, right):
+        return self.cast(self.f.bit_rshift(left, right), op.dtype)
+
+    def visit_BitwiseAnd(self, op, *, left, right):
+        return self.cast(self.f.bit_and(left, right), op.dtype)
+
+    def visit_BitwiseOr(self, op, *, left, right):
+        return self.cast(self.f.bit_or(left, right), op.dtype)
+
+    def visit_BitwiseXor(self, op, *, left, right):
+        return self.cast(self.f.bit_xor(left, right), op.dtype)

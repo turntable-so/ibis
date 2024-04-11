@@ -19,7 +19,12 @@ from packaging.version import parse as vparse
 import ibis
 import ibis.common.exceptions as com
 from ibis import util
-from ibis.backends import CanCreateDatabase, CanCreateSchema, _get_backend_names
+from ibis.backends import (
+    CanCreateCatalog,
+    CanCreateDatabase,
+    CanListSchema,
+    _get_backend_names,
+)
 from ibis.conftest import WINDOWS
 from ibis.util import promote_tuple
 
@@ -452,24 +457,32 @@ def con_no_data(backend_no_data):
 
 
 @pytest.fixture(scope="session")
-def con_create_database(con):
-    if isinstance(con, CanCreateDatabase):
-        return con
-    else:
-        pytest.skip(f"{con.name} backend cannot create databases")
-
-
-@pytest.fixture(scope="session")
-def con_create_schema(con):
-    if isinstance(con, CanCreateSchema):
+def con_list_schema(con):
+    if isinstance(con, CanListSchema):
         return con
     else:
         pytest.skip(f"{con.name} backend cannot create schemas")
 
 
 @pytest.fixture(scope="session")
-def con_create_database_schema(con):
-    if isinstance(con, CanCreateDatabase) and isinstance(con, CanCreateSchema):
+def con_create_catalog(con):
+    if isinstance(con, CanCreateCatalog):
+        return con
+    else:
+        pytest.skip(f"{con.name} backend cannot create databases")
+
+
+@pytest.fixture(scope="session")
+def con_create_database(con):
+    if isinstance(con, CanCreateDatabase):
+        return con
+    else:
+        pytest.skip(f"{con.name} backend cannot create schemas")
+
+
+@pytest.fixture(scope="session")
+def con_create_catalog_database(con):
+    if isinstance(con, CanCreateCatalog) and isinstance(con, CanCreateDatabase):
         return con
     else:
         pytest.skip(f"{con.name} backend cannot create both database and schemas")
@@ -712,3 +725,12 @@ def test_employee_data_2():
     )
 
     return df2
+
+
+@pytest.fixture
+def assert_sql(con, snapshot):
+    def checker(expr, file_name="out.sql"):
+        sql = con.compile(expr, pretty=True)
+        snapshot.assert_match(sql, file_name)
+
+    return checker

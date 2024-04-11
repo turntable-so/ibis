@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable, Sequence
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any
 
 from public import public
 
@@ -14,7 +14,7 @@ from ibis.common.deferred import Deferred, _, deferrable
 from ibis.common.grounds import Singleton
 from ibis.expr.rewrites import rewrite_window_input
 from ibis.expr.types.core import Expr, _binop, _FixedTextJupyterMixin
-from ibis.util import deprecated
+from ibis.util import deprecated, warn_deprecated
 
 if TYPE_CHECKING:
     import pandas as pd
@@ -723,7 +723,7 @@ class Value(Expr):
             A window function expression
 
         """
-        node = self.op()
+
         if window is None:
             window = ibis.window(
                 rows=rows,
@@ -734,17 +734,18 @@ class Value(Expr):
         elif not isinstance(window, bl.WindowBuilder):
             raise com.IbisTypeError("Unexpected window type: {window!r}")
 
+        node = self.op()
         if len(node.relations) == 0:
             table = None
         elif len(node.relations) == 1:
             (table,) = node.relations
+            table = table.to_expr()
         else:
             raise com.RelationError("Cannot use window with multiple tables")
 
         @deferrable
         def bind(table):
-            frame = window.bind(table)
-            winfunc = rewrite_window_input(node, frame)
+            winfunc = rewrite_window_input(node, window.bind(table))
             if winfunc == node:
                 raise com.IbisTypeError(
                     "No reduction or analytic function found to construct a window expression"
@@ -1823,41 +1824,43 @@ class Column(Value, _FixedTextJupyterMixin):
             raise com.IbisTypeError("TopK must depend on exactly one table.")
 
         table = table.to_expr()
+
         if by is None:
-            metric = self.count()
-        else:
-            (metric,) = bind(table, by)
+            by = lambda t: t.count()
+
+        (metric,) = bind(table, by)
 
         return table.aggregate(metric, by=[self]).order_by(metric.desc()).limit(k)
 
     def arbitrary(
-        self,
-        where: ir.BooleanValue | None = None,
-        how: Literal["first", "last", "heavy"] = "first",
+        self, where: ir.BooleanValue | None = None, how: Any = None
     ) -> Scalar:
         """Select an arbitrary value in a column.
+
+        Returns an arbitrary (nondeterministic, backend-specific) value from
+        the column. The value will be non-NULL, except if the column is empty
+        or all values are NULL.
 
         Parameters
         ----------
         where
             A filter expression
         how
-            The method to use for selecting the element.
-
-            * `"first"`: Select the first non-`NULL` element
-            * `"last"`: Select the last non-`NULL` element
-            * `"heavy"`: Select a frequently occurring value using the heavy
-              hitters algorithm. `"heavy"` is only supported by Clickhouse
-              backend.
+            DEPRECATED
 
         Returns
         -------
         Scalar
             An expression
         """
-        return ops.Arbitrary(
-            self, how=how, where=self._bind_reduction_filter(where)
-        ).to_expr()
+        if how is not None:
+            warn_deprecated(
+                name="how",
+                as_of="9.0",
+                removed_in="10.0",
+                instead="call `first` or `last` explicitly",
+            )
+        return ops.Arbitrary(self, where=self._bind_reduction_filter(where)).to_expr()
 
     def count(self, where: ir.BooleanValue | None = None) -> ir.IntegerScalar:
         """Compute the number of rows in an expression.

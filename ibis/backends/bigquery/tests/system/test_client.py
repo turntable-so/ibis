@@ -3,7 +3,6 @@ from __future__ import annotations
 import collections
 import datetime
 import decimal
-import itertools
 
 import pandas as pd
 import pandas.testing as tm
@@ -12,7 +11,6 @@ import pytz
 
 import ibis
 import ibis.expr.datatypes as dt
-import ibis.expr.operations as ops
 from ibis.backends.bigquery.client import bigquery_param
 from ibis.util import gen_name
 
@@ -35,8 +33,12 @@ def test_list_tables(con):
     assert set(tables) == {"functional_alltypes", "functional_alltypes_parted"}
 
 
+def test_current_catalog(con):
+    assert con.current_catalog == con.billing_project
+
+
 def test_current_database(con):
-    assert con.current_database == con.billing_project
+    assert con.current_database == con.dataset
 
 
 def test_array_collect(struct_table):
@@ -94,7 +96,7 @@ def test_cast_string_to_date(alltypes, df):
 def test_cast_float_to_int(alltypes, df):
     result = (alltypes.float_col - 2.55).cast("int64").to_pandas().sort_values()
     expected = (df.float_col - 2.55).astype("int64").sort_values()
-    tm.assert_series_equal(result, expected, check_names=False)
+    tm.assert_series_equal(result, expected, check_names=False, check_index=False)
 
 
 def test_has_partitions(alltypes, parted_alltypes, con):
@@ -112,8 +114,7 @@ def test_different_partition_col_name(monkeypatch, con):
     assert col in parted_alltypes.columns
 
 
-def test_subquery_scalar_params(alltypes, monkeypatch, snapshot):
-    monkeypatch.setattr(ops.ScalarParameter, "_counter", itertools.count())
+def test_subquery_scalar_params(alltypes):
     t = alltypes
     p = ibis.param("timestamp").name("my_param")
     expr = (
@@ -126,7 +127,7 @@ def test_subquery_scalar_params(alltypes, monkeypatch, snapshot):
         .name("count")
     )
     result = expr.compile(params={p: "20140101"})
-    snapshot.assert_match(result, "out.sql")
+    assert "datetime('2014-01-01T00:00:00')" in result
 
 
 def test_repr_struct_of_array_of_struct():
@@ -233,15 +234,16 @@ def test_exists_table_different_project(con):
     name = "co_daily_summary"
     dataset = "bigquery-public-data.epa_historical_air_quality"
 
-    assert name in con.list_tables(schema=dataset)
-    assert "foobar" not in con.list_tables(schema=dataset)
+    assert name in con.list_tables(database=dataset)
+    assert "foobar" not in con.list_tables(database=dataset)
 
 
 def test_multiple_project_queries(con, snapshot):
     so = con.table(
-        "posts_questions", database="bigquery-public-data", schema="stackoverflow"
+        "posts_questions",
+        database=("bigquery-public-data", "stackoverflow"),
     )
-    trips = con.table("trips", database="nyc-tlc", schema="yellow")
+    trips = con.table("trips", database="nyc-tlc.yellow")
     join = so.join(trips, so.tags == trips.rate_code)[[so.title]]
     result = join.compile()
     snapshot.assert_match(result, "out.sql")
@@ -249,9 +251,9 @@ def test_multiple_project_queries(con, snapshot):
 
 def test_multiple_project_queries_execute(con):
     posts_questions = con.table(
-        "posts_questions", database="bigquery-public-data", schema="stackoverflow"
+        "posts_questions", database="bigquery-public-data.stackoverflow"
     ).limit(5)
-    trips = con.table("trips", database="nyc-tlc", schema="yellow").limit(5)
+    trips = con.table("trips", database="nyc-tlc.yellow").limit(5)
     predicate = posts_questions.tags == trips.rate_code
     cols = [posts_questions.title]
     join = posts_questions.left_join(trips, predicate)[cols]
@@ -322,7 +324,7 @@ def test_approx_median(alltypes):
 def test_create_table_bignumeric(con, temp_table):
     schema = ibis.schema({"col1": dt.Decimal(76, 38)})
     temporary_table = con.create_table(temp_table, schema=schema)
-    con.raw_sql(f"INSERT {con.current_schema}.{temp_table} (col1) VALUES (10.2)")
+    con.raw_sql(f"INSERT {con.current_database}.{temp_table} (col1) VALUES (10.2)")
     df = temporary_table.execute()
     assert df.shape == (1, 1)
 
@@ -333,7 +335,7 @@ def test_geography_table(con, temp_table):
     schema = ibis.schema({"col1": dt.GeoSpatial(geotype="geography", srid=4326)})
     temporary_table = con.create_table(temp_table, schema=schema)
     con.raw_sql(
-        f"INSERT {con.current_schema}.{temp_table} (col1) VALUES (ST_GEOGPOINT(1,3))"
+        f"INSERT {con.current_database}.{temp_table} (col1) VALUES (ST_GEOGPOINT(1,3))"
     )
     df = temporary_table.execute()
     assert df.shape == (1, 1)
@@ -349,7 +351,7 @@ def test_timestamp_table(con, temp_table):
     )
     temporary_table = con.create_table(temp_table, schema=schema)
     con.raw_sql(
-        f"INSERT {con.current_schema}.{temp_table} (datetime_col, timestamp_col) VALUES (CURRENT_DATETIME(), CURRENT_TIMESTAMP())"
+        f"INSERT {con.current_database}.{temp_table} (datetime_col, timestamp_col) VALUES (CURRENT_DATETIME(), CURRENT_TIMESTAMP())"
     )
     df = temporary_table.execute()
     assert df.shape == (1, 2)
@@ -404,3 +406,19 @@ def test_create_table_with_options(con):
         assert t.execute().empty
     finally:
         con.drop_table(name)
+
+
+def test_list_tables_schema_warning_refactor(con):
+    pypi_tables = [
+        "external",
+        "native",
+    ]
+
+    assert con.list_tables()
+
+    # Warn but succeed for schema list
+    with pytest.raises(FutureWarning):
+        assert con.list_tables(schema="pypi") == pypi_tables
+
+    assert con.list_tables(database="ibis-gbq.pypi") == pypi_tables
+    assert con.list_tables(database=("ibis-gbq", "pypi")) == pypi_tables

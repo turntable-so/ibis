@@ -11,6 +11,7 @@ import pandas as pd
 import pandas.testing as tm
 import pyarrow as pa
 import pytest
+from packaging.version import parse as parse_version
 from pytest import param
 
 import ibis
@@ -164,12 +165,15 @@ def test_temp_directory(tmp_path):
 
 @pytest.fixture(scope="session")
 def pgurl():  # pragma: no cover
-    pgcon = ibis.postgres.connect(user="postgres", password="postgres")
-    df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 1.0], "y": ["a", "b", "c", "a"]})
-    s = ibis.schema(dict(x="float64", y="str"))
+    pgcon = ibis.postgres.connect(
+        user="postgres", password="postgres", host="localhost"
+    )
 
-    pgcon.create_table("duckdb_test", df, s, force=True)
-    yield pgcon.con.url
+    df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 1.0], "y": ["a", "b", "c", "a"]})
+
+    pgcon.create_table("duckdb_test", df, overwrite=True)
+    yield pgcon.con.info
+
     pgcon.drop_table("duckdb_test", force=True)
 
 
@@ -177,8 +181,44 @@ def pgurl():  # pragma: no cover
     os.environ.get("DUCKDB_POSTGRES") is None, reason="avoiding CI shenanigans"
 )
 def test_read_postgres(con, pgurl):  # pragma: no cover
+    # we don't run this test in CI, only locally, to avoid bringing a postgres
+    # container up just for this test.  To run locally set env variable to True
+    # and once a postgres container is up run the test.
     table = con.read_postgres(
-        f"postgres://{pgurl.username}:{pgurl.password}@{pgurl.host}:{pgurl.port}",
+        f"postgres://{pgurl.user}:{pgurl.password}@{pgurl.host}:{pgurl.port}",
+        table_name="duckdb_test",
+    )
+    assert table.count().execute()
+
+
+@pytest.fixture(scope="session")
+def mysqlurl():  # pragma: no cover
+    mysqlcon = ibis.mysql.connect(user="ibis", password="ibis", database="ibis_testing")
+
+    df = pd.DataFrame({"x": [1.0, 2.0, 3.0, 1.0], "y": ["a", "b", "c", "a"]})
+    s = ibis.schema(dict(x="float64", y="str"))
+
+    mysqlcon.create_table("duckdb_test", df, schema=s, overwrite=True)
+    yield mysqlcon.con
+    mysqlcon.drop_table("duckdb_test", force=True)
+
+
+@pytest.mark.skipif(
+    os.environ.get("DUCKDB_MYSQL") is None, reason="avoiding CI shenanigans"
+)
+def test_read_mysql(con, mysqlurl):  # pragma: no cover
+    # to run this test run first the mysql test suit to get the ibis-testing
+    # we don't run this test in CI, only locally, to avoid bringing a mysql
+    # container up just for this test.  To run locally set env variable to True
+    # and once a mysql container is up run the test.
+
+    # TODO(ncclementi) replace for mysqlurl.host when this is fix
+    # https://github.com/duckdb/duckdb_mysql/issues/44
+    hostname = "127.0.0.1"
+
+    table = con.read_mysql(
+        f"mysql://{mysqlurl.user.decode()}:{mysqlurl.password.decode()}@{hostname}:{mysqlurl.port}/ibis_testing",
+        catalog="mysqldb",
         table_name="duckdb_test",
     )
     assert table.count().execute()
@@ -197,9 +237,6 @@ def test_read_sqlite(con, tmp_path):
 
     ft = con.read_sqlite(path, table_name="t")
     assert ft.count().execute()
-
-    with pytest.raises(ValueError):
-        con.read_sqlite(path)
 
 
 def test_read_sqlite_no_table_name(con, tmp_path):
@@ -430,16 +467,17 @@ def test_csv_with_slash_n_null(con, tmp_path):
 @pytest.mark.parametrize(
     "extensions",
     [
-        [],
+        param([], id="none"),
         param(
             ["httpfs"],
             marks=[
                 pytest.mark.xfail(
-                    duckdb.__version__ == "0.10.0",
+                    parse_version(duckdb.__version__) >= parse_version("0.10.0"),
                     reason="https://github.com/duckdb/duckdb/issues/10698",
                     raises=duckdb.HTTPException,
                 )
             ],
+            id="httpfs",
         ),
     ],
 )

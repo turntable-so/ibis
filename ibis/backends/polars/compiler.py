@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import calendar
+import datetime
 import math
 import operator
 from collections.abc import Mapping
@@ -191,18 +192,30 @@ def project(op, **kw):
 
     selections = []
     unnests = []
+    scalars = []
     for name, arg in op.values.items():
         if isinstance(arg, ops.Unnest):
+            translated = translate(arg.arg, **kw).alias(name)
             unnests.append(name)
-            translated = translate(arg.arg, **kw)
+            selections.append(translated)
         elif isinstance(arg, ops.Value):
-            translated = translate(arg, **kw)
+            translated = translate(arg, **kw).alias(name)
+            if arg.shape.is_scalar():
+                scalars.append(translated)
+                selections.append(pl.col(name))
+            else:
+                selections.append(translated)
         else:
             raise com.TranslationError(
                 "Polars backend is unable to compile selection with "
                 f"operation type of {type(arg)}"
             )
-        selections.append(translated.alias(name))
+
+    if scalars:
+        # Scalars need to first be projected to columns with `with_columns`,
+        # otherwise if a downstream select only selects out the scalar-backed
+        # columns they'll return with only a single row.
+        lf = lf.with_columns(scalars)
 
     if selections:
         lf = lf.select(selections)
@@ -216,16 +229,20 @@ def project(op, **kw):
 @translate.register(ops.Sort)
 def sort(op, **kw):
     lf = translate(op.parent, **kw)
+    if not op.keys:
+        return lf
 
-    if op.keys:
-        by = [key.name for key in op.keys]
-        descending = [key.descending for key in op.keys]
-        try:
-            lf = lf.sort(by, descending=descending, nulls_last=True)
-        except TypeError:  # pragma: no cover
-            lf = lf.sort(by, reverse=descending, nulls_last=True)  # pragma: no cover
+    newcols = {gen_name("sort_key"): translate(col.expr, **kw) for col in op.keys}
+    lf = lf.with_columns(**newcols)
 
-    return lf
+    by = list(newcols.keys())
+    descending = [key.descending for key in op.keys]
+    try:
+        lf = lf.sort(by, descending=descending, nulls_last=True)
+    except TypeError:  # pragma: no cover
+        lf = lf.sort(by, reverse=descending, nulls_last=True)  # pragma: no cover
+
+    return lf.drop(*by)
 
 
 @translate.register(ops.Filter)
@@ -719,6 +736,7 @@ _reductions = {
     ops.All: "all",
     ops.Any: "any",
     ops.ApproxMedian: "median",
+    ops.Arbitrary: "first",
     ops.Count: "count",
     ops.CountDistinct: "n_unique",
     ops.First: "first",
@@ -808,6 +826,11 @@ def count_star(op, **kw):
 @translate.register(ops.TimestampNow)
 def timestamp_now(op, **_):
     return pl.lit(pd.Timestamp("now", tz="UTC").tz_localize(None))
+
+
+@translate.register(ops.DateNow)
+def date_now(op, **_):
+    return pl.lit(datetime.date.today())
 
 
 @translate.register(ops.Strftime)
@@ -1203,8 +1226,6 @@ def execute_arg_min(op, **kw):
 
 @translate.register(ops.SQLStringView)
 def execute_sql_string_view(op, *, ctx: pl.SQLContext, **kw):
-    child = translate(op.child, ctx=ctx, **kw)
-    ctx.register(op.name, child)
     return ctx.execute(op.query)
 
 
@@ -1308,7 +1329,7 @@ def execute_integer_range(op, **kw):
         )
     step = op.step.value
 
-    dtype = PolarsType.from_ibis(op.dtype)
+    dtype = PolarsType.from_ibis(op.dtype.value_type)
     empty = pl.int_ranges(0, 0, dtype=dtype)
 
     if step == 0:

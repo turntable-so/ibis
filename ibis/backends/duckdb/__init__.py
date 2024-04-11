@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import contextlib
 import os
+import urllib
 import warnings
 from operator import itemgetter
 from pathlib import Path
@@ -18,12 +19,11 @@ import sqlglot.expressions as sge
 
 import ibis
 import ibis.common.exceptions as exc
-import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
 import ibis.expr.schema as sch
 import ibis.expr.types as ir
 from ibis import util
-from ibis.backends import CanCreateSchema, UrlFromPath
+from ibis.backends import CanCreateDatabase, CanCreateSchema, UrlFromPath
 from ibis.backends.duckdb.compiler import DuckDBCompiler
 from ibis.backends.duckdb.converter import DuckDBPandasData
 from ibis.backends.sql import SQLBackend
@@ -31,7 +31,7 @@ from ibis.backends.sql.compiler import STAR, C, F
 from ibis.expr.operations.udf import InputType
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping, MutableMapping, Sequence
+    from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 
     import pandas as pd
     import torch
@@ -74,7 +74,7 @@ class _Settings:
         return repr(dict(zip(kv["key"], kv["value"])))
 
 
-class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
+class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
     name = "duckdb"
     compiler = DuckDBCompiler()
 
@@ -86,16 +86,16 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         return _Settings(self.con)
 
     @property
-    def current_database(self) -> str:
+    def current_catalog(self) -> str:
         with self._safe_raw_sql(sg.select(self.compiler.f.current_database())) as cur:
             [(db,)] = cur.fetchall()
         return db
 
     @property
-    def current_schema(self) -> str:
+    def current_database(self) -> str:
         with self._safe_raw_sql(sg.select(self.compiler.f.current_schema())) as cur:
-            [(schema,)] = cur.fetchall()
-        return schema
+            [(db,)] = cur.fetchall()
+        return db
 
     # TODO(kszucs): should be moved to the base SQLGLot backend
     def raw_sql(self, query: str | sg.Expression, **kwargs: Any) -> Any:
@@ -246,7 +246,7 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
                         ).sql(self.name)
                     )
 
-        return self.table(name, schema=database)
+        return self.table(name, database=database)
 
     def _load_into_cache(self, name, expr):
         self.create_table(name, expr, schema=expr.schema(), temp=True)
@@ -264,7 +264,7 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         name
             Table name
         schema
-            Schema name
+            [deprecated] Schema name
         database
             Database name
 
@@ -274,7 +274,14 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
             Table expression
 
         """
-        table_schema = self.get_schema(name, schema=schema, database=database)
+        table_loc = self._warn_and_create_table_loc(database, schema)
+
+        catalog, database = None, None
+        if table_loc is not None:
+            catalog = table_loc.catalog or None
+            database = table_loc.db or None
+
+        table_schema = self.get_schema(name, catalog=catalog, database=database)
         # load geospatial only if geo columns
         if any(typ.is_geospatial() for typ in table_schema.types):
             self.load_extension("spatial")
@@ -282,11 +289,15 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
             name,
             schema=table_schema,
             source=self,
-            namespace=ops.Namespace(database=database, schema=schema),
+            namespace=ops.Namespace(catalog=catalog, database=database),
         ).to_expr()
 
     def get_schema(
-        self, table_name: str, schema: str | None = None, database: str | None = None
+        self,
+        table_name: str,
+        *,
+        catalog: str | None = None,
+        database: str | None = None,
     ) -> sch.Schema:
         """Compute the schema of a `table`.
 
@@ -295,8 +306,8 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         table_name
             May **not** be fully qualified. Use `database` if you want to
             qualify the identifier.
-        schema
-            Schema name
+        catalog
+            Catalog name
         database
             Database name
 
@@ -308,11 +319,11 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         """
         conditions = [sg.column("table_name").eq(sge.convert(table_name))]
 
-        if database is not None:
-            conditions.append(sg.column("table_catalog").eq(sge.convert(database)))
+        if catalog is not None:
+            conditions.append(sg.column("table_catalog").eq(sge.convert(catalog)))
 
-        if schema is not None:
-            conditions.append(sg.column("table_schema").eq(sge.convert(schema)))
+        if database is not None:
+            conditions.append(sg.column("table_schema").eq(sge.convert(database)))
 
         query = (
             sg.select(
@@ -346,7 +357,7 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
     def _safe_raw_sql(self, *args, **kwargs):
         yield self.raw_sql(*args, **kwargs)
 
-    def list_databases(self, like: str | None = None) -> list[str]:
+    def list_catalogs(self, like: str | None = None) -> list[str]:
         col = "catalog_name"
         query = sg.select(sge.Distinct(expressions=[sg.column(col)])).from_(
             sg.table("schemata", db="information_schema")
@@ -356,16 +367,16 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         dbs = result[col]
         return self._filter_with_like(dbs.to_pylist(), like)
 
-    def list_schemas(
-        self, like: str | None = None, database: str | None = None
+    def list_databases(
+        self, like: str | None = None, catalog: str | None = None
     ) -> list[str]:
         col = "schema_name"
         query = sg.select(sge.Distinct(expressions=[sg.column(col)])).from_(
             sg.table("schemata", db="information_schema")
         )
 
-        if database is not None:
-            query = query.where(sg.column("catalog_name").eq(sge.convert(database)))
+        if catalog is not None:
+            query = query.where(sg.column("catalog_name").eq(sge.convert(catalog)))
 
         with self._safe_raw_sql(query) as cur:
             out = cur.fetch_arrow_table()
@@ -480,27 +491,27 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         """
         self._load_extensions([extension], force_install=force_install)
 
-    def create_schema(
-        self, name: str, database: str | None = None, force: bool = False
+    def create_database(
+        self, name: str, catalog: str | None = None, force: bool = False
     ) -> None:
-        if database is not None:
+        if catalog is not None:
             raise exc.UnsupportedOperationError(
-                "DuckDB cannot create a schema in another database."
+                "DuckDB cannot create a database in another catalog."
             )
 
-        name = sg.table(name, catalog=database, quoted=self.compiler.quoted)
+        name = sg.table(name, catalog=catalog, quoted=self.compiler.quoted)
         with self._safe_raw_sql(sge.Create(this=name, kind="SCHEMA", replace=force)):
             pass
 
-    def drop_schema(
-        self, name: str, database: str | None = None, force: bool = False
+    def drop_database(
+        self, name: str, catalog: str | None = None, force: bool = False
     ) -> None:
-        if database is not None:
+        if catalog is not None:
             raise exc.UnsupportedOperationError(
-                "DuckDB cannot drop a schema in another database."
+                "DuckDB cannot drop a database in another catalog."
             )
 
-        name = sg.table(name, catalog=database, quoted=self.compiler.quoted)
+        name = sg.table(name, catalog=catalog, quoted=self.compiler.quoted)
         with self._safe_raw_sql(sge.Drop(this=name, kind="SCHEMA", replace=force)):
             pass
 
@@ -670,7 +681,7 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
                 sg.to_identifier("columns").eq(
                     sge.Struct(
                         expressions=[
-                            sge.Slice(
+                            sge.PropertyEQ(
                                 this=sge.convert(key), expression=sge.convert(value)
                             )
                             for key, value in columns.items()
@@ -893,7 +904,7 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
     def list_tables(
         self,
         like: str | None = None,
-        database: str | None = None,
+        database: tuple[str, str] | str | None = None,
         schema: str | None = None,
     ) -> list[str]:
         """List tables and views.
@@ -903,10 +914,27 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         like
             Regex to filter by table/view name.
         database
-            Database name. If not passed, uses the current database. Only
-            supported with MotherDuck.
+            Database location. If not passed, uses the current database.
+
+            By default uses the current `database` (`self.current_database`) and
+            `catalog` (`self.current_catalog`).
+
+            To specify a table in a separate catalog, you can pass in the
+            catalog and database as a string `"catalog.database"`, or as a tuple of
+            strings `("catalog", "database")`.
+
+            ::: {.callout-note}
+            ## Ibis does not use the word `schema` to refer to database hierarchy.
+
+            A collection of tables is referred to as a `database`.
+            A collection of `database` is referred to as a `catalog`.
+
+            These terms are mapped onto the corresponding features in each
+            backend (where available), regardless of whether the backend itself
+            uses the same terminology.
+            :::
         schema
-            Schema name. If not passed, uses the current schema.
+            [deprecated] Schema name. If not passed, uses the current schema.
 
         Returns
         -------
@@ -923,18 +951,23 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         >>> bar = con.create_view("bar", foo)
         >>> con.list_tables()
         ['bar', 'foo']
-        >>> con.create_schema("my_schema")
-        >>> con.list_tables(schema="my_schema")
+        >>> con.create_database("my_database")
+        >>> con.list_tables(database="my_database")
         []
         >>> with con.begin() as c:
-        ...     c.exec_driver_sql("CREATE TABLE my_schema.baz (a INTEGER)")  # doctest: +ELLIPSIS
+        ...     c.exec_driver_sql("CREATE TABLE my_database.baz (a INTEGER)")  # doctest: +ELLIPSIS
         <...>
-        >>> con.list_tables(schema="my_schema")
+        >>> con.list_tables(database="my_database")
         ['baz']
 
         """
-        database = F.current_database() if database is None else sge.convert(database)
-        schema = F.current_schema() if schema is None else sge.convert(schema)
+        table_loc = self._warn_and_create_table_loc(database, schema)
+
+        catalog = F.current_database()
+        database = F.current_schema()
+        if table_loc is not None:
+            catalog = table_loc.catalog or catalog
+            database = table_loc.db or database
 
         col = "table_name"
         sql = (
@@ -942,20 +975,19 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
             .from_(sg.table("tables", db="information_schema"))
             .distinct()
             .where(
-                C.table_catalog.eq(database).or_(
+                C.table_catalog.eq(catalog).or_(
                     C.table_catalog.eq(sge.convert("temp"))
                 ),
-                C.table_schema.eq(schema),
+                C.table_schema.eq(database),
             )
             .sql(self.name, pretty=True)
         )
-
         out = self.con.execute(sql).fetch_arrow_table()
 
         return self._filter_with_like(out[col].to_pylist(), like)
 
     def read_postgres(
-        self, uri: str, table_name: str | None = None, schema: str = "public"
+        self, uri: str, *, table_name: str | None = None, database: str = "public"
     ) -> ir.Table:
         """Register a table from a postgres instance into a DuckDB table.
 
@@ -965,8 +997,8 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
             A postgres URI of the form `postgres://user:password@host:port`
         table_name
             The table to read
-        schema
-            PostgreSQL schema where `table_name` resides
+        database
+            PostgreSQL database (schema) where `table_name` resides
 
         Returns
         -------
@@ -983,13 +1015,56 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         self._create_temp_view(
             table_name,
             sg.select(STAR).from_(
-                self.compiler.f.postgres_scan_pushdown(uri, schema, table_name)
+                self.compiler.f.postgres_scan_pushdown(uri, database, table_name)
             ),
         )
 
         return self.table(table_name)
 
-    def read_sqlite(self, path: str | Path, table_name: str | None = None) -> ir.Table:
+    def read_mysql(
+        self,
+        uri: str,
+        *,
+        catalog: str,
+        table_name: str | None = None,
+    ) -> ir.Table:
+        """Register a table from a MySQL instance into a DuckDB table.
+
+        Parameters
+        ----------
+        uri
+            A mysql URI of the form `mysql://user:password@host:port/database`
+        catalog
+            User-defined alias given to the MySQL database that is being attached
+            to DuckDB
+        table_name
+            The table to read
+
+        Returns
+        -------
+        ir.Table
+            The just-registered table.
+        """
+
+        parsed = urllib.parse.urlparse(uri)
+
+        if table_name is None:
+            raise ValueError("`table_name` is required when registering a mysql table")
+
+        self._load_extensions(["mysql"])
+
+        database = parsed.path.strip("/")
+
+        query_con = f"""ATTACH 'host={parsed.hostname} user={parsed.username} password={parsed.password} port={parsed.port} database={database}' AS {catalog} (TYPE mysql)"""
+
+        with self._safe_raw_sql(query_con):
+            pass
+
+        return self.table(table_name, database=(catalog, database))
+
+    def read_sqlite(
+        self, path: str | Path, *, table_name: str | None = None
+    ) -> ir.Table:
         """Register a table from a SQLite database into a DuckDB table.
 
         Parameters
@@ -1017,7 +1092,7 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         ...     )  # doctest: +ELLIPSIS
         <...>
         >>> con = ibis.connect("duckdb://")
-        >>> t = con.read_sqlite("/tmp/sqlite.db", table_name="t")
+        >>> t = con.read_sqlite(path="/tmp/sqlite.db", table_name="t")
         >>> t
         ┏━━━━━━━┳━━━━━━━━┓
         ┃ a     ┃ b      ┃
@@ -1194,6 +1269,27 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
 
         super()._run_pre_execute_hooks(expr)
 
+    def _to_duckdb_relation(
+        self,
+        expr: ir.Expr,
+        *,
+        params: Mapping[ir.Scalar, Any] | None = None,
+        limit: int | str | None = None,
+    ):
+        """Preprocess the expr, and return a ``duckdb.DuckDBPyRelation`` object.
+
+        When retrieving in-memory results, it's faster to use `duckdb_con.sql`
+        than `duckdb_con.execute`, as the query planner can take advantage of
+        knowing the output type. Since the relation objects aren't compatible
+        with the dbapi, we choose to only use them in select internal methods
+        where performance might matter, and use the standard
+        `duckdb_con.execute` everywhere else.
+        """
+        self._run_pre_execute_hooks(expr)
+        table_expr = expr.as_table()
+        sql = self.compile(table_expr, limit=limit, params=params)
+        return self.con.sql(sql)
+
     def to_pyarrow_batches(
         self,
         expr: ir.Expr,
@@ -1231,12 +1327,7 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         def batch_producer(cur):
             yield from cur.fetch_record_batch(rows_per_batch=chunk_size)
 
-        # TODO: check that this is still handled correctly
-        # batch_producer keeps the `self.con` member alive long enough to
-        # exhaust the record batch reader, even if the backend or connection
-        # have gone out of scope in the caller
         result = self.raw_sql(sql)
-
         return pa.RecordBatchReader.from_batches(
             expr.as_table().schema().to_pyarrow(), batch_producer(result)
         )
@@ -1249,14 +1340,40 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         limit: int | str | None = None,
         **_: Any,
     ) -> pa.Table:
-        self._run_pre_execute_hooks(expr)
-        table = expr.as_table()
-        sql = self.compile(table, limit=limit, params=params)
-
-        with self._safe_raw_sql(sql) as cur:
-            table = cur.fetch_arrow_table()
-
+        table = self._to_duckdb_relation(expr, params=params, limit=limit).arrow()
         return expr.__pyarrow_result__(table)
+
+    def execute(
+        self,
+        expr: ir.Expr,
+        params: Mapping | None = None,
+        limit: str | None = "default",
+        **_: Any,
+    ) -> Any:
+        """Execute an expression."""
+        import pandas as pd
+        import pyarrow.types as pat
+
+        table = self._to_duckdb_relation(expr, params=params, limit=limit).arrow()
+
+        df = pd.DataFrame(
+            {
+                name: (
+                    col.to_pylist()
+                    if (
+                        pat.is_nested(col.type)
+                        or
+                        # pyarrow / duckdb type null literals columns as int32?
+                        # but calling `to_pylist()` will render it as None
+                        col.null_count
+                    )
+                    else col.to_pandas(timestamp_as_object=True)
+                )
+                for name, col in zip(table.column_names, table.columns)
+            }
+        )
+        df = DuckDBPandasData.convert_table(df, expr.as_table().schema())
+        return expr.__pandas_result__(df)
 
     @util.experimental
     def to_torch(
@@ -1286,9 +1403,7 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
             A dictionary of torch tensors, keyed by column name.
 
         """
-        compiled = self.compile(expr, limit=limit, params=params, **kwargs)
-        with self._safe_raw_sql(compiled) as cur:
-            return cur.torch()
+        return self._to_duckdb_relation(expr, params=params, limit=limit).torch()
 
     @util.experimental
     def to_parquet(
@@ -1342,7 +1457,7 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
 
         """
         self._run_pre_execute_hooks(expr)
-        query = self._to_sql(expr, params=params)
+        query = self.compile(expr, params=params)
         args = ["FORMAT 'parquet'", *(f"{k.upper()} {v!r}" for k, v in kwargs.items())]
         copy_cmd = f"COPY ({query}) TO {str(path)!r} ({', '.join(args)})"
         with self._safe_raw_sql(copy_cmd):
@@ -1374,11 +1489,11 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         header
             Whether to write the column names as the first line of the CSV file.
         **kwargs
-            DuckDB CSV writer arguments. https://duckdb.org/docs/data/csv.html#parameters
+            DuckDB CSV writer arguments. https://duckdb.org/docs/data/csv/overview.html#parameters
 
         """
         self._run_pre_execute_hooks(expr)
-        query = self._to_sql(expr, params=params)
+        query = self.compile(expr, params=params)
         args = [
             "FORMAT 'csv'",
             f"HEADER {int(header)}",
@@ -1388,45 +1503,21 @@ class Backend(SQLBackend, CanCreateSchema, UrlFromPath):
         with self._safe_raw_sql(copy_cmd):
             pass
 
-    def _fetch_from_cursor(
-        self, cursor: duckdb.DuckDBPyConnection, schema: sch.Schema
-    ) -> pd.DataFrame:
-        import pandas as pd
-        import pyarrow.types as pat
-
-        table = cursor.fetch_arrow_table()
-
-        df = pd.DataFrame(
-            {
-                name: (
-                    col.to_pylist()
-                    if (
-                        pat.is_nested(col.type)
-                        or
-                        # pyarrow / duckdb type null literals columns as int32?
-                        # but calling `to_pylist()` will render it as None
-                        col.null_count
-                    )
-                    else col.to_pandas(timestamp_as_object=True)
-                )
-                for name, col in zip(table.column_names, table.columns)
-            }
-        )
-        return DuckDBPandasData.convert_table(df, schema)
-
-    def _metadata(self, query: str) -> Iterator[tuple[str, dt.DataType]]:
+    def _get_schema_using_query(self, query: str) -> sch.Schema:
         with self._safe_raw_sql(f"DESCRIBE {query}") as cur:
             rows = cur.fetch_arrow_table()
 
         rows = rows.to_pydict()
 
-        for name, typ, null in zip(
-            rows["column_name"], rows["column_type"], rows["null"]
-        ):
-            yield (
-                name,
-                self.compiler.type_mapper.from_string(typ, nullable=null == "YES"),
-            )
+        type_mapper = self.compiler.type_mapper
+        return sch.Schema(
+            {
+                name: type_mapper.from_string(typ, nullable=null == "YES")
+                for name, typ, null in zip(
+                    rows["column_name"], rows["column_type"], rows["null"]
+                )
+            }
+        )
 
     def _register_in_memory_tables(self, expr: ir.Expr) -> None:
         for memtable in expr.op().find(ops.InMemoryTable):

@@ -11,7 +11,7 @@ from ibis.common.bases import Hashable
 from ibis.common.collections import frozendict
 from ibis.common.patterns import NoMatch, Pattern
 from ibis.common.typing import _ClassInfo
-from ibis.util import experimental
+from ibis.util import experimental, promote_list
 
 if TYPE_CHECKING:
     from typing_extensions import Self
@@ -56,19 +56,18 @@ def _flatten_collections(node: Any) -> Iterator[N]:
     >>> c = MyNode(2, "c", (a, b))
     >>> d = MyNode(1, "d", (c,))
     >>>
-    >>> assert list(_flatten_collections(a)) == [a]
     >>> assert list(_flatten_collections((c,))) == [c]
     >>> assert list(_flatten_collections([a, b, (c, a)])) == [a, b, c, a]
+    >>> assert list(_flatten_collections([{"b": b, "a": a}])) == [b, a]
 
     """
-    if isinstance(node, Node):
-        yield node
-    elif isinstance(node, (tuple, list)):
-        for item in node:
+    for item in node:
+        if isinstance(item, Node):
+            yield item
+        elif isinstance(item, (tuple, list)):
             yield from _flatten_collections(item)
-    elif isinstance(node, (dict, frozendict)):
-        for value in node.values():
-            yield from _flatten_collections(value)
+        elif isinstance(item, (dict, frozendict)):
+            yield from _flatten_collections(item.values())
 
 
 def _recursive_lookup(obj: Any, dct: dict) -> Any:
@@ -193,7 +192,7 @@ def _coerce_replacer(obj: ReplacerLike, context: Optional[dict] = None) -> Repla
             try:
                 return obj[node]
             except KeyError:
-                return node.__class__(**kwargs)
+                return node.__recreate__(kwargs)
     elif callable(obj):
         fn = obj
     else:
@@ -296,6 +295,7 @@ class Node(Hashable):
         dependents = {k: set(v) for k, v in dependents.items()}
 
         for node, dependencies in graph.items():
+            # minor optimization to directly recurse into the children
             kwargs = {
                 k: _recursive_lookup(v, results)
                 for k, v in zip(node.__argnames__, node.__args__)
@@ -310,6 +310,23 @@ class Node(Hashable):
                     del results[dependency]
 
         return results[self]
+
+    @experimental
+    def map_nodes(self, fn: Callable, filter: Optional[Finder] = None) -> Any:
+        """Apply a function to all nodes in the graph more memory efficiently.
+
+        Alternative implementation of `map` passing only node results to the function
+        as positional arguments. This method is useful for calculations where the
+        nodes don't need to be reconstructed.
+        """
+        results: dict[Node, Any] = {}
+
+        graph, _ = Graph.from_bfs(self, filter=filter).toposort()
+        for node, children in graph.items():
+            args = _recursive_lookup(children, results)
+            results[node] = fn(node, *args)
+
+        return results
 
     # TODO(kszucs): perhaps rename it to find_all() for better clarity
     def find(
@@ -341,9 +358,39 @@ class Node(Hashable):
         determined by a breadth-first search.
 
         """
-        nodes = Graph.from_bfs(self, filter=filter, context=context).nodes()
+        graph = Graph.from_bfs(self, filter=filter, context=context)
         finder = _coerce_finder(finder, context)
-        return [node for node in nodes if finder(node)]
+        return [node for node in graph.nodes() if finder(node)]
+
+    @experimental
+    def find_below(
+        self,
+        finder: FinderLike,
+        filter: Optional[FinderLike] = None,
+        context: Optional[dict] = None,
+    ) -> list[Node]:
+        """Find all nodes below the current node matching a given pattern in the graph.
+
+        A variant of find() that only returns nodes below the current node in the graph.
+
+        Parameters
+        ----------
+        finder
+            A type, tuple of types, a pattern or a callable to match upon.
+        filter
+            A type, tuple of types, a pattern or a callable to filter out nodes
+            from the traversal. The traversal will only visit nodes that match
+            the given filter and stop otherwise.
+        context
+            Optional context to use if `finder` or `filter` is a pattern.
+
+        Returns
+        -------
+        The list of nodes matching the given pattern.
+        """
+        graph = Graph.from_bfs(self.__children__, filter=filter, context=context)
+        finder = _coerce_finder(finder, context)
+        return [node for node in graph.nodes() if finder(node)]
 
     @experimental
     def find_topmost(
@@ -621,10 +668,8 @@ def bfs(root: Node) -> Graph:
     """
     # fast path for the default no filter case, according to benchmarks
     # this is gives a 10% speedup compared to the filtered version
-    if not isinstance(root, Node):
-        raise TypeError("node must be an instance of ibis.common.graph.Node")
-
-    queue = deque([root])
+    nodes = _flatten_collections(promote_list(root))
+    queue = deque(nodes)
     graph = Graph()
 
     while queue:
@@ -652,14 +697,9 @@ def bfs_while(root: Node, filter: Finder) -> Graph:
     A graph constructed from the root node.
 
     """
-    if not isinstance(root, Node):
-        raise TypeError("node must be an instance of ibis.common.graph.Node")
-
-    queue = deque()
+    nodes = _flatten_collections(promote_list(root))
+    queue = deque(node for node in nodes if filter(node))
     graph = Graph()
-
-    if filter(root):
-        queue.append(root)
 
     while queue:
         if (node := queue.popleft()) not in graph:
@@ -685,10 +725,8 @@ def dfs(root: Node) -> Graph:
     """
     # fast path for the default no filter case, according to benchmarks
     # this is gives a 10% speedup compared to the filtered version
-    if not isinstance(root, Node):
-        raise TypeError("node must be an instance of ibis.common.graph.Node")
-
-    stack = deque([root])
+    nodes = _flatten_collections(promote_list(root))
+    stack = deque(nodes)
     graph = {}
 
     while stack:
@@ -716,14 +754,9 @@ def dfs_while(root: Node, filter: Finder) -> Graph:
     A graph constructed from the root node.
 
     """
-    if not isinstance(root, Node):
-        raise TypeError("node must be an instance of ibis.common.graph.Node")
-
-    stack = deque()
+    nodes = _flatten_collections(promote_list(root))
+    stack = deque(node for node in nodes if filter(node))
     graph = {}
-
-    if filter(root):
-        stack.append(root)
 
     while stack:
         if (node := stack.pop()) not in graph:

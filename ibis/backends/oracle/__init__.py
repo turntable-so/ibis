@@ -21,18 +21,58 @@ import ibis.expr.operations as ops
 import ibis.expr.schema as sch
 import ibis.expr.types as ir
 from ibis import util
+from ibis.backends import CanListDatabase, CanListSchema
 from ibis.backends.oracle.compiler import OracleCompiler
 from ibis.backends.sql import STAR, SQLBackend
-from ibis.backends.sql.compiler import TRUE, C
+from ibis.backends.sql.compiler import C
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable
-
     import pandas as pd
     import pyrrow as pa
 
 
-class Backend(SQLBackend):
+def metadata_row_to_type(
+    *, type_mapper, type_string, precision, scale, nullable
+) -> dt.DataType:
+    """Convert a row from an Oracle metadata table to an Ibis type."""
+    # See
+    # https://docs.oracle.com/en/database/oracle/oracle-database/19/sqlrf/Data-Types.html#GUID-0BC16006-32F1-42B1-B45E-F27A494963FF
+    # for details
+    #
+    # NUMBER(null, null) --> NUMBER(38) -> NUMBER(38, 0)
+    # (null, null) --> from_string()
+    if type_string == "NUMBER" and precision is None and not scale:
+        typ = dt.Int64(nullable=nullable)
+
+    # (null, 0) --> INT
+    # (null, 3), (null, 6), (null, 9) --> from_string() - TIMESTAMP(3)/(6)/(9)
+    elif precision is None and (scale is not None and scale == 0):
+        typ = dt.Int64(nullable=nullable)
+
+    # NUMBER(*, 0) --> INT
+    # (*, 0) --> from_string() - INTERVAL DAY(3) TO SECOND(0)
+    elif (
+        type_string == "NUMBER"
+        and precision is not None
+        and (scale is not None and scale == 0)
+    ):
+        typ = dt.Int64(nullable=nullable)
+
+    # NUMBER(*, > 0) --> DECIMAL
+    # (*, > 0) --> from_string() - INTERVAL DAY(3) TO SECOND(2)
+    elif (
+        type_string == "NUMBER"
+        and precision is not None
+        and (scale is not None and scale > 0)
+    ):
+        typ = dt.Decimal(precision=precision, scale=scale, nullable=nullable)
+
+    else:
+        typ = type_mapper.from_string(type_string, nullable=nullable)
+    return typ
+
+
+class Backend(SQLBackend, CanListDatabase, CanListSchema):
     name = "oracle"
     compiler = OracleCompiler()
 
@@ -163,7 +203,10 @@ class Backend(SQLBackend):
             return cursor
 
     def list_tables(
-        self, like: str | None = None, schema: str | None = None
+        self,
+        like: str | None = None,
+        schema: str | None = None,
+        database: tuple[str, str] | str | None = None,
     ) -> list[str]:
         """List the tables in the database.
 
@@ -172,14 +215,48 @@ class Backend(SQLBackend):
         like
             A pattern to use for listing tables.
         schema
-            The schema to perform the list against.
+            [deprecated] The schema to perform the list against.
+        database
+            Database to list tables from. Default behavior is to show tables in
+            the current database.
+
+            ::: {.callout-note}
+            ## Ibis does not use the word `schema` to refer to database hierarchy.
+
+            A collection of tables is referred to as a `database`.
+            A collection of `database` is referred to as a `catalog`.
+
+            These terms are mapped onto the corresponding features in each
+            backend (where available), regardless of whether the backend itself
+            uses the same terminology.
+            :::
 
         """
-        conditions = [TRUE]
+        if schema is not None and database is not None:
+            raise exc.IbisInputError(
+                "Using both the `schema` and `database` kwargs is not supported. "
+                "`schema` is deprecated and will be removed in Ibis 10.0"
+                "\nUse the `database` kwarg with one of the following patterns:"
+                '\ndatabase="database"'
+                '\ndatabase=("catalog", "database")'
+                '\ndatabase="catalog.database"',
+            )
+        if schema is not None:
+            # TODO: remove _warn_schema when the schema kwarg is removed
+            self._warn_schema()
+            table_loc = schema
+        elif database is not None:
+            table_loc = database
+        else:
+            table_loc = self.con.username.upper()
+        table_loc = self._to_sqlglot_table(table_loc)
 
-        if schema is None:
-            schema = self.con.username.upper()
-        conditions = C.owner.eq(sge.convert(schema.upper()))
+        # Deeply frustrating here where if we call `convert` on `table_loc`,
+        # which is a sg.exp.Table, the quotes are rendered as double-quotes
+        # which are invalid. With no `convert`, the same thing happens.
+        # If we call `convert` on the stringified SQL output, they get reparsed
+        # as literal strings and those are rendered correctly.
+        conditions = C.owner.eq(sge.convert(table_loc.sql(self.name)))
 
         tables = (
             sg.select("table_name", "owner")
@@ -200,12 +277,12 @@ class Backend(SQLBackend):
 
         return self._filter_with_like(map(itemgetter(0), out), like)
 
-    def list_schemas(
-        self, like: str | None = None, database: str | None = None
+    def list_databases(
+        self, like: str | None = None, catalog: str | None = None
     ) -> list[str]:
-        if database is not None:
+        if catalog is not None:
             raise exc.UnsupportedArgumentError(
-                "No cross-database schema access in Oracle"
+                "No cross-catalog schema access in Oracle"
             )
 
         query = sg.select("username").from_("all_users").order_by("username")
@@ -216,30 +293,41 @@ class Backend(SQLBackend):
         return self._filter_with_like(schemata, like)
 
     def get_schema(
-        self, name: str, schema: str | None = None, database: str | None = None
+        self, name: str, *, catalog: str | None = None, database: str | None = None
     ) -> sch.Schema:
-        if schema is None:
-            schema = self.con.username.upper()
+        if database is None:
+            database = self.con.username.upper()
         stmt = (
             sg.select(
-                "column_name",
-                "data_type",
-                sg.column("nullable").eq(sge.convert("Y")).as_("nullable"),
+                C.column_name,
+                C.data_type,
+                C.data_precision,
+                C.data_scale,
+                C.nullable.eq(sge.convert("Y")).as_("nullable"),
             )
             .from_(sg.table("all_tab_columns"))
-            .where(sg.column("table_name").eq(sge.convert(name)))
-            .where(sg.column("owner").eq(sge.convert(schema)))
+            .where(
+                C.table_name.eq(sge.convert(name)),
+                C.owner.eq(sge.convert(database)),
+            )
+            .order_by(C.column_id)
         )
         with self._safe_raw_sql(stmt) as cur:
-            result = cur.fetchall()
+            results = cur.fetchall()
 
-        if not result:
+        if not results:
             raise exc.IbisError(f"Table not found: {name!r}")
 
         type_mapper = self.compiler.type_mapper
         fields = {
-            name: type_mapper.from_string(type_string, nullable=nullable)
-            for name, type_string, nullable in result
+            name: metadata_row_to_type(
+                type_mapper=type_mapper,
+                type_string=type_string,
+                precision=precision,
+                scale=scale,
+                nullable=nullable,
+            )
+            for name, type_string, precision, scale, nullable in results
         }
 
         return sch.Schema(fields)
@@ -314,9 +402,7 @@ class Backend(SQLBackend):
         else:
             temp_name = name
 
-        initial_table = sg.table(
-            temp_name, catalog=database, quoted=self.compiler.quoted
-        )
+        initial_table = sg.table(temp_name, db=database, quoted=self.compiler.quoted)
         target = sge.Schema(this=initial_table, expressions=column_defs)
 
         create_stmt = sge.Create(
@@ -326,7 +412,7 @@ class Backend(SQLBackend):
         )
 
         # This is the same table as initial_table unless overwrite == True
-        final_table = sg.table(name, catalog=database, quoted=self.compiler.quoted)
+        final_table = sg.table(name, db=database, quoted=self.compiler.quoted)
         with self._safe_raw_sql(create_stmt) as cur:
             if query is not None:
                 insert_stmt = sge.Insert(this=initial_table, expression=query).sql(
@@ -336,14 +422,14 @@ class Backend(SQLBackend):
 
             if overwrite:
                 self.drop_table(
-                    final_table.name, final_table.catalog, final_table.db, force=True
+                    name=final_table.name, database=final_table.db, force=True
                 )
                 cur.execute(
                     f"ALTER TABLE IF EXISTS {initial_table.sql(self.name)} RENAME TO {final_table.sql(self.name)}"
                 )
 
         if schema is None:
-            return self.table(name, schema=database)
+            return self.table(name, database=database)
 
         # preserve the input schema if it was provided
         return ops.DatabaseTable(
@@ -353,11 +439,13 @@ class Backend(SQLBackend):
     def drop_table(
         self,
         name: str,
-        database: str | None = None,
-        schema: str | None = None,
+        database: tuple[str, str] | str | None = None,
         force: bool = False,
     ) -> None:
-        table = sg.table(name, db=schema, catalog=database, quoted=self.compiler.quoted)
+        table_loc = self._to_sqlglot_table(database or None)
+        catalog, db = self._to_catalog_db_tuple(table_loc)
+
+        table = sg.table(name, db=db, catalog=catalog, quoted=self.compiler.quoted)
 
         with self.begin() as bind:
             # global temporary tables cannot be dropped without first truncating them
@@ -369,7 +457,7 @@ class Backend(SQLBackend):
             with contextlib.suppress(oracledb.DatabaseError):
                 bind.execute(f"TRUNCATE TABLE {table.sql(self.name)}")
 
-        super().drop_table(name, database=database, schema=schema, force=force)
+        super().drop_table(name, database=(catalog, db), force=force)
 
     def _register_in_memory_table(self, op: ops.InMemoryTable) -> None:
         schema = op.schema
@@ -413,7 +501,7 @@ class Backend(SQLBackend):
 
         atexit.register(self._clean_up_tmp_table, name)
 
-    def _metadata(self, query: str) -> Iterable[tuple[str, dt.DataType]]:
+    def _get_schema_using_query(self, query: str) -> sch.Schema:
         name = util.gen_name("oracle_metadata")
         dialect = self.name
 
@@ -465,41 +553,21 @@ class Backend(SQLBackend):
                 # drop the view no matter what
                 con.execute(drop_view)
 
+        schema = {}
+
         # TODO: hand all this off to the type mapper
+        type_mapper = self.compiler.type_mapper
         for name, type_string, precision, scale, nullable in results:
-            # NUMBER(null, null) --> FLOAT
-            # (null, null) --> from_string()
-            if type_string == "NUMBER" and precision is None and scale is None:
-                typ = dt.Float64(nullable=nullable)
+            typ = metadata_row_to_type(
+                type_mapper=type_mapper,
+                type_string=type_string,
+                precision=precision,
+                scale=scale,
+                nullable=nullable,
+            )
+            schema[name] = typ
 
-            # (null, 0) --> INT
-            # (null, 3), (null, 6), (null, 9) --> from_string() - TIMESTAMP(3)/(6)/(9)
-            elif precision is None and (scale is not None and scale == 0):
-                typ = dt.Int64(nullable=nullable)
-
-            # NUMBER(*, 0) --> INT
-            # (*, 0) --> from_string() - INTERVAL DAY(3) TO SECOND(0)
-            elif (
-                type_string == "NUMBER"
-                and precision is not None
-                and (scale is not None and scale == 0)
-            ):
-                typ = dt.Int64(nullable=nullable)
-
-            # NUMBER(*, > 0) --> DECIMAL
-            # (*, > 0) --> from_string() - INTERVAL DAY(3) TO SECOND(2)
-            elif (
-                type_string == "NUMBER"
-                and precision is not None
-                and (scale is not None and scale > 0)
-            ):
-                typ = dt.Decimal(precision=precision, scale=scale, nullable=nullable)
-
-            else:
-                typ = self.compiler.type_mapper.from_string(
-                    type_string, nullable=nullable
-                )
-            yield name, typ
+        return sch.Schema(schema)
 
     def _fetch_from_cursor(self, cursor, schema: sch.Schema) -> pd.DataFrame:
         # TODO(gforsyth): this can probably be generalized a bit and put into

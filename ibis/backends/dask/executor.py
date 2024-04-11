@@ -22,6 +22,8 @@ from ibis.backends.pandas.rewrites import (
     PandasLimit,
     PandasResetIndex,
     PandasScalarSubquery,
+    PandasWindowFrame,
+    PandasWindowFunction,
     plan,
 )
 from ibis.common.exceptions import UnboundExpressionError
@@ -29,6 +31,23 @@ from ibis.formats.pandas import PandasData, PandasType
 from ibis.util import gen_name
 
 # ruff: noqa: F811
+
+
+def limit_df(
+    df: dd.DataFrame,
+    col: str,
+    n: int | pd.DataFrame,
+    offset: int | pd.DataFrame,
+):
+    if isinstance(offset, pd.DataFrame):
+        offset = offset.iat[0, 0]
+    if isinstance(n, pd.DataFrame):
+        n = n.iat[0, 0]
+
+    if n is None:
+        return df[df[col] >= offset]
+
+    return df[df[col].between(offset, offset + n - 1)]
 
 
 class DaskExecutor(PandasExecutor, DaskUtils):
@@ -254,7 +273,7 @@ class DaskExecutor(PandasExecutor, DaskUtils):
     ############################ Window functions #############################
 
     @classmethod
-    def visit(cls, op: ops.WindowFrame, table, start, end, **kwargs):
+    def visit(cls, op: PandasWindowFrame, table, start, end, **kwargs):
         table = table.compute()
         if isinstance(start, dd.Series):
             start = start.compute()
@@ -263,7 +282,7 @@ class DaskExecutor(PandasExecutor, DaskUtils):
         return super().visit(op, table=table, start=start, end=end, **kwargs)
 
     @classmethod
-    def visit(cls, op: ops.WindowFunction, func, frame):
+    def visit(cls, op: PandasWindowFunction, func, frame):
         result = super().visit(op, func=func, frame=frame)
         return cls.asseries(result)
 
@@ -291,17 +310,17 @@ class DaskExecutor(PandasExecutor, DaskUtils):
 
     @classmethod
     def visit(cls, op: PandasLimit, parent, n, offset):
-        n = n.compute().iat[0, 0]
-        offset = offset.compute().iat[0, 0]
-
         name = gen_name("limit")
         df = add_globally_consecutive_column(parent, name, set_as_index=False)
-        if n is None:
-            df = df[df[name] >= offset]
-        else:
-            df = df[df[name].between(offset, offset + n - 1)]
 
-        return df.drop(columns=[name])
+        return df.map_partitions(
+            limit_df,
+            col=name,
+            n=n,
+            offset=offset,
+            align_dataframes=False,
+            meta=df._meta,
+        ).drop(columns=[name])
 
     @classmethod
     def visit(cls, op: PandasResetIndex, parent):

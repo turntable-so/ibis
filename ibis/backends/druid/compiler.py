@@ -13,6 +13,7 @@ from ibis.backends.sql.rewrites import (
     rewrite_capitalize,
     rewrite_sample_as_filter,
 )
+from ibis.expr.rewrites import rewrite_stringslice
 
 
 class DruidCompiler(SQLGlotCompiler):
@@ -22,6 +23,7 @@ class DruidCompiler(SQLGlotCompiler):
     type_mapper = DruidType
     rewrites = (
         rewrite_sample_as_filter,
+        rewrite_stringslice,
         *(
             rewrite
             for rewrite in SQLGlotCompiler.rewrites
@@ -32,7 +34,6 @@ class DruidCompiler(SQLGlotCompiler):
     UNSUPPORTED_OPERATIONS = frozenset(
         (
             ops.ApproxMedian,
-            ops.Arbitrary,
             ops.ArgMax,
             ops.ArgMin,
             ops.ArrayCollect,
@@ -69,7 +70,6 @@ class DruidCompiler(SQLGlotCompiler):
             ops.TimeDelta,
             ops.TimestampBucket,
             ops.TimestampDelta,
-            ops.TimestampNow,
             ops.Translate,
             ops.TypeOf,
             ops.Unnest,
@@ -87,9 +87,7 @@ class DruidCompiler(SQLGlotCompiler):
         ops.BitwiseXor: "bitwise_xor",
         ops.BitwiseLeftShift: "bitwise_shift_left",
         ops.BitwiseRightShift: "bitwise_shift_right",
-        ops.Modulus: "mod",
         ops.Power: "power",
-        ops.Log10: "log10",
         ops.ApproxCountDistinct: "approx_count_distinct",
         ops.StringContains: "contains_string",
     }
@@ -99,6 +97,12 @@ class DruidCompiler(SQLGlotCompiler):
         if where is not None:
             return sg.exp.Filter(this=expr, expression=sg.exp.Where(this=where))
         return expr
+
+    def visit_Modulus(self, op, *, left, right):
+        return self.f.anon.mod(left, right)
+
+    def visit_Log10(self, op, *, arg):
+        return self.f.anon.log10(arg)
 
     def visit_Sum(self, op, *, arg, where):
         arg = self.if_(arg, 1, 0) if op.arg.dtype.is_boolean() else arg

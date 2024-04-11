@@ -125,17 +125,28 @@ def ln(arg):
 
 
 @udf(skip_if_exists=True)
+def log(base, arg):
+    """Return the logarithm of `arg` in the given `base`.
+
+    The argument order matches the builtin sqlite function.
+    """
+    if arg < 0:
+        return None
+    return math.log(arg, base)
+
+
+@udf(skip_if_exists=True)
 def log2(arg):
     if arg < 0:
         return None
-    return math.log(arg, 2)
+    return math.log2(arg)
 
 
 @udf(skip_if_exists=True)
 def log10(arg):
     if arg < 0:
         return None
-    return math.log(arg, 10)
+    return math.log10(arg)
 
 
 @udf(skip_if_exists=True)
@@ -427,7 +438,7 @@ class _ibis_bit_xor(_ibis_bit_agg):
         super().__init__(operator.xor)
 
 
-class _ibis_arbitrary(abc.ABC):
+class _ibis_first_last(abc.ABC):
     def __init__(self) -> None:
         self.value = None
 
@@ -439,14 +450,14 @@ class _ibis_arbitrary(abc.ABC):
 
 
 @udaf
-class _ibis_arbitrary_first(_ibis_arbitrary):
+class _ibis_first(_ibis_first_last):
     def step(self, value):
         if self.value is None:
             self.value = value
 
 
 @udaf
-class _ibis_arbitrary_last(_ibis_arbitrary):
+class _ibis_last(_ibis_first_last):
     def step(self, value):
         if value is not None:
             self.value = value

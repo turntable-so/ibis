@@ -87,7 +87,7 @@ def make_large_expr(base):
         _timestamp=(src_table["_timestamp"] - src_table["_timestamp"] % 3600)
         .cast("int32")
         .name("_timestamp"),
-        valid_seconds=300,
+        valid_seconds=ibis.literal(300),
     )
 
     aggs = []
@@ -668,9 +668,9 @@ def test_snowflake_medium_sized_to_pandas(benchmark):
     # LINEITEM at scale factor 1 is around 6MM rows, but we limit to 1,000,000
     # to make the benchmark fast enough for development, yet large enough to show a
     # difference if there's a performance hit
-    lineitem = con.table("LINEITEM", schema="SNOWFLAKE_SAMPLE_DATA.TPCH_SF1").limit(
-        1_000_000
-    )
+    lineitem = con.table(
+        "LINEITEM", database=("SNOWFLAKE_SAMPLE_DATA", "TPCH_SF1")
+    ).limit(1_000_000)
 
     benchmark.pedantic(lineitem.to_pandas, rounds=5, iterations=1, warmup_rounds=1)
 
@@ -800,30 +800,14 @@ def test_big_join_expr(benchmark, src, diff):
     benchmark(ir.Table.join, src, diff, ["validation_name"], how="outer")
 
 
-def test_big_join_execute(benchmark, nrels):
+def test_big_join_compile(benchmark, src, diff):
     pytest.importorskip("duckdb")
 
-    con = ibis.duckdb.connect()
-
-    # cache to avoid a request-per-union operand
-    src = make_big_union(
-        con.read_csv(
-            "https://github.com/ibis-project/ibis/files/12580336/source_pivot.csv"
-        )
-        .rename(id="column0")
-        .cache(),
-        nrels,
-    )
-
-    diff = make_big_union(
-        con.read_csv(
-            "https://github.com/ibis-project/ibis/files/12580340/differences_pivot.csv"
-        )
-        .rename(id="column0")
-        .cache(),
-        nrels,
-    )
-
     expr = src.join(diff, ["validation_name"], how="outer")
-    t = benchmark.pedantic(expr.to_pyarrow, rounds=1, iterations=1, warmup_rounds=1)
+    t = benchmark.pedantic(
+        lambda expr=expr: ibis.to_sql(expr, dialect="duckdb"),
+        rounds=1,
+        iterations=1,
+        warmup_rounds=1,
+    )
     assert len(t)

@@ -24,6 +24,8 @@ from ibis.backends.pandas.rewrites import (
     PandasRename,
     PandasResetIndex,
     PandasScalarSubquery,
+    PandasWindowFrame,
+    PandasWindowFunction,
     plan,
 )
 from ibis.common.dispatch import Dispatched
@@ -266,13 +268,8 @@ class PandasExecutor(Dispatched, PandasUtils):
         return agg
 
     @classmethod
-    def visit(cls, op: ops.Arbitrary, arg, where, how):
-        if how == "first":
-            return cls.agg(cls.kernels.reductions[ops.First], arg, where)
-        elif how == "last":
-            return cls.agg(cls.kernels.reductions[ops.Last], arg, where)
-        else:
-            raise OperationNotDefinedError(f"Arbitrary {how!r} is not supported")
+    def visit(cls, op: ops.Arbitrary, arg, where):
+        return cls.agg(cls.kernels.reductions[ops.Arbitrary], arg, where)
 
     @classmethod
     def visit(cls, op: ops.ArgMin | ops.ArgMax, arg, key, where):
@@ -473,9 +470,7 @@ class PandasExecutor(Dispatched, PandasUtils):
         return value
 
     @classmethod
-    def visit(
-        cls, op: ops.WindowFrame, table, start, end, group_by, order_by, **kwargs
-    ):
+    def visit(cls, op: PandasWindowFrame, table, how, start, end, group_by, order_by):
         if start is not None and op.start.preceding:
             start = -start
         if end is not None and op.end.preceding:
@@ -499,19 +494,19 @@ class PandasExecutor(Dispatched, PandasUtils):
 
         if start is None and end is None:
             return frame
-        elif op.how == "rows":
+        elif how == "rows":
             return RowsFrame(parent=frame)
-        elif op.how == "range":
+        elif how == "range":
             if len(order_keys) != 1:
                 raise NotImplementedError(
                     "Only single column order by is supported for range window frames"
                 )
             return RangeFrame(parent=frame, order_key=order_keys[0])
         else:
-            raise NotImplementedError(f"Unsupported window frame type: {op.how}")
+            raise NotImplementedError(f"Unsupported window frame type: {how}")
 
     @classmethod
-    def visit(cls, op: ops.WindowFunction, func, frame):
+    def visit(cls, op: PandasWindowFunction, func, frame):
         if isinstance(op.func, ops.Analytic):
             order_keys = [key.name for key in op.frame.order_by]
             return frame.apply_analytic(func, order_keys=order_keys)
@@ -591,8 +586,10 @@ class PandasExecutor(Dispatched, PandasUtils):
         newcols = {gen_name("sort_key"): col for col in keys}
         names = list(newcols.keys())
         df = parent.assign(**newcols)
-        df = df.sort_values(by=names, ascending=ascending, ignore_index=True)
-        return df.drop(names, axis=1)
+        df = df.sort_values(
+            by=names, ascending=ascending, ignore_index=True, kind="mergesort"
+        )
+        return df.drop(columns=names)
 
     @classmethod
     def visit(cls, op: PandasAggregate, parent, groups, metrics):

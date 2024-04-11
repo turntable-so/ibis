@@ -302,10 +302,10 @@ def test_create_table_from_schema(con, new_schema, temp_table):
     reason="temporary tables not implemented",
     raises=NotImplementedError,
 )
-@pytest.mark.notyet(
+@pytest.mark.never(
     ["risingwave"],
-    raises=PsycoPg2InternalError,
-    reason="truncate not supported upstream",
+    raises=com.UnsupportedOperationError,
+    reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
 )
 @pytest.mark.notimpl(
     ["flink"],
@@ -597,28 +597,71 @@ def test_insert_from_memtable(con, temp_table):
 
 
 @pytest.mark.notyet(
-    ["bigquery", "oracle", "dask", "exasol", "polars", "pandas", "druid"],
+    [
+        "bigquery",
+        "clickhouse",
+        "dask",
+        "druid",
+        "exasol",
+        "impala",
+        "mysql",
+        "oracle",
+        "pandas",
+        "polars",
+        "flink",
+        "pyspark",
+        "sqlite",
+    ],
     raises=AttributeError,
-    reason="doesn't support the common notion of a database",
+    reason="doesn't support the common notion of a catalog",
 )
-def test_list_databases(con):
+def test_list_catalogs(con):
     # Every backend has its own databases
-    test_databases = {
-        "clickhouse": {"system", "default", "ibis_testing"},
+    test_catalogs = {
         "datafusion": {"datafusion"},
         "duckdb": {"memory"},
         "exasol": set(),
-        "impala": set(),
+        "flink": set(),
         "mssql": {"ibis_testing"},
-        "mysql": {"ibis_testing", "information_schema"},
         "oracle": set(),
         "postgres": {"postgres", "ibis_testing"},
         "risingwave": {"dev"},
         "snowflake": {"IBIS_TESTING"},
-        "pyspark": set(),
-        "sqlite": {"main"},
         "trino": {"memory"},
-        "flink": set(),
+    }
+    result = set(con.list_catalogs())
+    assert test_catalogs[con.name] <= result
+
+
+@pytest.mark.notyet(
+    [
+        "dask",
+        "druid",
+        "pandas",
+        "polars",
+    ],
+    raises=AttributeError,
+    reason="doesn't support the common notion of a catalog",
+)
+def test_list_database_contents(con):
+    # Every backend has its own databases
+    test_databases = {
+        "bigquery": {"ibis_gbq_testing"},
+        "clickhouse": {"system", "default", "ibis_testing"},
+        "datafusion": {"public"},
+        "duckdb": {"pg_catalog", "main", "information_schema"},
+        "exasol": {"EXASOL"},
+        "flink": {"default_database"},
+        "impala": {"ibis_testing", "default", "_impala_builtins"},
+        "mssql": {"INFORMATION_SCHEMA", "dbo", "guest"},
+        "mysql": {"ibis_testing", "information_schema"},
+        "oracle": {"SYS", "IBIS"},
+        "postgres": {"public", "information_schema"},
+        "pyspark": set(),
+        "risingwave": {"public", "rw_catalog", "information_schema"},
+        "snowflake": {"IBIS_TESTING"},
+        "sqlite": {"main"},
+        "trino": {"default", "information_schema"},
     }
     result = set(con.list_databases())
     assert test_databases[con.name] <= result
@@ -668,12 +711,12 @@ def test_unsigned_integer_type(con, temp_table):
         ),
         param(
             "dask://",
-            marks=[mark.dask, mark.xfail(raises=NotImplementedError)],
+            marks=mark.dask,
             id="dask",
         ),
         param(
             "datafusion://",
-            marks=[mark.datafusion, mark.xfail(raises=NotImplementedError)],
+            marks=mark.datafusion,
             id="datafusion",
         ),
         param(
@@ -688,8 +731,13 @@ def test_unsigned_integer_type(con, temp_table):
         ),
         param(
             "pandas://",
-            marks=[mark.pandas, mark.xfail(raises=NotImplementedError)],
+            marks=mark.pandas,
             id="pandas",
+        ),
+        param(
+            "polars://",
+            marks=mark.polars,
+            id="polars",
         ),
         param(
             "postgres://postgres:postgres@localhost:5432",
@@ -1162,11 +1210,11 @@ def test_create_table_timestamp(con, temp_table):
 @mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
 @pytest.mark.never(
     ["risingwave"],
-    raises=PsycoPg2InternalError,
+    raises=com.UnsupportedOperationError,
     reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
 )
 def test_persist_expression_ref_count(backend, con, alltypes):
-    non_persisted_table = alltypes.mutate(test_column="calculation")
+    non_persisted_table = alltypes.mutate(test_column=ibis.literal("calculation"))
     persisted_table = non_persisted_table.cache()
 
     op = non_persisted_table.op()
@@ -1187,11 +1235,13 @@ def test_persist_expression_ref_count(backend, con, alltypes):
 @mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
 @pytest.mark.never(
     ["risingwave"],
-    raises=PsycoPg2InternalError,
+    raises=com.UnsupportedOperationError,
     reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
 )
 def test_persist_expression(backend, alltypes):
-    non_persisted_table = alltypes.mutate(test_column="calculation", other_calc="xyz")
+    non_persisted_table = alltypes.mutate(
+        test_column=ibis.literal("calculation"), other_calc=ibis.literal("xyz")
+    )
     persisted_table = non_persisted_table.cache()
     backend.assert_frame_equal(
         non_persisted_table.to_pandas(), persisted_table.to_pandas()
@@ -1206,12 +1256,12 @@ def test_persist_expression(backend, alltypes):
 @mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
 @pytest.mark.never(
     ["risingwave"],
-    raises=PsycoPg2InternalError,
+    raises=com.UnsupportedOperationError,
     reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
 )
 def test_persist_expression_contextmanager(backend, alltypes):
     non_cached_table = alltypes.mutate(
-        test_column="calculation", other_column="big calc"
+        test_column=ibis.literal("calculation"), other_column=ibis.literal("big calc")
     )
     with non_cached_table.cache() as cached_table:
         backend.assert_frame_equal(
@@ -1227,12 +1277,12 @@ def test_persist_expression_contextmanager(backend, alltypes):
 @mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
 @pytest.mark.never(
     ["risingwave"],
-    raises=PsycoPg2InternalError,
+    raises=com.UnsupportedOperationError,
     reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
 )
 def test_persist_expression_contextmanager_ref_count(backend, con, alltypes):
     non_cached_table = alltypes.mutate(
-        test_column="calculation", other_column="big calc 2"
+        test_column=ibis.literal("calculation"), other_column=ibis.literal("big calc 2")
     )
     op = non_cached_table.op()
     with non_cached_table.cache() as cached_table:
@@ -1250,13 +1300,13 @@ def test_persist_expression_contextmanager_ref_count(backend, con, alltypes):
 )
 @pytest.mark.never(
     ["risingwave"],
-    raises=PsycoPg2InternalError,
+    raises=com.UnsupportedOperationError,
     reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
 )
 @mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
 def test_persist_expression_multiple_refs(backend, con, alltypes):
     non_cached_table = alltypes.mutate(
-        test_column="calculation", other_column="big calc 2"
+        test_column=ibis.literal("calculation"), other_column=ibis.literal("big calc 2")
     )
     op = non_cached_table.op()
     with non_cached_table.cache() as cached_table:
@@ -1292,12 +1342,12 @@ def test_persist_expression_multiple_refs(backend, con, alltypes):
 @mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
 @pytest.mark.never(
     ["risingwave"],
-    raises=PsycoPg2InternalError,
+    raises=com.UnsupportedOperationError,
     reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
 )
 def test_persist_expression_repeated_cache(alltypes):
     non_cached_table = alltypes.mutate(
-        test_column="calculation", other_column="big calc 2"
+        test_column=ibis.literal("calculation"), other_column=ibis.literal("big calc 2")
     )
     with non_cached_table.cache() as cached_table:
         with cached_table.cache() as nested_cached_table:
@@ -1312,21 +1362,16 @@ def test_persist_expression_repeated_cache(alltypes):
 @mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
 @pytest.mark.never(
     ["risingwave"],
-    raises=PsycoPg2InternalError,
+    raises=com.UnsupportedOperationError,
     reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
 )
 @mark.notimpl(
     ["oracle"],
     reason="Oracle error message for a missing table/view doesn't include the name of the table",
 )
-@pytest.mark.never(
-    ["risingwave"],
-    raises=PsycoPg2InternalError,
-    reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
-)
 def test_persist_expression_release(con, alltypes):
     non_cached_table = alltypes.mutate(
-        test_column="calculation", other_column="big calc 3"
+        test_column=ibis.literal("calculation"), other_column=ibis.literal("big calc 3")
     )
     cached_table = non_cached_table.cache()
     cached_table.release()
@@ -1343,12 +1388,10 @@ def test_persist_expression_release(con, alltypes):
 
 
 @contextlib.contextmanager
-def gen_test_name(con: BaseBackend) -> str:
+def gen_test_name(con: BaseBackend):
     name = gen_name("test_table")
-    try:
-        yield name
-    finally:
-        con.drop_table(name, force=True)
+    yield name
+    con.drop_table(name, force=True)
 
 
 @mark.notimpl(
@@ -1391,59 +1434,92 @@ def test_overwrite(ddl_con, monkeypatch):
         assert t2.count().execute() == expected_count
 
 
-@pytest.mark.notyet(["datafusion"], reason="cannot list or drop databases")
+@pytest.mark.notyet(["datafusion"], reason="cannot list or drop catalogs")
+def test_create_catalog(con_create_catalog):
+    catalog = gen_name("test_create_catalog")
+    con_create_catalog.create_catalog(catalog)
+    assert catalog in con_create_catalog.list_catalogs()
+    con_create_catalog.drop_catalog(catalog)
+    assert catalog not in con_create_catalog.list_catalogs()
+
+
 def test_create_database(con_create_database):
     database = gen_name("test_create_database")
     con_create_database.create_database(database)
+    if con_create_database.name == "exasol":
+        database = database.upper()
     assert database in con_create_database.list_databases()
+    database = database.lower()
     con_create_database.drop_database(database)
+    if con_create_database.name == "exasol":
+        database = database.upper()
     assert database not in con_create_database.list_databases()
 
 
-def test_create_schema(con_create_schema):
-    schema = gen_name("test_create_schema")
-    con_create_schema.create_schema(schema)
-    assert schema in con_create_schema.list_schemas()
-    con_create_schema.drop_schema(schema)
-    assert schema not in con_create_schema.list_schemas()
+def test_list_schema_warns(con_list_schema):
+    with pytest.warns(FutureWarning):
+        con_list_schema.list_schemas()
 
 
-@pytest.mark.notimpl(
-    ["risingwave"],
-    raises=PsycoPg2InternalError,
-    reason="Feature is not yet implemented: information_schema.schemata is not supported,",
+@pytest.mark.never(
+    [
+        "clickhouse",
+        "mysql",
+        "pyspark",
+        "flink",
+    ],
+    reason="No schema methods",
 )
-def test_list_schemas(con_create_schema):
-    schemas = con_create_schema.list_schemas()
-    assert len(schemas) == len(set(schemas))
+def test_create_schema(con_create_database):
+    schema = gen_name("test_create_schema")
+    with pytest.warns(FutureWarning):
+        con_create_database.create_schema(schema)
+    with pytest.warns(FutureWarning):
+        if con_create_database.name == "exasol":
+            schema = schema.upper()
+        assert schema in con_create_database.list_schemas()
+        schema = schema.lower()
+    with pytest.warns(FutureWarning):
+        con_create_database.drop_schema(schema)
+    with pytest.warns(FutureWarning):
+        if con_create_database.name == "exasol":
+            schema = schema.upper()
+        assert schema not in con_create_database.list_schemas()
+
+
+def test_list_databases(con_create_database):
+    databases = con_create_database.list_databases()
+    assert len(databases) == len(set(databases))
 
 
 @pytest.mark.notyet(["datafusion"], reason="cannot list or drop databases")
-def test_create_database_schema(con_create_database_schema):
-    database = gen_name("test_create_database")
-    con_create_database_schema.create_database(database)
+def test_create_catalog_database(con_create_catalog_database):
+    catalog = gen_name("test_create_catalog")
+    con_create_catalog_database.create_catalog(catalog)
     try:
-        schema = gen_name("test_create_database_schema")
-        con_create_database_schema.create_schema(schema, database=database)
-        con_create_database_schema.drop_schema(schema, database=database)
+        database = gen_name("test_create_catalog_database")
+        con_create_catalog_database.create_database(database, catalog=catalog)
+        con_create_catalog_database.drop_database(database, catalog=catalog)
     finally:
-        con_create_database_schema.drop_database(database)
+        con_create_catalog_database.drop_catalog(catalog)
 
 
 @pytest.mark.notyet(["datafusion"], reason="cannot list or drop databases")
-def test_list_databases_schemas(con_create_database_schema):
-    database = gen_name("test_create_database")
-    con_create_database_schema.create_database(database)
+def test_list_catalogs_databases(con_create_catalog_database):
+    catalog = gen_name("test_create_catalog")
+    con_create_catalog_database.create_catalog(catalog)
     try:
-        schema = gen_name("test_create_database_schema")
-        con_create_database_schema.create_schema(schema, database=database)
+        database = gen_name("test_create_catalog_database")
+        con_create_catalog_database.create_database(database, catalog=catalog)
 
         try:
-            assert schema in con_create_database_schema.list_schemas(database=database)
+            assert database in con_create_catalog_database.list_databases(
+                catalog=catalog
+            )
         finally:
-            con_create_database_schema.drop_schema(schema, database=database)
+            con_create_catalog_database.drop_database(database, catalog=catalog)
     finally:
-        con_create_database_schema.drop_database(database)
+        con_create_catalog_database.drop_catalog(catalog)
 
 
 @pytest.mark.notyet(

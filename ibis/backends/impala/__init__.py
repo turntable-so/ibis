@@ -16,7 +16,6 @@ from impala.error import Error as ImpylaError
 
 import ibis.common.exceptions as com
 import ibis.config
-import ibis.expr.datatypes as dt
 import ibis.expr.schema as sch
 import ibis.expr.types as ir
 from ibis import util
@@ -43,7 +42,7 @@ from ibis.backends.impala.udf import (
 from ibis.backends.sql import SQLBackend
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator, Mapping
+    from collections.abc import Mapping
     from pathlib import Path
 
     import pandas as pd
@@ -209,6 +208,22 @@ class Backend(SQLBackend):
         return self._filter_with_like(databases.name.tolist(), like)
 
     def list_tables(self, like=None, database=None):
+        """Return the list of table names in the current database.
+
+        Parameters
+        ----------
+        like
+            A pattern in Python's regex format.
+        database
+            The database from which to list tables.
+            If not provided, the current database is used.
+
+        Returns
+        -------
+        list[str]
+            The list of the table names that match the pattern `like`.
+        """
+
         statement = "SHOW TABLES"
         if database is not None:
             statement += f" IN {database}"
@@ -338,7 +353,11 @@ class Backend(SQLBackend):
         self._safe_exec_sql(statement)
 
     def get_schema(
-        self, table_name: str, schema: str | None = None, database: str | None = None
+        self,
+        table_name: str,
+        *,
+        catalog: str | None = None,
+        database: str | None = None,
     ) -> sch.Schema:
         """Return a Schema object for the indicated table and database.
 
@@ -346,8 +365,8 @@ class Backend(SQLBackend):
         ----------
         table_name
             Table name
-        schema
-            Schema name. Unused in the impala backend.
+        catalog
+            Catalog name. Unused in the impala backend.
         database
             Database name
 
@@ -359,7 +378,7 @@ class Backend(SQLBackend):
         """
         query = sge.Describe(
             this=sg.table(
-                table_name, db=schema, catalog=database, quoted=self.compiler.quoted
+                table_name, db=database, catalog=catalog, quoted=self.compiler.quoted
             )
         )
 
@@ -369,33 +388,23 @@ class Backend(SQLBackend):
             zip(meta["name"], meta["type"].map(self.compiler.type_mapper.from_string))
         )
 
-    def _metadata(self, query: str) -> Iterator[tuple[str, dt.DataType]]:
-        """Return a Schema object for the indicated table and database.
-
-        Parameters
-        ----------
-        query
-            Query to execute against Impala
-
-        Returns
-        -------
-        Iterator[tuple[str, dt.DataType]]
-            Iterator of column name and Ibis type pairs
-
-        """
-        tmpview = util.gen_name("impala_tmpview")
-        query = f"CREATE VIEW IF NOT EXISTS {tmpview} AS {query}"
-
-        with self._safe_raw_sql(query) as cur:
-            try:
-                cur.execute(f"DESCRIBE {tmpview}")
-                meta = fetchall(cur)
-            finally:
-                cur.execute(f"DROP VIEW IF EXISTS {tmpview}")
-
-        return zip(
-            meta["name"], meta["type"].map(self.compiler.type_mapper.from_string)
+    def _get_schema_using_query(self, query: str) -> sch.Schema:
+        """Return a Schema object for the indicated table and database."""
+        name = util.gen_name(f"{self.name}_metadata")
+        ident = sg.to_identifier(name, quoted=self.compiler.quoted)
+        create_sql = sge.Create(
+            kind="VIEW", this=ident, exists=True, expression=query, dialect=self.dialect
         )
+        drop_sql = sge.Drop(kind="VIEW", this=ident, exists=True)
+
+        with self._safe_raw_sql(create_sql):
+            pass
+
+        try:
+            return self.get_schema(name)
+        finally:
+            with self._safe_raw_sql(drop_sql):
+                pass
 
     @property
     def client_options(self):

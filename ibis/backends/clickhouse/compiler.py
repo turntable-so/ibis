@@ -11,15 +11,11 @@ import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
 from ibis import util
-from ibis.backends.sql.compiler import (
-    NULL,
-    STAR,
-    SQLGlotCompiler,
-    parenthesize,
-)
+from ibis.backends.sql.compiler import NULL, STAR, SQLGlotCompiler
 from ibis.backends.sql.datatypes import ClickHouseType
 from ibis.backends.sql.dialects import ClickHouse
 from ibis.backends.sql.rewrites import rewrite_sample_as_filter
+from ibis.expr.rewrites import rewrite_stringslice
 
 
 class ClickHouseCompiler(SQLGlotCompiler):
@@ -27,7 +23,11 @@ class ClickHouseCompiler(SQLGlotCompiler):
 
     dialect = ClickHouse
     type_mapper = ClickHouseType
-    rewrites = (rewrite_sample_as_filter, *SQLGlotCompiler.rewrites)
+    rewrites = (
+        rewrite_sample_as_filter,
+        rewrite_stringslice,
+        *SQLGlotCompiler.rewrites,
+    )
 
     UNSUPPORTED_OPERATIONS = frozenset(
         (
@@ -46,6 +46,7 @@ class ClickHouseCompiler(SQLGlotCompiler):
         ops.Any: "max",
         ops.ApproxCountDistinct: "uniqHLL12",
         ops.ApproxMedian: "median",
+        ops.Arbitrary: "any",
         ops.ArgMax: "argMax",
         ops.ArgMin: "argMin",
         ops.ArrayCollect: "groupArray",
@@ -163,11 +164,11 @@ class ClickHouseCompiler(SQLGlotCompiler):
         return self.f.arrayFlatten(self.f.arrayMap(func, self.f.range(times)))
 
     def visit_ArraySlice(self, op, *, arg, start, stop):
-        start = parenthesize(op.start, start)
+        start = self._add_parens(op.start, start)
         start_correct = self.if_(start < 0, start, start + 1)
 
         if stop is not None:
-            stop = parenthesize(op.stop, stop)
+            stop = self._add_parens(op.stop, stop)
 
             length = self.if_(
                 stop < 0,
@@ -207,22 +208,6 @@ class ClickHouseCompiler(SQLGlotCompiler):
             )
         return self.agg.corr(left, right, where=where)
 
-    def visit_Arbitrary(self, op, *, arg, how, where):
-        if how == "first":
-            return self.agg.any(arg, where=where)
-        elif how == "last":
-            return self.agg.anyLast(arg, where=where)
-        else:
-            assert how == "heavy"
-            return self.agg.anyHeavy(arg, where=where)
-
-    def visit_Substring(self, op, *, arg, start, length):
-        # Clickhouse is 1-indexed
-        suffix = (length,) * (length is not None)
-        if_pos = self.f.substring(arg, start + 1, *suffix)
-        if_neg = self.f.substring(arg, self.f.length(arg) + start + 1, *suffix)
-        return self.if_(start >= 0, if_pos, if_neg)
-
     def visit_StringFind(self, op, *, arg, substr, start, end):
         if end is not None:
             raise com.UnsupportedOperationError(
@@ -230,9 +215,9 @@ class ClickHouseCompiler(SQLGlotCompiler):
             )
 
         if start is not None:
-            return self.f.locate(arg, substr, start)
+            return self.f.position(arg, substr, start)
 
-        return self.f.locate(arg, substr)
+        return self.f.position(arg, substr)
 
     def visit_RegexSearch(self, op, *, arg, pattern):
         return sge.RegexpLike(this=arg, expression=pattern)
@@ -483,7 +468,7 @@ class ClickHouseCompiler(SQLGlotCompiler):
         return self.f.repeat(arg, self.f.accurateCast(times, "UInt64"))
 
     def visit_StringContains(self, op, haystack, needle):
-        return self.f.locate(haystack, needle) > 0
+        return self.f.position(haystack, needle) > 0
 
     def visit_DayOfWeekIndex(self, op, *, arg):
         weekdays = len(calendar.day_name)

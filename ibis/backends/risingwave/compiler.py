@@ -22,6 +22,7 @@ class RisingwaveCompiler(PostgresCompiler):
 
     UNSUPPORTED_OPERATIONS = frozenset(
         (
+            ops.Arbitrary,
             ops.DateFromYMD,
             ops.Mode,
             ops.RandomUUID,
@@ -39,6 +40,9 @@ class RisingwaveCompiler(PostgresCompiler):
         ops.First: "first_value",
         ops.Last: "last_value",
     }
+
+    def visit_DateNow(self, op):
+        return self.cast(sge.CurrentTimestamp(), dt.date)
 
     def visit_Correlation(self, op, *, left, right, how, where):
         if how == "sample":

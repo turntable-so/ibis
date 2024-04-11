@@ -10,16 +10,11 @@ import toolz
 import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
-from ibis.backends.sql.compiler import (
-    FALSE,
-    NULL,
-    STAR,
-    SQLGlotCompiler,
-    paren,
-)
+from ibis.backends.sql.compiler import FALSE, NULL, STAR, SQLGlotCompiler
 from ibis.backends.sql.datatypes import TrinoType
 from ibis.backends.sql.dialects import Trino
 from ibis.backends.sql.rewrites import exclude_unsupported_window_frame_from_ops
+from ibis.expr.rewrites import rewrite_stringslice
 
 
 class TrinoCompiler(SQLGlotCompiler):
@@ -27,7 +22,11 @@ class TrinoCompiler(SQLGlotCompiler):
 
     dialect = Trino
     type_mapper = TrinoType
-    rewrites = (exclude_unsupported_window_frame_from_ops, *SQLGlotCompiler.rewrites)
+    rewrites = (
+        exclude_unsupported_window_frame_from_ops,
+        rewrite_stringslice,
+        *SQLGlotCompiler.rewrites,
+    )
     quoted = True
 
     NAN = sg.func("nan")
@@ -45,6 +44,7 @@ class TrinoCompiler(SQLGlotCompiler):
     )
 
     SIMPLE_OPS = {
+        ops.Arbitrary: "any_value",
         ops.Pi: "pi",
         ops.E: "e",
         ops.RegexReplace: "regexp_replace",
@@ -128,13 +128,6 @@ class TrinoCompiler(SQLGlotCompiler):
 
         return self.agg.corr(left, right, where=where)
 
-    def visit_Arbitrary(self, op, *, arg, how, where):
-        if how != "first":
-            raise com.UnsupportedOperationError(
-                'Trino only supports how="first" for `arbitrary` reduction'
-            )
-        return self.agg.arbitrary(arg, where=where)
-
     def visit_BitXor(self, op, *, arg, where):
         a, b = map(sg.to_identifier, "ab")
         input_fn = combine_fn = sge.Lambda(
@@ -181,7 +174,9 @@ class TrinoCompiler(SQLGlotCompiler):
         return self.f.json_extract(arg, self.f.format(f"$[{fmt}]", index))
 
     def visit_DayOfWeekIndex(self, op, *, arg):
-        return self.cast(paren(self.f.day_of_week(arg) + 6) % 7, op.dtype)
+        return self.cast(
+            sge.paren(self.f.day_of_week(arg) + 6, copy=False) % 7, op.dtype
+        )
 
     def visit_DayOfWeekName(self, op, *, arg):
         return self.f.date_format(arg, "%W")

@@ -140,7 +140,7 @@ class DataType(Concrete, Coercible):
             raise TypeError(
                 f"invalid equality comparison between DataType and {type(other)}"
             )
-        return super().__cached_equals__(other)
+        return self == other
 
     def cast(self, other, **kwargs):
         # TODO(kszucs): remove it or deprecate it?
@@ -247,11 +247,6 @@ class DataType(Concrete, Coercible):
 
         return PolarsType.to_ibis(polars_type, nullable=nullable)
 
-    @classmethod
-    def from_dask(cls, dask_type, nullable=True) -> Self:
-        """Return the equivalent ibis datatype."""
-        return cls.from_pandas(dask_type, nullable=nullable)
-
     def to_numpy(self):
         """Return the equivalent numpy datatype."""
         from ibis.formats.numpy import NumpyType
@@ -275,10 +270,6 @@ class DataType(Concrete, Coercible):
         from ibis.formats.polars import PolarsType
 
         return PolarsType.from_ibis(self)
-
-    def to_dask(self):
-        """Return the equivalent dask datatype."""
-        return self.to_pandas()
 
     def is_array(self) -> bool:
         """Return True if an instance of an Array type."""
