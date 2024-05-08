@@ -575,7 +575,8 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
 
     def _make_session(self) -> tuple[str, str]:
         if (
-            self._session_dataset is None
+            not hasattr(self, "_session_dataset")
+            or self._session_dataset is None
             and (client := getattr(self, "client", None)) is not None
         ):
             job_config = bq.QueryJobConfig(use_query_cache=False)
