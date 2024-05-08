@@ -12,9 +12,7 @@ import ibis.expr.operations as ops
 from ibis.backends.sql.compiler import NULL, SQLGlotCompiler
 from ibis.backends.sql.datatypes import SQLiteType
 from ibis.backends.sql.dialects import SQLite
-from ibis.backends.sql.rewrites import rewrite_sample_as_filter
 from ibis.common.temporal import DateUnit, IntervalUnit
-from ibis.expr.rewrites import rewrite_stringslice
 
 
 @public
@@ -23,55 +21,49 @@ class SQLiteCompiler(SQLGlotCompiler):
 
     dialect = SQLite
     type_mapper = SQLiteType
-    rewrites = (
-        rewrite_sample_as_filter,
-        rewrite_stringslice,
-        *SQLGlotCompiler.rewrites,
-    )
 
     NAN = NULL
     POS_INF = sge.Literal.number("1e999")
     NEG_INF = sge.Literal.number("-1e999")
 
-    UNSUPPORTED_OPERATIONS = frozenset(
-        (
-            ops.Levenshtein,
-            ops.RegexSplit,
-            ops.StringSplit,
-            ops.IsNan,
-            ops.IsInf,
-            ops.Covariance,
-            ops.Correlation,
-            ops.Quantile,
-            ops.MultiQuantile,
-            ops.Median,
-            ops.ApproxMedian,
-            ops.Array,
-            ops.ArrayConcat,
-            ops.ArrayStringJoin,
-            ops.ArrayCollect,
-            ops.ArrayContains,
-            ops.ArrayFlatten,
-            ops.ArrayLength,
-            ops.ArraySort,
-            ops.ArrayStringJoin,
-            ops.CountDistinctStar,
-            ops.IntervalBinary,
-            ops.IntervalAdd,
-            ops.IntervalSubtract,
-            ops.IntervalMultiply,
-            ops.IntervalFloorDivide,
-            ops.IntervalFromInteger,
-            ops.TimestampBucket,
-            ops.TimestampAdd,
-            ops.TimestampSub,
-            ops.TimestampDiff,
-            ops.StringToTimestamp,
-            ops.TimeDelta,
-            ops.DateDelta,
-            ops.TimestampDelta,
-            ops.TryCast,
-        )
+    UNSUPPORTED_OPS = (
+        ops.Levenshtein,
+        ops.RegexSplit,
+        ops.StringSplit,
+        ops.IsNan,
+        ops.IsInf,
+        ops.Covariance,
+        ops.Correlation,
+        ops.Quantile,
+        ops.MultiQuantile,
+        ops.Median,
+        ops.ApproxMedian,
+        ops.Array,
+        ops.ArrayConcat,
+        ops.ArrayStringJoin,
+        ops.ArrayCollect,
+        ops.ArrayContains,
+        ops.ArrayFlatten,
+        ops.ArrayLength,
+        ops.ArraySort,
+        ops.ArrayStringJoin,
+        ops.CountDistinctStar,
+        ops.IntervalBinary,
+        ops.IntervalAdd,
+        ops.IntervalSubtract,
+        ops.IntervalMultiply,
+        ops.IntervalFloorDivide,
+        ops.IntervalFromInteger,
+        ops.TimestampBucket,
+        ops.TimestampAdd,
+        ops.TimestampSub,
+        ops.TimestampDiff,
+        ops.StringToDate,
+        ops.StringToTimestamp,
+        ops.TimeDelta,
+        ops.DateDelta,
+        ops.TimestampDelta,
+        ops.TryCast,
     )
 
     SIMPLE_OPS = {
@@ -103,7 +95,6 @@ class SQLiteCompiler(SQLGlotCompiler):
         ops.Mode: "_ibis_mode",
         ops.Time: "time",
         ops.Date: "date",
-        ops.RandomUUID: "uuid",
     }
 
     def _aggregate(self, funcname: str, *args, where):
@@ -213,7 +204,7 @@ class SQLiteCompiler(SQLGlotCompiler):
 
         return arg
 
-    def visit_RandomScalar(self, op):
+    def visit_RandomScalar(self, op, **kwargs):
         return 0.5 + self.f.random() / sge.Literal.number(float(-1 << 64))
 
     def visit_Cot(self, op, *, arg):
@@ -233,6 +224,34 @@ class SQLiteCompiler(SQLGlotCompiler):
 
         agg = self._aggregate(func, key, where=cond)
         return self.f.anon.json_extract(self.f.json_array(arg, agg), "$[0]")
+
+    def visit_UnwrapJSONString(self, op, *, arg):
+        return self.if_(
+            self.f.json_type(arg).eq("text"), self.f.json_extract_scalar(arg, "$"), NULL
+        )
+
+    def visit_UnwrapJSONInt64(self, op, *, arg):
+        return self.if_(
+            self.f.json_type(arg).eq("integer"),
+            self.cast(self.f.json_extract_scalar(arg, "$"), op.dtype),
+            NULL,
+        )
+
+    def visit_UnwrapJSONFloat64(self, op, *, arg):
+        return self.if_(
+            self.f.json_type(arg).isin("integer", "real"),
+            self.cast(self.f.json_extract_scalar(arg, "$"), op.dtype),
+            NULL,
+        )
+
+    def visit_UnwrapJSONBoolean(self, op, *, arg):
+        return self.if_(
+            # isin doesn't work here, with a strange error from sqlite about a
+            # misused row value
+            self.f.json_type(arg).isin("true", "false"),
+            self.cast(self.f.json_extract_scalar(arg, "$"), dt.int64),
+            NULL,
+        )
 
     def visit_Variance(self, op, *, arg, how, where):
         return self._aggregate(f"_ibis_var_{op.how}", arg, where=where)
@@ -392,7 +411,7 @@ class SQLiteCompiler(SQLGlotCompiler):
         return (self.f.strftime("%j", date) - 1) / 7 + 1
 
     def visit_ExtractEpochSeconds(self, op, *, arg):
-        return self.cast((self.f.julianday(arg) - 2440587.5) * 86400.0, dt.int64)
+        return self.cast(self.f.strftime("%s", arg), dt.int64)
 
     def visit_DayOfWeekIndex(self, op, *, arg):
         return self.cast(

@@ -15,9 +15,7 @@ from ibis.backends.sql.rewrites import (
     exclude_unsupported_window_frame_from_ops,
     exclude_unsupported_window_frame_from_rank,
     exclude_unsupported_window_frame_from_row_number,
-    rewrite_sample_as_filter,
 )
-from ibis.expr.rewrites import rewrite_stringslice
 
 
 class FlinkCompiler(SQLGlotCompiler):
@@ -25,44 +23,39 @@ class FlinkCompiler(SQLGlotCompiler):
     dialect = Flink
     type_mapper = FlinkType
     rewrites = (
-        rewrite_sample_as_filter,
         exclude_unsupported_window_frame_from_row_number,
         exclude_unsupported_window_frame_from_ops,
         exclude_unsupported_window_frame_from_rank,
-        rewrite_stringslice,
         *SQLGlotCompiler.rewrites,
     )
 
-    UNSUPPORTED_OPERATIONS = frozenset(
-        (
-            ops.AnalyticVectorizedUDF,
-            ops.ApproxMedian,
-            ops.ArgMax,
-            ops.ArgMin,
-            ops.ArrayCollect,
-            ops.ArrayFlatten,
-            ops.ArraySort,
-            ops.ArrayStringJoin,
-            ops.Correlation,
-            ops.CountDistinctStar,
-            ops.Covariance,
-            ops.DateDiff,
-            ops.ExtractURLField,
-            ops.FindInSet,
-            ops.IsInf,
-            ops.IsNan,
-            ops.Levenshtein,
-            ops.Median,
-            ops.MultiQuantile,
-            ops.NthValue,
-            ops.Quantile,
-            ops.ReductionVectorizedUDF,
-            ops.RegexSplit,
-            ops.RowID,
-            ops.StringSplit,
-            ops.Translate,
-            ops.Unnest,
-        )
+    UNSUPPORTED_OPS = (
+        ops.AnalyticVectorizedUDF,
+        ops.ApproxMedian,
+        ops.ArgMax,
+        ops.ArgMin,
+        ops.ArrayCollect,
+        ops.ArrayFlatten,
+        ops.ArraySort,
+        ops.ArrayStringJoin,
+        ops.Correlation,
+        ops.CountDistinctStar,
+        ops.Covariance,
+        ops.DateDiff,
+        ops.ExtractURLField,
+        ops.FindInSet,
+        ops.IsInf,
+        ops.IsNan,
+        ops.Levenshtein,
+        ops.Median,
+        ops.MultiQuantile,
+        ops.NthValue,
+        ops.Quantile,
+        ops.ReductionVectorizedUDF,
+        ops.RegexSplit,
+        ops.RowID,
+        ops.StringSplit,
+        ops.Translate,
     )
 
     SIMPLE_OPS = {
@@ -80,11 +73,10 @@ class FlinkCompiler(SQLGlotCompiler):
         ops.MapKeys: "map_keys",
         ops.MapValues: "map_values",
         ops.Power: "power",
-        ops.RandomScalar: "rand",
-        ops.RandomUUID: "uuid",
         ops.RegexSearch: "regexp",
         ops.StrRight: "right",
         ops.StringLength: "char_length",
+        ops.StringToDate: "to_date",
         ops.StringToTimestamp: "to_timestamp",
         ops.Strip: "trim",
         ops.TypeOf: "typeof",

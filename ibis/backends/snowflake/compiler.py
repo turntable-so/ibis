@@ -11,17 +11,16 @@ import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
 from ibis import util
-from ibis.backends.sql.compiler import NULL, C, FuncGen, SQLGlotCompiler
+from ibis.backends.sql.compiler import NULL, STAR, C, FuncGen, SQLGlotCompiler
 from ibis.backends.sql.datatypes import SnowflakeType
 from ibis.backends.sql.dialects import Snowflake
 from ibis.backends.sql.rewrites import (
     exclude_unsupported_window_frame_from_ops,
     exclude_unsupported_window_frame_from_row_number,
-    replace_log2,
-    replace_log10,
+    lower_log2,
+    lower_log10,
     rewrite_empty_order_by_window,
 )
-from ibis.expr.rewrites import rewrite_stringslice
 
 
 class SnowflakeFuncGen(FuncGen):
@@ -39,22 +38,23 @@ class SnowflakeCompiler(SQLGlotCompiler):
         exclude_unsupported_window_frame_from_row_number,
         exclude_unsupported_window_frame_from_ops,
         rewrite_empty_order_by_window,
-        rewrite_stringslice,
-        replace_log2,
-        replace_log10,
         *SQLGlotCompiler.rewrites,
     )
 
-    UNSUPPORTED_OPERATIONS = frozenset(
-        (
-            ops.ArrayMap,
-            ops.ArrayFilter,
-            ops.RowID,
-            ops.MultiQuantile,
-            ops.IntervalFromInteger,
-            ops.IntervalAdd,
-            ops.TimestampDiff,
-        )
+    LOWERED_OPS = {
+        ops.Log2: lower_log2,
+        ops.Log10: lower_log10,
+        ops.Sample: None,
+    }
+
+    UNSUPPORTED_OPS = (
+        ops.ArrayMap,
+        ops.ArrayFilter,
+        ops.RowID,
+        ops.MultiQuantile,
+        ops.IntervalFromInteger,
+        ops.IntervalAdd,
+        ops.TimestampDiff,
     )
 
     SIMPLE_OPS = {
@@ -75,10 +75,11 @@ class SnowflakeCompiler(SQLGlotCompiler):
         ops.BitwiseRightShift: "bitshiftright",
         ops.BitwiseXor: "bitxor",
         ops.EndsWith: "endswith",
+        ops.ExtractIsoYear: "yearofweekiso",
         ops.Hash: "hash",
         ops.Median: "median",
         ops.Mode: "mode",
-        ops.RandomUUID: "uuid_string",
+        ops.StringToDate: "to_date",
         ops.StringToTimestamp: "to_timestamp_tz",
         ops.TimeFromHMS: "time_from_parts",
         ops.TimestampFromYMDHMS: "timestamp_from_parts",
@@ -109,9 +110,6 @@ class SnowflakeCompiler(SQLGlotCompiler):
     def visit_Literal(self, op, *, value, dtype):
         if value is None:
             return super().visit_Literal(op, value=value, dtype=dtype)
-        elif dtype.is_string():
-            # sqlglot doesn't escape backslashes in strings
-            return sge.convert(value.replace("\\", "\\\\"))
         elif dtype.is_timestamp():
             args = (
                 value.year,
@@ -182,6 +180,18 @@ class SnowflakeCompiler(SQLGlotCompiler):
     def visit_ToJSONArray(self, op, *, arg):
         return self.if_(self.f.is_array(arg), arg, NULL)
 
+    def visit_UnwrapJSONString(self, op, *, arg):
+        return self.if_(self.f.is_varchar(arg), self.f.as_varchar(arg), NULL)
+
+    def visit_UnwrapJSONInt64(self, op, *, arg):
+        return self.if_(self.f.is_integer(arg), self.f.as_integer(arg), NULL)
+
+    def visit_UnwrapJSONFloat64(self, op, *, arg):
+        return self.if_(self.f.is_double(arg), self.f.as_double(arg), NULL)
+
+    def visit_UnwrapJSONBoolean(self, op, *, arg):
+        return self.if_(self.f.is_boolean(arg), self.f.as_boolean(arg), NULL)
+
     def visit_IsNan(self, op, *, arg):
         return arg.eq(self.NAN)
 
@@ -241,10 +251,13 @@ class SnowflakeCompiler(SQLGlotCompiler):
     def visit_Log(self, op, *, arg, base):
         return self.f.log(base, arg, dialect=self.dialect)
 
-    def visit_RandomScalar(self, op):
+    def visit_RandomScalar(self, op, **kwargs):
         return self.f.uniform(
             self.f.to_double(0.0), self.f.to_double(1.0), self.f.random()
         )
+
+    def visit_RandomUUID(self, op, **kwargs):
+        return self.f.uuid_string()
 
     def visit_ApproxMedian(self, op, *, arg, where):
         return self.agg.approx_percentile(arg, 0.5, where=where)
@@ -453,7 +466,20 @@ class SnowflakeCompiler(SQLGlotCompiler):
         # the constant into an expression
         if where is not None:
             arg = self.if_(where, arg, NULL)
-        return self.f.percentile_cont(arg, quantile)
+
+        # The Snowflake SQLGlot dialect rewrites calls to `percentile_cont` to
+        # include     WITHIN GROUP (ORDER BY ...)
+        # as per https://docs.snowflake.com/en/sql-reference/functions/percentile_cont
+        # using the rule `add_within_group_for_percentiles`
+        #
+        # If we have copy=False set in our call to `compile`, if there is more
+        # than one quantile, the rewrite rule fails on the second pass because
+        # of some mutation in the first pass. To avoid this error, we create the
+        # expression with the within group included already and skip the (now
+        # unneeded) rewrite rule.
+        order_by = sge.Order(expressions=[sge.Ordered(this=arg)])
+        quantile = self.f.percentile_cont(quantile)
+        return sge.WithinGroup(this=quantile, expression=order_by)
 
     def visit_CountStar(self, op, *, arg, where):
         if where is None:
@@ -597,3 +623,14 @@ class SnowflakeCompiler(SQLGlotCompiler):
             )
             .subquery()
         )
+
+    def visit_Sample(
+        self, op, *, parent, fraction: float, method: str, seed: int | None, **_
+    ):
+        sample = sge.TableSample(
+            this=parent,
+            method="bernoulli" if method == "row" else "system",
+            percent=sge.convert(fraction * 100.0),
+            seed=None if seed is None else sge.convert(seed),
+        )
+        return sg.select(STAR).from_(sample)

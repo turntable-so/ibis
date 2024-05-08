@@ -48,6 +48,7 @@ _from_sqlglot_types = {
     typecode.NULL: dt.Null,
     typecode.NVARCHAR: dt.String,
     typecode.OBJECT: partial(dt.Map, dt.string, dt.json),
+    typecode.ROWVERSION: partial(dt.Binary, nullable=False),
     typecode.SMALLINT: dt.Int16,
     typecode.SMALLMONEY: dt.Decimal(10, 4),
     typecode.TEXT: dt.String,
@@ -88,7 +89,6 @@ _from_sqlglot_types = {
     # HLLSKETCH = auto()
     # IMAGE = auto()
     # IPPREFIX = auto()
-    # ROWVERSION = auto()
     # SERIAL = auto()
     # SET = auto()
     # SMALLSERIAL = auto()
@@ -166,7 +166,7 @@ class SqlglotType(TypeMapper):
         if isinstance(typecode, sge.Interval):
             typ = sge.DataType(
                 this=sge.DataType.Type.INTERVAL,
-                expressions=[sge.IntervalSpan(this=typecode.unit)],
+                expressions=[typecode.unit],
             )
             typecode = typ.this
 
@@ -244,6 +244,14 @@ class SqlglotType(TypeMapper):
     def _from_sqlglot_TIMESTAMPLTZ(cls, scale=None) -> dt.Timestamp:
         return dt.Timestamp(
             timezone="UTC",
+            scale=cls.default_temporal_scale if scale is None else int(scale.this.this),
+            nullable=cls.default_nullable,
+        )
+
+    @classmethod
+    def _from_sqlglot_TIMESTAMPNTZ(cls, scale=None) -> dt.Timestamp:
+        return dt.Timestamp(
+            timezone=None,
             scale=cls.default_temporal_scale if scale is None else int(scale.this.this),
             nullable=cls.default_nullable,
         )
@@ -395,6 +403,18 @@ class PostgresType(SqlglotType):
             "macaddr[]": dt.Array(dt.macaddr),
             "macaddr8": dt.macaddr,
             "macaddr8[]": dt.Array(dt.macaddr),
+            "name": dt.string,
+            # information schema dtypes
+            # defined as nonnegative int
+            "information_schema.cardinal_number": dt.uint64,
+            # character string with no specific max length
+            "information_schema.character_data": dt.string,
+            # same as above but used for SQL identifiers
+            "information_schema.sql_identifier": dt.string,
+            # "domain over type `timestamp with time zone`"
+            "information_schema.time_stamp": dt.timestamp,
+            # the pre-bool version of bool kept for backwards compatibility
+            "information_schema.yes_or_no": dt.string,
         }
     )
 
@@ -405,6 +425,16 @@ class PostgresType(SqlglotType):
         if not dtype.value_type.is_string():
             raise com.IbisTypeError("Postgres only supports string values in maps")
         return sge.DataType(this=typecode.HSTORE)
+
+    @classmethod
+    def from_string(cls, text: str, nullable: bool | None = None) -> dt.DataType:
+        if text.lower().startswith("vector"):
+            text = "vector"
+        if dtype := cls.unknown_type_strings.get(text.lower()):
+            return dtype
+
+        sgtype = sg.parse_one(text, into=sge.DataType, read=cls.dialect)
+        return cls.to_ibis(sgtype, nullable=nullable)
 
 
 class RisingWaveType(PostgresType):
@@ -733,6 +763,10 @@ class BigQueryType(SqlglotType):
 
     @classmethod
     def _from_sqlglot_TIMESTAMP(cls) -> dt.Timestamp:
+        return dt.Timestamp(timezone=None, nullable=cls.default_nullable)
+
+    @classmethod
+    def _from_sqlglot_TIMESTAMPTZ(cls) -> dt.Timestamp:
         return dt.Timestamp(timezone="UTC", nullable=cls.default_nullable)
 
     @classmethod

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import os
+
 import pandas as pd
 import pandas.testing as tm
 import pyarrow as pa
@@ -191,15 +193,21 @@ def test_list_tables_database(con):
 
 
 @pytest.fixture
-def temp_db(con, worker_id):
-    dbname = f"clickhouse_create_database_{worker_id}"
+def tmpcon(worker_id):
+    dbname = f"clickhouse_database_{worker_id}"
+    con = ibis.clickhouse.connect(
+        host=os.environ.get("IBIS_TEST_CLICKHOUSE_HOST", "localhost"),
+        user=os.environ.get("IBIS_TEST_CLICKHOUSE_USER", "default"),
+        port=int(os.environ.get("IBIS_TEST_CLICKHOUSE_PORT", 8123)),
+        password=os.environ.get("IBIS_TEST_CLICKHOUSE_PASSWORD", ""),
+    )
     con.create_database(dbname, force=True)
-    yield dbname
+    yield con
     con.drop_database(dbname, force=True)
 
 
-def test_list_tables_empty_database(con, temp_db):
-    assert not con.list_tables(database=temp_db)
+def test_list_tables_empty_database(tmpcon):
+    assert not tmpcon.list_tables()
 
 
 @pytest.mark.parametrize("temp", [True, False], ids=["temp", "no_temp"])
@@ -314,3 +322,27 @@ def test_builtin_agg_udf(con, func):
         external_data=con._normalize_external_tables({table_name: t.op()}),
     ).squeeze()
     assert result == expected
+
+
+def test_create_table_no_syntax_error(con):
+    schema = ibis.schema(
+        [
+            ("play_id", "!string"),
+            ("uid", "!int64"),
+            ("feat1", "float64"),
+            ("feat2", "float64"),
+            ("feat3", "float64"),
+            ("feat4", "float64"),
+            ("feat5", "float64"),
+            ("feat6", "float64"),
+            ("feat7", "float64"),
+            ("feat8", "float64"),
+            ("feat9", "float64"),
+            ("feat10", "float64"),
+            ("feat11", "float64"),
+            ("play_timestamp", "!int64"),
+            ("tag_date", "!int32"),
+        ]
+    )
+    t = con.create_table(gen_name("clickouse_temp_table"), schema=schema, temp=True)
+    assert t.count().execute() == 0

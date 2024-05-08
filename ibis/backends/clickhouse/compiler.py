@@ -14,8 +14,6 @@ from ibis import util
 from ibis.backends.sql.compiler import NULL, STAR, SQLGlotCompiler
 from ibis.backends.sql.datatypes import ClickHouseType
 from ibis.backends.sql.dialects import ClickHouse
-from ibis.backends.sql.rewrites import rewrite_sample_as_filter
-from ibis.expr.rewrites import rewrite_stringslice
 
 
 class ClickHouseCompiler(SQLGlotCompiler):
@@ -23,22 +21,16 @@ class ClickHouseCompiler(SQLGlotCompiler):
 
     dialect = ClickHouse
     type_mapper = ClickHouseType
-    rewrites = (
-        rewrite_sample_as_filter,
-        rewrite_stringslice,
-        *SQLGlotCompiler.rewrites,
-    )
 
-    UNSUPPORTED_OPERATIONS = frozenset(
-        (
-            ops.RowID,
-            ops.CumeDist,
-            ops.PercentRank,
-            ops.Time,
-            ops.TimeDelta,
-            ops.StringToTimestamp,
-            ops.Levenshtein,
-        )
+    UNSUPPORTED_OPS = (
+        ops.RowID,
+        ops.CumeDist,
+        ops.PercentRank,
+        ops.Time,
+        ops.TimeDelta,
+        ops.StringToTimestamp,
+        ops.StringToDate,
+        ops.Levenshtein,
     )
 
     SIMPLE_OPS = {
@@ -80,6 +72,7 @@ class ClickHouseCompiler(SQLGlotCompiler):
         ops.ExtractSecond: "toSecond",
         ops.ExtractWeekOfYear: "toISOWeek",
         ops.ExtractYear: "toYear",
+        ops.ExtractIsoYear: "toISOYear",
         ops.First: "any",
         ops.IntegerRange: "range",
         ops.IsInf: "isInfinite",
@@ -98,8 +91,6 @@ class ClickHouseCompiler(SQLGlotCompiler):
         ops.NotNull: "isNotNull",
         ops.NullIf: "nullIf",
         ops.RStrip: "trimRight",
-        ops.RandomScalar: "randCanonical",
-        ops.RandomUUID: "generateUUIDv4",
         ops.RegexReplace: "replaceRegexpAll",
         ops.RowNumber: "row_number",
         ops.StartsWith: "startsWith",
@@ -280,8 +271,6 @@ class ClickHouseCompiler(SQLGlotCompiler):
         if dtype.is_inet():
             v = str(value)
             return self.f.toIPv6(v) if ":" in v else self.f.toIPv4(v)
-        elif dtype.is_string():
-            return sge.convert(str(value).replace(r"\0", r"\\0"))
         elif dtype.is_decimal():
             precision = dtype.precision
             if precision is None or not 1 <= precision <= 76:
@@ -636,6 +625,12 @@ class ClickHouseCompiler(SQLGlotCompiler):
 
     def visit_RegexSplit(self, op, *, arg, pattern):
         return self.f.splitByRegexp(pattern, self.cast(arg, dt.String(nullable=False)))
+
+    def visit_RandomScalar(self, op, **kwargs):
+        return self.f.randCanonical()
+
+    def visit_RandomUUID(self, op, **kwargs):
+        return self.f.generateUUIDv4()
 
     @staticmethod
     def _generate_groups(groups):

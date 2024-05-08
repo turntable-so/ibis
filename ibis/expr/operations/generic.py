@@ -184,6 +184,11 @@ class Constant(Scalar, Singleton):
 
 
 @public
+class Impure(Value):
+    pass
+
+
+@public
 class TimestampNow(Constant):
     dtype = dt.timestamp
 
@@ -194,13 +199,15 @@ class DateNow(Constant):
 
 
 @public
-class RandomScalar(Constant):
+class RandomScalar(Impure):
     dtype = dt.float64
+    shape = ds.scalar
 
 
 @public
-class RandomUUID(Constant):
+class RandomUUID(Impure):
     dtype = dt.uuid
+    shape = ds.scalar
 
 
 @public

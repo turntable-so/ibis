@@ -27,7 +27,7 @@ from ibis.backends import CanCreateDatabase, CanCreateSchema, UrlFromPath
 from ibis.backends.duckdb.compiler import DuckDBCompiler
 from ibis.backends.duckdb.converter import DuckDBPandasData
 from ibis.backends.sql import SQLBackend
-from ibis.backends.sql.compiler import STAR, C, F
+from ibis.backends.sql.compiler import STAR, C
 from ibis.expr.operations.udf import InputType
 
 if TYPE_CHECKING:
@@ -57,21 +57,17 @@ class _Settings:
 
     def __getitem__(self, key: str) -> Any:
         maybe_value = self.con.execute(
-            f"select value from duckdb_settings() where name = '{key}'"
+            "select value from duckdb_settings() where name = $1", [key]
         ).fetchone()
         if maybe_value is not None:
             return maybe_value[0]
         raise KeyError(key)
 
     def __setitem__(self, key, value):
-        self.con.execute(f"SET {key} = '{value}'")
+        self.con.execute(f"SET {key} = {str(value)!r}")
 
     def __repr__(self):
-        ((kv,),) = self.con.execute(
-            "select map(array_agg(name), array_agg(value)) from duckdb_settings()"
-        ).fetch()
-
-        return repr(dict(zip(kv["key"], kv["value"])))
+        return repr(self.con.sql("from duckdb_settings()"))
 
 
 class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
@@ -115,6 +111,8 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
 
         if not geocols:
             return sql
+        else:
+            self._load_extensions(["spatial"])
 
         return sg.select(
             *(
@@ -152,6 +150,10 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
         database
             The name of the database in which to create the table; if not
             passed, the current database is used.
+
+            For multi-level table hierarchies, you can pass in a dotted string
+            path like `"catalog.database"` or a tuple of strings like
+            `("catalog", "database")`.
         temp
             Create a temporary table
         overwrite
@@ -159,6 +161,20 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
             if the table exists
 
         """
+        table_loc = self._to_sqlglot_table(database)
+
+        if getattr(table_loc, "catalog", False) and temp:
+            raise exc.UnsupportedArgumentError(
+                "DuckDB can only create temporary tables in the `temp` catalog. "
+                "Don't specify a catalog to enable temp table creation."
+            )
+
+        catalog = self.current_catalog
+        database = self.current_database
+        if table_loc is not None:
+            catalog = table_loc.catalog or catalog
+            database = table_loc.db or database
+
         if obj is None and schema is None:
             raise ValueError("Either `obj` or `schema` must be specified")
 
@@ -166,10 +182,14 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
 
         if temp:
             properties.append(sge.TemporaryProperty())
+            catalog = "temp"
+
+        temp_memtable_view = None
 
         if obj is not None:
             if not isinstance(obj, ir.Expr):
                 table = ibis.memtable(obj)
+                temp_memtable_view = table.op().name
             else:
                 table = obj
 
@@ -197,8 +217,10 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
         else:
             temp_name = name
 
-        initial_table = sg.table(
-            temp_name, catalog=database, quoted=self.compiler.quoted
+        initial_table = sge.Table(
+            this=sg.to_identifier(temp_name, quoted=self.compiler.quoted),
+            catalog=catalog,
+            db=database,
         )
         target = sge.Schema(this=initial_table, expressions=column_defs)
 
@@ -209,7 +231,11 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
         )
 
         # This is the same table as initial_table unless overwrite == True
-        final_table = sg.table(name, catalog=database, quoted=self.compiler.quoted)
+        final_table = sge.Table(
+            this=sg.to_identifier(name, quoted=self.compiler.quoted),
+            catalog=catalog,
+            db=database,
+        )
         with self._safe_raw_sql(create_stmt) as cur:
             if query is not None:
                 insert_stmt = sge.insert(query, into=initial_table).sql(self.name)
@@ -246,7 +272,10 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
                         ).sql(self.name)
                     )
 
-        return self.table(name, database=database)
+        if temp_memtable_view is not None:
+            self.con.unregister(temp_memtable_view)
+
+        return self.table(name, database=(catalog, database))
 
     def _load_into_cache(self, name, expr):
         self.create_table(name, expr, schema=expr.schema(), temp=True)
@@ -455,9 +484,8 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
         if extensions is not None:
             self._load_extensions(extensions)
 
-        # Default timezone
-        with self._safe_raw_sql("SET TimeZone = 'UTC'"):
-            pass
+        # Default timezone, can't be set with `config`
+        self.settings["timezone"] = "UTC"
 
         self._record_batch_readers_consumed = {}
 
@@ -828,7 +856,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
 
     def read_in_memory(
         self,
-        source: pd.DataFrame | pa.Table | pa.RecordBatchReader,
+        source: pd.DataFrame | pa.Table | pa.ipc.RecordBatchReader,
         table_name: str | None = None,
     ) -> ir.Table:
         """Register a Pandas DataFrame or pyarrow object as a table in the current database.
@@ -850,7 +878,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
         table_name = table_name or util.gen_name("read_in_memory")
         self.con.register(table_name, source)
 
-        if isinstance(source, pa.RecordBatchReader):
+        if isinstance(source, pa.ipc.RecordBatchReader):
             # Ensure the reader isn't marked as started, in case the name is
             # being overwritten.
             self._record_batch_readers_consumed[table_name] = False
@@ -909,6 +937,17 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
     ) -> list[str]:
         """List tables and views.
 
+        ::: {.callout-note}
+        ## Ibis does not use the word `schema` to refer to database hierarchy.
+
+        A collection of tables is referred to as a `database`.
+        A collection of `database` is referred to as a `catalog`.
+
+        These terms are mapped onto the corresponding features in each
+        backend (where available), regardless of whether the backend itself
+        uses the same terminology.
+        :::
+
         Parameters
         ----------
         like
@@ -922,17 +961,6 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
             To specify a table in a separate catalog, you can pass in the
             catalog and database as a string `"catalog.database"`, or as a tuple of
             strings `("catalog", "database")`.
-
-            ::: {.callout-note}
-            ## Ibis does not use the word `schema` to refer to database hierarchy.
-
-            A collection of tables is referred to as a `database`.
-            A collection of `database` is referred to as a `catalog`.
-
-            These terms are mapped onto the corresponding features in each
-            backend (where available), regardless of whether the backend itself
-            uses the same terminology.
-            :::
         schema
             [deprecated] Schema name. If not passed, uses the current schema.
 
@@ -963,8 +991,8 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
         """
         table_loc = self._warn_and_create_table_loc(database, schema)
 
-        catalog = F.current_database()
-        database = F.current_schema()
+        catalog = self.current_catalog
+        database = self.current_database
         if table_loc is not None:
             catalog = table_loc.catalog or catalog
             database = table_loc.db or database
@@ -990,6 +1018,17 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
         self, uri: str, *, table_name: str | None = None, database: str = "public"
     ) -> ir.Table:
         """Register a table from a postgres instance into a DuckDB table.
+
+        ::: {.callout-note}
+        ## Ibis does not use the word `schema` to refer to database hierarchy.
+
+        A collection of `table` is referred to as a `database`.
+        A collection of `database` is referred to as a `catalog`.
+
+        These terms are mapped onto the corresponding features in each
+        backend (where available), regardless of whether the backend itself
+        uses the same terminology.
+        :::
 
         Parameters
         ----------
@@ -1298,7 +1337,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
         limit: int | str | None = None,
         chunk_size: int = 1_000_000,
         **_: Any,
-    ) -> pa.RecordBatchReader:
+    ) -> pa.ipc.RecordBatchReader:
         """Return a stream of record batches.
 
         The returned `RecordBatchReader` contains a cursor with an unbounded lifetime.
@@ -1328,7 +1367,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
             yield from cur.fetch_record_batch(rows_per_batch=chunk_size)
 
         result = self.raw_sql(sql)
-        return pa.RecordBatchReader.from_batches(
+        return pa.ipc.RecordBatchReader.from_batches(
             expr.as_table().schema().to_pyarrow(), batch_producer(result)
         )
 

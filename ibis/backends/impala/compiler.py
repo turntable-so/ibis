@@ -12,9 +12,7 @@ from ibis.backends.sql.datatypes import ImpalaType
 from ibis.backends.sql.dialects import Impala
 from ibis.backends.sql.rewrites import (
     rewrite_empty_order_by_window,
-    rewrite_sample_as_filter,
 )
-from ibis.expr.rewrites import rewrite_stringslice
 
 
 class ImpalaCompiler(SQLGlotCompiler):
@@ -23,40 +21,36 @@ class ImpalaCompiler(SQLGlotCompiler):
     dialect = Impala
     type_mapper = ImpalaType
     rewrites = (
-        rewrite_sample_as_filter,
         rewrite_empty_order_by_window,
-        rewrite_stringslice,
         *SQLGlotCompiler.rewrites,
     )
 
-    UNSUPPORTED_OPERATIONS = frozenset(
-        (
-            ops.ArgMax,
-            ops.ArgMin,
-            ops.ArrayCollect,
-            ops.ArrayPosition,
-            ops.Array,
-            ops.Covariance,
-            ops.DateDelta,
-            ops.ExtractDayOfYear,
-            ops.First,
-            ops.Last,
-            ops.Levenshtein,
-            ops.Map,
-            ops.Median,
-            ops.MultiQuantile,
-            ops.NthValue,
-            ops.Quantile,
-            ops.RegexSplit,
-            ops.RowID,
-            ops.StringSplit,
-            ops.StructColumn,
-            ops.Time,
-            ops.TimeDelta,
-            ops.TimestampBucket,
-            ops.TimestampDelta,
-            ops.Unnest,
-        )
+    UNSUPPORTED_OPS = (
+        ops.ArgMax,
+        ops.ArgMin,
+        ops.ArrayCollect,
+        ops.ArrayPosition,
+        ops.Array,
+        ops.Covariance,
+        ops.DateDelta,
+        ops.ExtractDayOfYear,
+        ops.First,
+        ops.Last,
+        ops.Levenshtein,
+        ops.Map,
+        ops.Median,
+        ops.MultiQuantile,
+        ops.NthValue,
+        ops.Quantile,
+        ops.RegexSplit,
+        ops.RowID,
+        ops.StringSplit,
+        ops.StructColumn,
+        ops.Time,
+        ops.TimeDelta,
+        ops.TimestampBucket,
+        ops.TimestampDelta,
+        ops.Unnest,
     )
 
     SIMPLE_OPS = {
@@ -76,7 +70,6 @@ class ImpalaCompiler(SQLGlotCompiler):
         ops.Hash: "fnv_hash",
         ops.LStrip: "ltrim",
         ops.Ln: "ln",
-        ops.RandomUUID: "uuid",
         ops.RStrip: "rtrim",
         ops.Strip: "trim",
         ops.TypeOf: "typeof",
@@ -146,7 +139,7 @@ class ImpalaCompiler(SQLGlotCompiler):
     def visit_Xor(self, op, *, left, right):
         return sg.and_(sg.or_(left, right), sg.not_(sg.and_(left, right)))
 
-    def visit_RandomScalar(self, op):
+    def visit_RandomScalar(self, op, **_):
         return self.f.rand(self.f.utc_to_unix_micros(self.f.utc_timestamp()))
 
     def visit_DayOfWeekIndex(self, op, *, arg):
@@ -195,22 +188,6 @@ class ImpalaCompiler(SQLGlotCompiler):
             # supported, but only within a certain range, and the
             # implementation wraps on over- and underflow
             return sge.convert(value.isoformat())
-        elif dtype.is_string():
-            value = (
-                value
-                # Escape \ first so we don't double escape other characters.
-                .replace("\\", "\\\\")
-                # ASCII escape sequences that are recognized in Python:
-                # https://docs.python.org/3/reference/lexical_analysis.html#string-and-bytes-literals
-                .replace("\a", "\\a")  # Bell
-                .replace("\b", "\\b")  # Backspace
-                .replace("\f", "\\f")  # Formfeed
-                .replace("\n", "\\n")  # Newline / Linefeed
-                .replace("\r", "\\r")  # Carriage return
-                .replace("\t", "\\t")  # Tab
-                .replace("\v", "\\v")  # Vertical tab
-            )
-            return sge.convert(value)
         elif dtype.is_decimal() and not value.is_finite():
             raise com.UnsupportedOperationError(
                 f"Non-finite decimal literal values are not supported by Impala; got: {value}"

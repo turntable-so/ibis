@@ -33,6 +33,11 @@ class DuckDBCompiler(SQLGlotCompiler):
     dialect = DuckDB
     type_mapper = DuckDBType
 
+    LOWERED_OPS = {
+        ops.Sample: None,
+        ops.StringSlice: None,
+    }
+
     SIMPLE_OPS = {
         ops.Arbitrary: "any_value",
         ops.ArrayPosition: "list_indexof",
@@ -40,15 +45,12 @@ class DuckDBCompiler(SQLGlotCompiler):
         ops.BitOr: "bit_or",
         ops.BitXor: "bit_xor",
         ops.EndsWith: "suffix",
+        ops.ExtractIsoYear: "isoyear",
         ops.Hash: "hash",
         ops.IntegerRange: "range",
         ops.TimestampRange: "range",
-        ops.MapKeys: "map_keys",
         ops.MapLength: "cardinality",
-        ops.MapMerge: "map_concat",
-        ops.MapValues: "map_values",
         ops.Mode: "mode",
-        ops.RandomUUID: "uuid",
         ops.TimeFromHMS: "make_time",
         ops.TypeOf: "typeof",
         ops.GeoPoint: "st_point",
@@ -200,19 +202,83 @@ class DuckDBCompiler(SQLGlotCompiler):
         any_arg_null = sg.or_(*(arr.is_(NULL) for arr in arg))
         return self.if_(any_arg_null, NULL, zipped_arrays)
 
+    def visit_Map(self, op, *, keys, values):
+        # workaround for https://github.com/ibis-project/ibis/issues/8632
+        return self.if_(
+            sg.or_(keys.is_(NULL), values.is_(NULL)), NULL, self.f.map(keys, values)
+        )
+
     def visit_MapGet(self, op, *, arg, key, default):
-        return self.f.ifnull(
-            self.f.list_extract(self.f.element_at(arg, key), 1), default
+        return self.if_(
+            arg.is_(NULL),
+            NULL,
+            self.f.ifnull(
+                self.f.list_extract(
+                    self.if_(key.is_(NULL), NULL, self.f.element_at(arg, key)), 1
+                ),
+                default,
+            ),
         )
 
     def visit_MapContains(self, op, *, arg, key):
-        return self.f.len(self.f.element_at(arg, key)).neq(0)
+        return self.if_(
+            arg.is_(NULL),
+            NULL,
+            self.f.len(self.if_(key.is_(NULL), NULL, self.f.element_at(arg, key))).neq(
+                0
+            ),
+        )
+
+    def visit_MapKeys(self, op, *, arg):
+        return self.if_(arg.is_(NULL), NULL, self.f.map_keys(arg))
+
+    def visit_MapValues(self, op, *, arg):
+        return self.if_(arg.is_(NULL), NULL, self.f.map_values(arg))
+
+    def visit_MapMerge(self, op, *, left, right):
+        return self.if_(
+            sg.or_(left.is_(NULL), right.is_(NULL)),
+            NULL,
+            self.f.map_concat(left, right),
+        )
 
     def visit_ToJSONMap(self, op, *, arg):
-        return sge.TryCast(this=arg, to=self.type_mapper.from_ibis(op.dtype))
+        return self.if_(
+            self.f.json_type(arg).eq("OBJECT"),
+            self.cast(self.cast(arg, dt.json), op.dtype),
+            NULL,
+        )
 
     def visit_ToJSONArray(self, op, *, arg):
-        return self.visit_ToJSONMap(op, arg=arg)
+        return self.if_(
+            self.f.json_type(arg).eq("ARRAY"),
+            self.cast(self.cast(arg, dt.json), op.dtype),
+            NULL,
+        )
+
+    def visit_UnwrapJSONString(self, op, *, arg):
+        return self.if_(
+            self.f.json_type(arg).eq("VARCHAR"),
+            self.f.json_extract_string(arg, "$"),
+            NULL,
+        )
+
+    def visit_UnwrapJSONInt64(self, op, *, arg):
+        arg_type = self.f.json_type(arg)
+        return self.if_(
+            arg_type.isin("UBIGINT", "BIGINT"), self.cast(arg, op.dtype), NULL
+        )
+
+    def visit_UnwrapJSONFloat64(self, op, *, arg):
+        arg_type = self.f.json_type(arg)
+        return self.if_(
+            arg_type.isin("UBIGINT", "BIGINT", "DOUBLE"), self.cast(arg, op.dtype), NULL
+        )
+
+    def visit_UnwrapJSONBoolean(self, op, *, arg):
+        return self.if_(
+            self.f.json_type(arg).eq("BOOLEAN"), self.cast(arg, op.dtype), NULL
+        )
 
     def visit_ArrayConcat(self, op, *, arg):
         # TODO(cpcloud): map ArrayConcat to this in sqlglot instead of here
@@ -277,6 +343,8 @@ class DuckDBCompiler(SQLGlotCompiler):
             return func(sg.cast(arg, to=self.type_mapper.from_ibis(dt.int32)))
         elif to.is_timestamp() and op.arg.dtype.is_integer():
             return self.f.to_timestamp(arg)
+        elif to.is_geospatial() and op.arg.dtype.is_binary():
+            return self.f.st_geomfromwkb(arg)
 
         return self.cast(arg, to)
 
@@ -418,3 +486,9 @@ class DuckDBCompiler(SQLGlotCompiler):
                 expression=sg.to_identifier(field, quoted=self.quoted),
             )
         return super().visit_StructField(op, arg=arg, field=field)
+
+    def visit_RandomScalar(self, op, **kwargs):
+        return self.f.random()
+
+    def visit_RandomUUID(self, op, **kwargs):
+        return self.f.uuid()

@@ -13,13 +13,15 @@ import ibis.expr.operations as ops
 from ibis.common.deferred import Deferred, _, deferrable
 from ibis.common.grounds import Singleton
 from ibis.expr.rewrites import rewrite_window_input
-from ibis.expr.types.core import Expr, _binop, _FixedTextJupyterMixin
+from ibis.expr.types.core import Expr, _binop, _FixedTextJupyterMixin, _is_null_literal
+from ibis.expr.types.pretty import to_rich
 from ibis.util import deprecated, warn_deprecated
 
 if TYPE_CHECKING:
     import pandas as pd
     import polars as pl
     import pyarrow as pa
+    import rich.table
 
     import ibis.expr.types as ir
     from ibis.formats.pyarrow import PyArrowData
@@ -204,7 +206,7 @@ class Value(Expr):
             # noop case if passed type is the same
             return self
 
-        if op.to.is_geospatial():
+        if op.to.is_geospatial() and not self.type().is_binary():
             from_geotype = self.type().geotype or "geometry"
             to_geotype = op.to.geotype
             if from_geotype == to_geotype:
@@ -498,6 +500,8 @@ class Value(Expr):
     def isin(self, values: Value | Sequence[Value]) -> ir.BooleanValue:
         """Check whether this expression's values are in `values`.
 
+        `NULL` values are propagated in the output. See examples for details.
+
         Parameters
         ----------
         values
@@ -567,6 +571,40 @@ class Value(Expr):
         │ True          │
         │ False         │
         └───────────────┘
+
+        `NULL` behavior
+
+        >>> t = ibis.memtable({"x": [1, 2]})
+        >>> t.x.isin([1, None])
+        ┏━━━━━━━━━━━━━┓
+        ┃ InValues(x) ┃
+        ┡━━━━━━━━━━━━━┩
+        │ boolean     │
+        ├─────────────┤
+        │ True        │
+        │ NULL        │
+        └─────────────┘
+        >>> t = ibis.memtable({"x": [1, None, 2]})
+        >>> t.x.isin([1])
+        ┏━━━━━━━━━━━━━┓
+        ┃ InValues(x) ┃
+        ┡━━━━━━━━━━━━━┩
+        │ boolean     │
+        ├─────────────┤
+        │ True        │
+        │ NULL        │
+        │ False       │
+        └─────────────┘
+        >>> t.x.isin([3])
+        ┏━━━━━━━━━━━━━┓
+        ┃ InValues(x) ┃
+        ┡━━━━━━━━━━━━━┩
+        │ boolean     │
+        ├─────────────┤
+        │ False       │
+        │ NULL        │
+        │ False       │
+        └─────────────┘
         """
         from ibis.expr.types import ArrayValue
 
@@ -1122,13 +1160,17 @@ class Value(Expr):
         return super().__hash__()
 
     def __eq__(self, other: Value) -> ir.BooleanValue:
-        if other is None:
-            return _binop(ops.IdenticalTo, self, other)
+        if _is_null_literal(other):
+            return self.isnull()
+        elif _is_null_literal(self):
+            return other.isnull()
         return _binop(ops.Equals, self, other)
 
     def __ne__(self, other: Value) -> ir.BooleanValue:
-        if other is None:
-            return ~self.__eq__(other)
+        if _is_null_literal(other):
+            return self.notnull()
+        elif _is_null_literal(self):
+            return other.notnull()
         return _binop(ops.NotEquals, self, other)
 
     def __ge__(self, other: Value) -> ir.BooleanValue:
@@ -1178,20 +1220,6 @@ class Value(Expr):
 
 @public
 class Scalar(Value):
-    def __interactive_rich_console__(self, console, options):
-        import rich.pretty
-
-        interactive = ibis.options.repr.interactive
-        return console.render(
-            rich.pretty.Pretty(
-                self.execute(),
-                max_length=interactive.max_length,
-                max_string=interactive.max_string,
-                max_depth=interactive.max_depth,
-            ),
-            options=options,
-        )
-
     def __pyarrow_result__(
         self, table: pa.Table, data_mapper: type[PyArrowData] | None = None
     ) -> pa.Scalar:
@@ -1307,10 +1335,60 @@ class Column(Value, _FixedTextJupyterMixin):
     def __array__(self, dtype=None):
         return self.execute().__array__(dtype)
 
-    def __interactive_rich_console__(self, console, options):
-        named = self.name(self.op().name)
-        projection = named.as_table()
-        return console.render(projection, options=options)
+    def preview(
+        self,
+        *,
+        max_rows: int | None = None,
+        max_length: int | None = None,
+        max_string: int | None = None,
+        max_depth: int | None = None,
+        console_width: int | float | None = None,
+    ) -> rich.table.Table:
+        """Print a subset as a single-column Rich Table.
+
+        This is an explicit version of what you get when you inspect
+        this object in interactive mode, except with this version you
+        can pass formatting options. The options are the same as those exposed
+        in `ibis.options.interactive`.
+
+        Parameters
+        ----------
+        max_rows
+            Maximum number of rows to display
+        max_length
+           Maximum length for pretty-printed arrays and maps.
+        max_string
+            Maximum length for pretty-printed strings.
+        max_depth
+            Maximum depth for nested data types.
+        console_width
+            Width of the console in characters. If not specified, the width
+            will be inferred from the console.
+
+        Examples
+        --------
+        >>> import ibis
+        >>> t = ibis.examples.penguins.fetch()
+        >>> t.island.preview(max_rows=3, max_string=5)  # doctest: +SKIP
+        ┏━━━━━━━━┓
+        ┃ island ┃
+        ┡━━━━━━━━┩
+        │ stri…  │
+        ├────────┤
+        │ Torg…  │
+        │ Torg…  │
+        │ Torg…  │
+        │ …      │
+        └────────┘
+        """
+        return to_rich(
+            self,
+            max_rows=max_rows,
+            max_length=max_length,
+            max_string=max_string,
+            max_depth=max_depth,
+            console_width=console_width,
+        )
 
     def __pyarrow_result__(
         self, table: pa.Table, data_mapper: type[PyArrowData] | None = None
@@ -2149,9 +2227,26 @@ class NullColumn(Column, NullValue):
 
 
 @public
-def null():
-    """Create a NULL/NA scalar."""
-    return ops.NULL.to_expr()
+def null(type: dt.DataType | str | None = None) -> Value:
+    """Create a NULL scalar.
+
+    `NULL`s with an unspecified type are castable and comparable to values,
+    but lack datatype-specific methods:
+
+    >>> import ibis
+    >>> ibis.options.interactive = True
+    >>> ibis.null().upper()
+    Traceback (most recent call last):
+        ...
+    AttributeError: 'NullScalar' object has no attribute 'upper'
+    >>> ibis.null(str).upper()
+    None
+    >>> ibis.null(str).upper().isnull()
+    True
+    """
+    if type is None:
+        type = dt.null
+    return ops.Literal(None, type).to_expr()
 
 
 @public

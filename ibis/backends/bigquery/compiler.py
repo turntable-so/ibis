@@ -18,10 +18,8 @@ from ibis.backends.sql.rewrites import (
     exclude_unsupported_window_frame_from_ops,
     exclude_unsupported_window_frame_from_rank,
     exclude_unsupported_window_frame_from_row_number,
-    rewrite_sample_as_filter,
 )
 from ibis.common.temporal import DateUnit, IntervalUnit, TimestampUnit, TimeUnit
-from ibis.expr.rewrites import rewrite_stringslice
 
 _NAME_REGEX = re.compile(r'[^!"$()*,./;?@[\\\]^`{}~\n]+')
 
@@ -31,35 +29,31 @@ class BigQueryCompiler(SQLGlotCompiler):
     type_mapper = BigQueryType
     udf_type_mapper = BigQueryUDFType
     rewrites = (
-        rewrite_sample_as_filter,
         exclude_unsupported_window_frame_from_ops,
         exclude_unsupported_window_frame_from_row_number,
         exclude_unsupported_window_frame_from_rank,
-        rewrite_stringslice,
         *SQLGlotCompiler.rewrites,
     )
 
-    UNSUPPORTED_OPERATIONS = frozenset(
-        (
-            ops.CountDistinctStar,
-            ops.DateDiff,
-            ops.ExtractAuthority,
-            ops.ExtractFile,
-            ops.ExtractFragment,
-            ops.ExtractHost,
-            ops.ExtractPath,
-            ops.ExtractProtocol,
-            ops.ExtractQuery,
-            ops.ExtractUserInfo,
-            ops.FindInSet,
-            ops.Median,
-            ops.Quantile,
-            ops.MultiQuantile,
-            ops.RegexSplit,
-            ops.RowID,
-            ops.TimestampBucket,
-            ops.TimestampDiff,
-        )
+    UNSUPPORTED_OPS = (
+        ops.CountDistinctStar,
+        ops.DateDiff,
+        ops.ExtractAuthority,
+        ops.ExtractFile,
+        ops.ExtractFragment,
+        ops.ExtractHost,
+        ops.ExtractPath,
+        ops.ExtractProtocol,
+        ops.ExtractQuery,
+        ops.ExtractUserInfo,
+        ops.FindInSet,
+        ops.Median,
+        ops.Quantile,
+        ops.MultiQuantile,
+        ops.RegexSplit,
+        ops.RowID,
+        ops.TimestampBucket,
+        ops.TimestampDiff,
     )
 
     NAN = sge.Cast(
@@ -120,8 +114,6 @@ class BigQueryCompiler(SQLGlotCompiler):
         ops.RPad: "rpad",
         ops.Levenshtein: "edit_distance",
         ops.Modulus: "mod",
-        ops.RandomScalar: "rand",
-        ops.RandomUUID: "generate_uuid",
         ops.RegexReplace: "regexp_replace",
         ops.RegexSearch: "regexp_contains",
         ops.Time: "time",
@@ -293,22 +285,7 @@ class BigQueryCompiler(SQLGlotCompiler):
         return self.f.strpos(arg, substr)
 
     def visit_NonNullLiteral(self, op, *, value, dtype):
-        if dtype.is_string():
-            return sge.convert(
-                str(value)
-                # Escape \ first so we don't double escape other characters.
-                .replace("\\", "\\\\")
-                # ASCII escape sequences that are recognized in Python:
-                # https://docs.python.org/3/reference/lexical_analysis.html#string-and-bytes-literals
-                .replace("\a", "\\a")  # Bell
-                .replace("\b", "\\b")  # Backspace
-                .replace("\f", "\\f")  # Formfeed
-                .replace("\n", "\\n")  # Newline / Linefeed
-                .replace("\r", "\\r")  # Carriage return
-                .replace("\t", "\\t")  # Tab
-                .replace("\v", "\\v")  # Vertical tab
-            )
-        elif dtype.is_inet() or dtype.is_macaddr():
+        if dtype.is_inet() or dtype.is_macaddr():
             return sge.convert(str(value))
         elif dtype.is_timestamp():
             funcname = "datetime" if dtype.timezone is None else "timestamp"
@@ -396,11 +373,26 @@ class BigQueryCompiler(SQLGlotCompiler):
     def visit_JSONGetItem(self, op, *, arg, index):
         return arg[index]
 
+    def visit_UnwrapJSONString(self, op, *, arg):
+        return self.f.anon["safe.string"](arg)
+
+    def visit_UnwrapJSONInt64(self, op, *, arg):
+        return self.f.anon["safe.int64"](arg)
+
+    def visit_UnwrapJSONFloat64(self, op, *, arg):
+        return self.f.anon["safe.float64"](arg)
+
+    def visit_UnwrapJSONBoolean(self, op, *, arg):
+        return self.f.anon["safe.bool"](arg)
+
     def visit_ExtractEpochSeconds(self, op, *, arg):
         return self.f.unix_seconds(arg)
 
     def visit_ExtractWeekOfYear(self, op, *, arg):
         return self.f.extract(self.v.isoweek, arg)
+
+    def visit_ExtractIsoYear(self, op, *, arg):
+        return self.f.extract(self.v.isoyear, arg)
 
     def visit_ExtractMillisecond(self, op, *, arg):
         return self.f.extract(self.v.millisecond, arg)
@@ -570,10 +562,10 @@ class BigQueryCompiler(SQLGlotCompiler):
         nonzero_index_replace = self.f.regexp_replace(
             arg,
             self.f.concat(".*?", pattern, ".*"),
-            self.f.concat("\\\\", self.cast(index, dt.string)),
+            self.f.concat("\\", self.cast(index, dt.string)),
         )
         zero_index_replace = self.f.regexp_replace(
-            arg, self.f.concat(".*?", self.f.concat("(", pattern, ")"), ".*"), "\\\\1"
+            arg, self.f.concat(".*?", self.f.concat("(", pattern, ")"), ".*"), "\\1"
         )
         extract = self.if_(index.eq(0), zero_index_replace, nonzero_index_replace)
         return self.if_(matches, extract, NULL)
@@ -653,7 +645,7 @@ class BigQueryCompiler(SQLGlotCompiler):
             self.if_(self.f.regexp_contains(name, "^-?[0-9]*$"), "INT64"),
             self.if_(
                 self.f.regexp_contains(
-                    name, r'^(-?[0-9]+[.e].*|CAST\\("([^"]*)" AS FLOAT64\\))$'
+                    name, r'^(-?[0-9]+[.e].*|CAST\("([^"]*)" AS FLOAT64\))$'
                 ),
                 "FLOAT64",
             ),
@@ -664,7 +656,7 @@ class BigQueryCompiler(SQLGlotCompiler):
             ),
             self.if_(self.f.starts_with(name, 'b"'), "BYTES"),
             self.if_(self.f.starts_with(name, "["), "ARRAY"),
-            self.if_(self.f.regexp_contains(name, r"^(STRUCT)?\\("), "STRUCT"),
+            self.if_(self.f.regexp_contains(name, r"^(STRUCT)?\("), "STRUCT"),
             self.if_(self.f.starts_with(name, "ST_"), "GEOGRAPHY"),
             self.if_(name.eq(sge.convert("NULL")), "NULL"),
         ]
@@ -698,3 +690,6 @@ class BigQueryCompiler(SQLGlotCompiler):
         if where is not None:
             arg = self.if_(where, arg, NULL)
         return self.f.count(sge.Distinct(expressions=[arg]))
+
+    def visit_RandomUUID(self, op, **kwargs):
+        return self.f.generate_uuid()

@@ -5,6 +5,7 @@ import contextlib
 import importlib
 import inspect
 import json
+import os
 import re
 import string
 import subprocess
@@ -291,11 +292,6 @@ def test_create_table_from_schema(con, new_schema, temp_table):
     "be switched from using atexit to weakref.finalize",
 )
 @mark.notimpl(["trino", "druid"], reason="doesn't implement temporary tables")
-@mark.never(
-    ["mssql"],
-    reason="mssql supports support temporary tables through naming conventions",
-    raises=PyODBCProgrammingError,
-)
 @mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
 @pytest.mark.notimpl(
     ["impala", "pyspark"],
@@ -313,6 +309,11 @@ def test_create_table_from_schema(con, new_schema, temp_table):
     reason="`tbl_properties` is required when creating table with schema",
 )
 def test_create_temporary_table_from_schema(con_no_data, new_schema):
+    if con_no_data.name == "snowflake" and os.environ.get("SNOWFLAKE_SNOWPARK"):
+        with pytest.raises(com.IbisError, match="Reconnecting is not supported"):
+            con_no_data.reconnect()
+        return
+
     temp_table = gen_name(f"test_{con_no_data.name}_tmp")
     table = con_no_data.create_table(temp_table, schema=new_schema, temp=True)
 
@@ -609,12 +610,12 @@ def test_insert_from_memtable(con, temp_table):
         "pandas",
         "polars",
         "flink",
-        "pyspark",
         "sqlite",
     ],
     raises=AttributeError,
     reason="doesn't support the common notion of a catalog",
 )
+@pytest.mark.xfail_version(pyspark=["pyspark<3.4"])
 def test_list_catalogs(con):
     # Every backend has its own databases
     test_catalogs = {
@@ -628,6 +629,7 @@ def test_list_catalogs(con):
         "risingwave": {"dev"},
         "snowflake": {"IBIS_TESTING"},
         "trino": {"memory"},
+        "pyspark": {"spark_catalog"},
     }
     result = set(con.list_catalogs())
     assert test_catalogs[con.name] <= result
@@ -641,7 +643,7 @@ def test_list_catalogs(con):
         "polars",
     ],
     raises=AttributeError,
-    reason="doesn't support the common notion of a catalog",
+    reason="doesn't support the common notion of a database",
 )
 def test_list_database_contents(con):
     # Every backend has its own databases
@@ -1365,10 +1367,6 @@ def test_persist_expression_repeated_cache(alltypes):
     raises=com.UnsupportedOperationError,
     reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
 )
-@mark.notimpl(
-    ["oracle"],
-    reason="Oracle error message for a missing table/view doesn't include the name of the table",
-)
 def test_persist_expression_release(con, alltypes):
     non_cached_table = alltypes.mutate(
         test_column=ibis.literal("calculation"), other_column=ibis.literal("big calc 3")
@@ -1579,6 +1577,14 @@ def test_json_to_pyarrow(con):
         None,
         [42, 47, 55],
         [],
+        "a",
+        "",
+        "b",
+        None,
+        True,
+        False,
+        42,
+        37.37,
     ]
     expected = {json.dumps(val) for val in expected}
 
@@ -1586,5 +1592,36 @@ def test_json_to_pyarrow(con):
         # loads and dumps so the string representation is the same
         json.dumps(json.loads(val))
         for val in js.to_pylist()
+        # proper null values must be ignored because they cannot be
+        # deserialized as JSON
+        #
+        # they exist in the json_t table, so the `js` value contains them
+        if val is not None
     }
     assert result == expected
+
+
+@pytest.mark.notyet(["mssql"], raises=PyODBCProgrammingError)
+@pytest.mark.notyet(
+    ["risingwave", "exasol"],
+    raises=com.UnsupportedOperationError,
+    reason="no temp table support",
+)
+@pytest.mark.notyet(
+    ["impala", "trino"], raises=NotImplementedError, reason="no temp table support"
+)
+@pytest.mark.notyet(
+    ["druid"], raises=NotImplementedError, reason="doesn't support create_table"
+)
+@pytest.mark.notyet(
+    ["flink"], raises=com.IbisError, reason="no persistent temp table support"
+)
+def test_schema_with_caching(alltypes):
+    t1 = alltypes.limit(5).select("bigint_col", "string_col")
+    t2 = alltypes.limit(5).select("string_col", "bigint_col")
+
+    pt1 = t1.cache()
+    pt2 = t2.cache()
+
+    assert pt1.schema() == t1.schema()
+    assert pt2.schema() == t2.schema()

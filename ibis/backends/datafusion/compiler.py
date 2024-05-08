@@ -14,10 +14,8 @@ import ibis.expr.operations as ops
 from ibis.backends.sql.compiler import FALSE, NULL, STAR, SQLGlotCompiler
 from ibis.backends.sql.datatypes import DataFusionType
 from ibis.backends.sql.dialects import DataFusion
-from ibis.backends.sql.rewrites import rewrite_sample_as_filter
 from ibis.common.temporal import IntervalUnit, TimestampUnit
 from ibis.expr.operations.udf import InputType
-from ibis.expr.rewrites import rewrite_stringslice
 from ibis.formats.pyarrow import PyArrowType
 
 
@@ -26,41 +24,35 @@ class DataFusionCompiler(SQLGlotCompiler):
 
     dialect = DataFusion
     type_mapper = DataFusionType
-    rewrites = (
-        rewrite_sample_as_filter,
-        rewrite_stringslice,
-        *SQLGlotCompiler.rewrites,
-    )
 
-    UNSUPPORTED_OPERATIONS = frozenset(
-        (
-            ops.ArgMax,
-            ops.ArgMin,
-            ops.ArrayDistinct,
-            ops.ArrayFilter,
-            ops.ArrayFlatten,
-            ops.ArrayMap,
-            ops.ArrayZip,
-            ops.BitwiseNot,
-            ops.Clip,
-            ops.CountDistinctStar,
-            ops.DateDelta,
-            ops.Greatest,
-            ops.GroupConcat,
-            ops.IntervalFromInteger,
-            ops.Least,
-            ops.MultiQuantile,
-            ops.Quantile,
-            ops.RowID,
-            ops.Strftime,
-            ops.TimeDelta,
-            ops.TimestampBucket,
-            ops.TimestampDelta,
-            ops.TimestampNow,
-            ops.TypeOf,
-            ops.Unnest,
-            ops.StringToTimestamp,
-        )
+    UNSUPPORTED_OPS = (
+        ops.ArgMax,
+        ops.ArgMin,
+        ops.ArrayDistinct,
+        ops.ArrayFilter,
+        ops.ArrayFlatten,
+        ops.ArrayMap,
+        ops.ArrayZip,
+        ops.BitwiseNot,
+        ops.Clip,
+        ops.CountDistinctStar,
+        ops.DateDelta,
+        ops.Greatest,
+        ops.GroupConcat,
+        ops.IntervalFromInteger,
+        ops.Least,
+        ops.MultiQuantile,
+        ops.Quantile,
+        ops.RowID,
+        ops.Strftime,
+        ops.TimeDelta,
+        ops.TimestampBucket,
+        ops.TimestampDelta,
+        ops.TimestampNow,
+        ops.TypeOf,
+        ops.Unnest,
+        ops.StringToDate,
+        ops.StringToTimestamp,
     )
 
     SIMPLE_OPS = {
@@ -75,7 +67,6 @@ class DataFusionCompiler(SQLGlotCompiler):
         ops.Last: "last_value",
         ops.Median: "median",
         ops.StringLength: "character_length",
-        ops.RandomUUID: "uuid",
         ops.RegexSplit: "regex_split",
         ops.EndsWith: "ends_with",
         ops.ArrayIntersect: "array_intersect",

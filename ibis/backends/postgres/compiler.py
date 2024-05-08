@@ -14,8 +14,6 @@ import ibis.expr.rules as rlz
 from ibis.backends.sql.compiler import NULL, STAR, SQLGlotCompiler
 from ibis.backends.sql.datatypes import PostgresType
 from ibis.backends.sql.dialects import Postgres
-from ibis.backends.sql.rewrites import rewrite_sample_as_filter
-from ibis.expr.rewrites import rewrite_stringslice
 
 
 class PostgresUDFNode(ops.Value):
@@ -28,21 +26,15 @@ class PostgresCompiler(SQLGlotCompiler):
 
     dialect = Postgres
     type_mapper = PostgresType
-    rewrites = (
-        rewrite_sample_as_filter,
-        *SQLGlotCompiler.rewrites,
-        rewrite_stringslice,
-    )
 
     NAN = sge.Literal.number("'NaN'::double precision")
     POS_INF = sge.Literal.number("'Inf'::double precision")
     NEG_INF = sge.Literal.number("'-Inf'::double precision")
-    UNSUPPORTED_OPERATIONS = frozenset(
-        (
-            ops.RowID,
-            ops.TimeDelta,
-            ops.ArrayFlatten,
-        )
+
+    UNSUPPORTED_OPS = (
+        ops.RowID,
+        ops.TimeDelta,
+        ops.ArrayFlatten,
     )
 
     SIMPLE_OPS = {
@@ -100,7 +92,6 @@ class PostgresCompiler(SQLGlotCompiler):
         ops.MapContains: "exist",
         ops.MapKeys: "akeys",
         ops.MapValues: "avals",
-        ops.RandomUUID: "gen_random_uuid",
         ops.RegexSearch: "regexp_like",
         ops.TimeFromHMS: "make_time",
     }
@@ -110,6 +101,9 @@ class PostgresCompiler(SQLGlotCompiler):
         if where is not None:
             return sge.Filter(this=expr, expression=sge.Where(this=where))
         return expr
+
+    def visit_RandomUUID(self, op, **kwargs):
+        return self.f.gen_random_uuid()
 
     def visit_Mode(self, op, *, arg, where):
         expr = self.f.mode()
@@ -325,6 +319,53 @@ class PostgresCompiler(SQLGlotCompiler):
             op.dtype,
         )
 
+    def visit_UnwrapJSONString(self, op, *, arg):
+        return self.if_(
+            self.f.json_typeof(arg).eq("string"),
+            self.f.json_extract_path_text(
+                arg,
+                # this is apparently how you pass in no additional arguments to
+                # a variadic function, see the "Variadic Function Resolution"
+                # section in
+                # https://www.postgresql.org/docs/current/typeconv-func.html
+                sge.Var(this="VARIADIC ARRAY[]::TEXT[]"),
+            ),
+            NULL,
+        )
+
+    def visit_UnwrapJSONInt64(self, op, *, arg):
+        text = self.f.json_extract_path_text(
+            arg, sge.Var(this="VARIADIC ARRAY[]::TEXT[]")
+        )
+        return self.if_(
+            self.f.json_typeof(arg).eq("number"),
+            self.cast(
+                self.if_(self.f.regexp_like(text, r"^\d+$", "g"), text, NULL),
+                op.dtype,
+            ),
+            NULL,
+        )
+
+    def visit_UnwrapJSONFloat64(self, op, *, arg):
+        text = self.f.json_extract_path_text(
+            arg, sge.Var(this="VARIADIC ARRAY[]::TEXT[]")
+        )
+        return self.if_(
+            self.f.json_typeof(arg).eq("number"), self.cast(text, op.dtype), NULL
+        )
+
+    def visit_UnwrapJSONBoolean(self, op, *, arg):
+        return self.if_(
+            self.f.json_typeof(arg).eq("boolean"),
+            self.cast(
+                self.f.json_extract_path_text(
+                    arg, sge.Var(this="VARIADIC ARRAY[]::TEXT[]")
+                ),
+                op.dtype,
+            ),
+            NULL,
+        )
+
     def visit_StructColumn(self, op, *, names, values):
         return self.f.row(*map(self.cast, values, op.dtype.types))
 
@@ -336,7 +377,10 @@ class PostgresCompiler(SQLGlotCompiler):
         )
 
     def visit_Map(self, op, *, keys, values):
-        return self.f.map(self.f.array(*keys), self.f.array(*values))
+        # map(["a", "b"], NULL) results in {"a": NULL, "b": NULL} in regular postgres,
+        # so we need to modify it to return NULL instead
+        regular = self.f.map(keys, values)
+        return self.if_(values.is_(NULL), NULL, regular)
 
     def visit_MapLength(self, op, *, arg):
         return self.f.cardinality(self.f.akeys(arg))
@@ -464,12 +508,15 @@ class PostgresCompiler(SQLGlotCompiler):
     def visit_ExtractWeekOfYear(self, op, *, arg):
         return self.f.extract("week", arg)
 
+    def visit_ExtractIsoYear(self, op, *, arg):
+        return self.f.extract("isoyear", arg)
+
     def visit_ExtractEpochSeconds(self, op, *, arg):
         return self.f.extract("epoch", arg)
 
     def visit_ArrayIndex(self, op, *, arg, index):
         index = self.if_(index < 0, self.f.cardinality(arg) + index, index)
-        return sge.paren(arg, copy=False)[index + 1]
+        return sge.paren(arg, copy=False)[index]
 
     def visit_ArraySlice(self, op, *, arg, start, stop):
         neg_to_pos_index = lambda n, index: self.if_(index < 0, n + index, index)

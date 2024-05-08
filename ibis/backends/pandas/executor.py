@@ -5,6 +5,7 @@ from functools import reduce
 
 import numpy as np
 import pandas as pd
+from packaging.version import parse as vparse
 
 import ibis.backends.pandas.kernels as pandas_kernels
 import ibis.expr.operations as ops
@@ -81,14 +82,6 @@ class PandasExecutor(Dispatched, PandasUtils):
             return PandasConverter.convert_scalar(arg, to)
 
     @classmethod
-    def visit(cls, op: ops.TypeOf, arg):
-        raise OperationNotDefinedError("TypeOf is not implemented")
-
-    @classmethod
-    def visit(cls, op: ops.RandomScalar):
-        raise OperationNotDefinedError("RandomScalar is not implemented")
-
-    @classmethod
     def visit(cls, op: ops.Greatest, arg):
         return cls.columnwise(lambda df: df.max(axis=1), arg)
 
@@ -117,6 +110,10 @@ class PandasExecutor(Dispatched, PandasUtils):
         if func := cls.kernels.generic.get(typ):
             return cls.generic(func, **kwargs)
 
+        if len(operands) < 1:
+            raise OperationNotDefinedError(
+                f"No implementation found for operation {typ}"
+            )
         _, *rest = operands.values()
         is_multi_arg = bool(rest)
         is_multi_column = any_of(rest, pd.Series)
@@ -173,14 +170,23 @@ class PandasExecutor(Dispatched, PandasUtils):
         if base is not None:
             cases = tuple(base == case for case in cases)
         cases, _ = cls.asframe(cases, concat=False)
+        index = cases[0].index
         results, _ = cls.asframe(results, concat=False)
         out = np.select(cases, results, default)
-        return pd.Series(out)
+        return pd.Series(out, index=index)
 
     @classmethod
     def visit(cls, op: ops.TimestampTruncate | ops.DateTruncate, arg, unit):
         # TODO(kszucs): should use serieswise()
-        unit = {"m": "Min", "ms": "L"}.get(unit.short, unit.short)
+        if vparse(pd.__version__) >= vparse("2.2"):
+            units = {"m": "min"}
+        else:
+            units = {"m": "Min", "ms": "L"}
+
+        unit = units.get(unit.short, unit.short)
+
+        if unit in "YMWD":
+            return arg.dt.to_period(unit).dt.to_timestamp()
         try:
             return arg.dt.floor(unit)
         except ValueError:
@@ -535,7 +541,7 @@ class PandasExecutor(Dispatched, PandasUtils):
         return df
 
     @classmethod
-    def visit(cls, op: ops.SelfReference | ops.JoinTable, parent, **kwargs):
+    def visit(cls, op: ops.Reference, parent, **kwargs):
         return parent
 
     @classmethod

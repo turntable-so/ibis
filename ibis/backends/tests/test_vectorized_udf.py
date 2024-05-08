@@ -323,9 +323,9 @@ def test_reduction_udf_array_return_type(udf_backend, udf_alltypes, udf_df):
     result = expr.execute()
 
     expected = udf_df.assign(
-        q=pd.Series([quantiles.func(udf_df["int_col"], quantiles=qs)])
-        .repeat(len(udf_df))
-        .reset_index(drop=True)
+        q=pd.Series(
+            [quantiles.func(udf_df["int_col"], quantiles=qs).tolist()] * len(udf_df)
+        )
     )
     udf_backend.assert_frame_equal(result, expected)
 
@@ -592,8 +592,7 @@ def test_elementwise_udf_named_destruct(udf_alltypes):
     add_one_struct_udf = create_add_one_struct_udf(
         result_formatter=lambda v1, v2: (v1, v2)
     )
-    msg = "Duplicate column name 'new_struct' in result set"
-    with pytest.raises(com.IntegrityError, match=msg):
+    with pytest.raises(com.InputTypeError, match="Unable to infer datatype"):
         udf_alltypes.mutate(
             new_struct=add_one_struct_udf(udf_alltypes["double_col"]).destructure()
         )

@@ -852,7 +852,7 @@ def temporal_truncate(op, **kw):
     arg = translate(op.arg, **kw)
     unit = "mo" if op.unit.short == "M" else op.unit.short
     unit = f"1{unit.lower()}"
-    return arg.dt.truncate(unit, "-1w")
+    return arg.dt.truncate(unit).dt.offset_by("-1w")
 
 
 def _compile_literal_interval(op):
@@ -879,7 +879,9 @@ def timestamp_bucket(op, **kw):
         arg = arg.dt.offset_by(neg_offset)
     else:
         offset = None
-    res = arg.dt.truncate(interval, offset)
+    res = arg.dt.truncate(interval)
+    if offset is not None:
+        res = res.dt.offset_by(offset)
     return res
 
 
@@ -932,6 +934,15 @@ def timestamp_from_unix(op, **kw):
 def interval_from_integer(op, **kw):
     arg = translate(op.arg, **kw)
     return _make_duration(arg, dt.Interval(unit=op.unit))
+
+
+@translate.register(ops.StringToDate)
+def string_to_date(op, **kw):
+    arg = translate(op.arg, **kw)
+    return arg.str.strptime(
+        dtype=pl.Date,
+        format=_literal_value(op.format_str),
+    )
 
 
 @translate.register(ops.StringToTimestamp)
@@ -991,6 +1002,7 @@ _date_methods = {
     ops.ExtractDay: "day",
     ops.ExtractMonth: "month",
     ops.ExtractYear: "year",
+    ops.ExtractIsoYear: "iso_year",
     ops.ExtractQuarter: "quarter",
     ops.ExtractDayOfYear: "ordinal_day",
     ops.ExtractWeekOfYear: "week",
@@ -1226,6 +1238,7 @@ def execute_arg_min(op, **kw):
 
 @translate.register(ops.SQLStringView)
 def execute_sql_string_view(op, *, ctx: pl.SQLContext, **kw):
+    translate(op.child, ctx=ctx, **kw)
     return ctx.execute(op.query)
 
 
@@ -1236,13 +1249,8 @@ def execute_view(op, *, ctx: pl.SQLContext, **kw):
     return child
 
 
-@translate.register(ops.SelfReference)
-def execute_self_reference(op, **kw):
-    return translate(op.parent, **kw)
-
-
-@translate.register(ops.JoinTable)
-def execute_join_table(op, **kw):
+@translate.register(ops.Reference)
+def execute_reference(op, **kw):
     return translate(op.parent, **kw)
 
 

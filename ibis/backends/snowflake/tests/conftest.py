@@ -146,6 +146,7 @@ class TestConf(BackendTest):
                 CREATE SCHEMA IF NOT EXISTS {dbschema};
                 USE {dbschema};
                 CREATE TEMP STAGE {db};
+                CREATE STAGE IF NOT EXISTS ibis_testing;
                 CREATE STAGE IF NOT EXISTS models;
                 {self.script_dir.joinpath("snowflake.sql").read_text()}
                 """
@@ -173,7 +174,25 @@ class TestConf(BackendTest):
 
     @staticmethod
     def connect(*, tmpdir, worker_id, **kw) -> BaseBackend:
-        return ibis.connect(_get_url(), **kw)
+        if os.environ.get("SNOWFLAKE_SNOWPARK"):
+            import snowflake.snowpark as sp
+
+            if connection_name := os.environ.get("SNOWFLAKE_DEFAULT_CONNECTION_NAME"):
+                builder = sp.Session.builder.config("connection_name", connection_name)
+            else:
+                builder = sp.Session.builder.configs(
+                    {
+                        "user": os.environ["SNOWFLAKE_USER"],
+                        "account": os.environ["SNOWFLAKE_ACCOUNT"],
+                        "password": os.environ["SNOWFLAKE_PASSWORD"],
+                        "warehouse": os.environ["SNOWFLAKE_WAREHOUSE"],
+                        "database": os.environ["SNOWFLAKE_DATABASE"],
+                        "schema": os.environ["SNOWFLAKE_SCHEMA"],
+                    }
+                )
+            return ibis.backends.snowflake.Backend.from_snowpark(builder.create())
+        else:
+            return ibis.connect(_get_url(), **kw)
 
 
 @pytest.fixture(scope="session")

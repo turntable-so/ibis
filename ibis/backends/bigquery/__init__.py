@@ -93,6 +93,8 @@ def _qualify_memtable(
     if isinstance(node, sge.Table) and _MEMTABLE_PATTERN.match(node.name) is not None:
         node.args["db"] = dataset
         node.args["catalog"] = project
+        # make sure to quote table location
+        node = _force_quote_table(node)
     return node
 
 
@@ -125,6 +127,27 @@ def _remove_null_ordering_from_unsupported_window(
     return node
 
 
+def _force_quote_table(table: sge.Table) -> sge.Table:
+    """Force quote all the parts of a bigquery path.
+
+    The BigQuery identifier quoting semantics are bonkers
+    https://cloud.google.com/bigquery/docs/reference/standard-sql/lexical#identifiers
+
+    my-table is OK, but not mydataset.my-table
+
+    mytable-287 is OK, but not mytable-287a
+
+    Just quote everything.
+    """
+    for key in ("this", "db", "catalog"):
+        if (val := table.args[key]) is not None:
+            if isinstance(val, sg.exp.Identifier) and not val.quoted:
+                val.args["quoted"] = True
+            else:
+                table.args[key] = sg.to_identifier(val, quoted=True)
+    return table
+
+
 class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
     name = "bigquery"
     compiler = BigQueryCompiler()
@@ -133,15 +156,19 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
-        self._session_dataset: bq.DatasetReference | None = None
+        self.__session_dataset: bq.DatasetReference | None = None
         self._query_cache.lookup = lambda name: self.table(
             name,
             database=(self._session_dataset.project, self._session_dataset.dataset_id),
         ).op()
 
-    def _register_in_memory_table(self, op: ops.InMemoryTable) -> None:
-        self._make_session()
+    @property
+    def _session_dataset(self):
+        if self.__session_dataset is None:
+            self.__session_dataset = self._make_session()
+        return self.__session_dataset
 
+    def _register_in_memory_table(self, op: ops.InMemoryTable) -> None:
         raw_name = op.name
 
         project = self._session_dataset.project
@@ -574,25 +601,20 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         return rename_partitioned_column(table_expr, bq_table, self.partition_column)
 
     def _make_session(self) -> tuple[str, str]:
-        if (
-            not hasattr(self, "_session_dataset")
-            or self._session_dataset is None
-            and (client := getattr(self, "client", None)) is not None
-        ):
+        if (client := getattr(self, "client", None)) is not None:
             job_config = bq.QueryJobConfig(use_query_cache=False)
             query = client.query(
                 "SELECT 1", job_config=job_config, project=self.billing_project
             )
             query.result()
 
-            self._session_dataset = bq.DatasetReference(
+            return bq.DatasetReference(
                 project=query.destination.project,
                 dataset_id=query.destination.dataset_id,
             )
+        return None
 
     def _get_schema_using_query(self, query: str) -> sch.Schema:
-        self._make_session()
-
         job = self.client.query(
             query,
             job_config=bq.QueryJobConfig(dry_run=True, use_query_cache=False),
@@ -601,8 +623,6 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         return BigQuerySchema.to_ibis(job.schema)
 
     def _execute(self, stmt, query_parameters=None):
-        self._make_session()
-
         job_config = bq.job.QueryJobConfig(query_parameters=query_parameters or [])
         query = self.client.query(
             stmt, job_config=job_config, project=self.billing_project
@@ -638,7 +658,6 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
             backend.
 
         """
-        self._make_session()
         self._define_udf_translation_rules(expr)
         sql = super()._to_sqlglot(expr, limit=limit, params=params, **kwargs)
 
@@ -835,7 +854,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
             ),
             chunk_size=chunk_size,
         )
-        return pa.RecordBatchReader.from_batches(schema.to_pyarrow(), batch_iter)
+        return pa.ipc.RecordBatchReader.from_batches(schema.to_pyarrow(), batch_iter)
 
     def _gen_udf_name(self, name: str, schema: Optional[str]) -> str:
         func = ".".join(filter(None, (schema, name)))
@@ -1029,13 +1048,20 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         try:
             table = sg.parse_one(name, into=sge.Table, read="bigquery")
         except sg.ParseError:
-            table = sg.table(name, db=dataset, catalog=project_id)
+            table = sg.table(
+                name,
+                db=dataset,
+                catalog=project_id,
+                quoted=self.compiler.quoted,
+            )
         else:
             if table.args["db"] is None:
                 table.args["db"] = dataset
 
             if table.args["catalog"] is None:
                 table.args["catalog"] = project_id
+
+        table = _force_quote_table(table)
 
         column_defs = [
             sge.ColumnDef(

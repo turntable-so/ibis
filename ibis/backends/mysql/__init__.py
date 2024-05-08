@@ -11,6 +11,7 @@ from operator import itemgetter
 from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
+import numpy as np
 import pymysql
 import sqlglot as sg
 import sqlglot.expressions as sge
@@ -274,6 +275,17 @@ class Backend(SQLBackend, CanCreateDatabase):
     ) -> list[str]:
         """List the tables in the database.
 
+        ::: {.callout-note}
+        ## Ibis does not use the word `schema` to refer to database hierarchy.
+
+        A collection of tables is referred to as a `database`.
+        A collection of `database` is referred to as a `catalog`.
+
+        These terms are mapped onto the corresponding features in each
+        backend (where available), regardless of whether the backend itself
+        uses the same terminology.
+        :::
+
         Parameters
         ----------
         like
@@ -283,17 +295,6 @@ class Backend(SQLBackend, CanCreateDatabase):
         database
             Database to list tables from. Default behavior is to show tables in
             the current database (``self.current_database``).
-
-            ::: {.callout-note}
-            ## Ibis does not use the word `schema` to refer to database hierarchy.
-
-            A collection of tables is referred to as a `database`.
-            A collection of `database` is referred to as a `catalog`.
-
-            These terms are mapped onto the corresponding features in each
-            backend (where available), regardless of whether the backend itself
-            uses the same terminology.
-            :::
         """
         if schema is not None:
             self._warn_schema()
@@ -481,6 +482,9 @@ class Backend(SQLBackend, CanCreateDatabase):
 
             columns = schema.keys()
             df = op.data.to_frame()
+            # nan can not be used with MySQL
+            df = df.replace(np.nan, None)
+
             data = df.itertuples(index=False)
             cols = ", ".join(
                 ident.sql(self.name)

@@ -18,10 +18,9 @@ from ibis.backends.sql.rewrites import (
     exclude_unsupported_window_frame_from_rank,
     exclude_unsupported_window_frame_from_row_number,
     rewrite_empty_order_by_window,
-    rewrite_sample_as_filter,
 )
 from ibis.common.patterns import replace
-from ibis.expr.rewrites import p, rewrite_stringslice
+from ibis.expr.rewrites import p
 
 
 @replace(p.Limit)
@@ -50,12 +49,10 @@ class MySQLCompiler(SQLGlotCompiler):
     type_mapper = MySQLType
     rewrites = (
         rewrite_limit,
-        rewrite_sample_as_filter,
         exclude_unsupported_window_frame_from_ops,
         exclude_unsupported_window_frame_from_rank,
         exclude_unsupported_window_frame_from_row_number,
         rewrite_empty_order_by_window,
-        rewrite_stringslice,
         *SQLGlotCompiler.rewrites,
     )
 
@@ -68,33 +65,31 @@ class MySQLCompiler(SQLGlotCompiler):
         raise NotImplementedError("MySQL does not support Infinity")
 
     NEG_INF = POS_INF
-    UNSUPPORTED_OPERATIONS = frozenset(
-        (
-            ops.ApproxMedian,
-            ops.ArgMax,
-            ops.ArgMin,
-            ops.ArrayCollect,
-            ops.Array,
-            ops.ArrayFlatten,
-            ops.ArrayMap,
-            ops.Covariance,
-            ops.First,
-            ops.Last,
-            ops.Levenshtein,
-            ops.Median,
-            ops.Mode,
-            ops.MultiQuantile,
-            ops.Quantile,
-            ops.RegexReplace,
-            ops.RegexSplit,
-            ops.RowID,
-            ops.StringSplit,
-            ops.StructColumn,
-            ops.TimestampBucket,
-            ops.TimestampDelta,
-            ops.Translate,
-            ops.Unnest,
-        )
+    UNSUPPORTED_OPS = (
+        ops.ApproxMedian,
+        ops.ArgMax,
+        ops.ArgMin,
+        ops.ArrayCollect,
+        ops.Array,
+        ops.ArrayFlatten,
+        ops.ArrayMap,
+        ops.Covariance,
+        ops.First,
+        ops.Last,
+        ops.Levenshtein,
+        ops.Median,
+        ops.Mode,
+        ops.MultiQuantile,
+        ops.Quantile,
+        ops.RegexReplace,
+        ops.RegexSplit,
+        ops.RowID,
+        ops.StringSplit,
+        ops.StructColumn,
+        ops.TimestampBucket,
+        ops.TimestampDelta,
+        ops.Translate,
+        ops.Unnest,
     )
 
     SIMPLE_OPS = {
@@ -217,8 +212,6 @@ class MySQLCompiler(SQLGlotCompiler):
             raise com.UnsupportedBackendType(
                 "MySQL does not support arrays, structs or maps"
             )
-        elif dtype.is_string():
-            return sge.convert(value.replace("\\", "\\\\"))
         return None
 
     def visit_JSONGetItem(self, op, *, arg, index):
@@ -260,7 +253,7 @@ class MySQLCompiler(SQLGlotCompiler):
                 index.eq(0),
                 extracted,
                 self.f.regexp_replace(
-                    extracted, pattern, rf"\\{index.sql(self.dialect)}"
+                    extracted, pattern, f"\\{index.sql(self.dialect)}"
                 ),
             ),
             NULL,
@@ -336,7 +329,7 @@ class MySQLCompiler(SQLGlotCompiler):
         return self.visit_LRStrip(op, arg=arg, position="TRAILING")
 
     def visit_IntervalFromInteger(self, op, *, arg, unit):
-        return sge.Interval(this=arg, unit=sge.convert(op.resolution.upper()))
+        return sge.Interval(this=arg, unit=sge.Var(this=op.resolution.upper()))
 
     def visit_TimestampAdd(self, op, *, left, right):
         if op.right.dtype.unit.short == "ms":
@@ -344,3 +337,25 @@ class MySQLCompiler(SQLGlotCompiler):
                 this=right.this * 1_000, unit=sge.Var(this="MICROSECOND")
             )
         return self.f.date_add(left, right, dialect=self.dialect)
+
+    def visit_UnwrapJSONString(self, op, *, arg):
+        return self.if_(
+            self.f.json_type(arg).eq("STRING"), self.f.json_unquote(arg), NULL
+        )
+
+    def visit_UnwrapJSONInt64(self, op, *, arg):
+        return self.if_(
+            self.f.json_type(arg).eq("INTEGER"), self.cast(arg, op.dtype), NULL
+        )
+
+    def visit_UnwrapJSONFloat64(self, op, *, arg):
+        return self.if_(
+            self.f.json_type(arg).isin("DOUBLE", "INTEGER"),
+            self.cast(arg, op.dtype),
+            NULL,
+        )
+
+    def visit_UnwrapJSONBoolean(self, op, *, arg):
+        return self.if_(
+            self.f.json_type(arg).eq("BOOLEAN"), self.if_(arg.eq("true"), 1, 0), NULL
+        )

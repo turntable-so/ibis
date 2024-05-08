@@ -30,7 +30,7 @@ t.to_parquet("penguins.parquet")
 ## DuckDB
 
 ```{python}
-con = ibis.duckdb.connect()  # <1>
+con = ibis.connect("duckdb://")  # <1>
 
 t = con.read_parquet("penguins.parquet")
 t.limit(3)
@@ -45,7 +45,7 @@ t.group_by(["species", "island"]).agg(count=t.count()).order_by("count")
 ## Polars
 
 ```{python}
-con = ibis.polars.connect()  # <1>
+con = ibis.connect("polars://")  # <1>
 
 t = con.read_parquet("penguins.parquet")
 t.limit(3)
@@ -60,7 +60,7 @@ t.group_by(["species", "island"]).agg(count=t.count()).order_by("count")
 ## DataFusion
 
 ```{python}
-con = ibis.datafusion.connect()  # <1>
+con = ibis.connect("datafusion://")  # <1>
 
 t = con.read_parquet("penguins.parquet")
 t.limit(3)
@@ -202,11 +202,10 @@ providing a common API for data manipulation in Python, and compiling that API
 into the backend's native language. This means you can learn a single API and
 use it across any supported backend (execution engine).
 
-Ibis supports three types of backend:
+Ibis broadly supports two types of backend:
 
 1. SQL-generating backends
-2. Expression-generating backends
-3. Naïve execution backends
+2. DataFrame-generating backends
 
 ```{python}
 #| echo: false
@@ -255,7 +254,7 @@ GROUP BY species, island
 ## DuckDB
 
 ```{python}
-con = ibis.duckdb.connect()
+con = ibis.connect("duckdb://")
 t = con.read_parquet("penguins.parquet")
 g = t.alias("penguins").sql(sql)
 g
@@ -268,7 +267,7 @@ g.order_by("count")
 ## DataFusion
 
 ```{python}
-con = ibis.datafusion.connect()
+con = ibis.connect("datafusion://")
 t = con.read_parquet("penguins.parquet")
 g = t.alias("penguins").sql(sql)
 g

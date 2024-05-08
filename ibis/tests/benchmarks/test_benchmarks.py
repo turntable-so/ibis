@@ -6,6 +6,7 @@ import inspect
 import itertools
 import os
 import string
+from operator import attrgetter, itemgetter
 
 import numpy as np
 import pandas as pd
@@ -18,7 +19,7 @@ import ibis.expr.operations as ops
 import ibis.expr.types as ir
 from ibis.backends import _get_backend_names
 
-pytestmark = pytest.mark.benchmark
+pytestmark = [pytest.mark.benchmark, pytest.mark.timeout(30)]
 
 
 def make_t():
@@ -529,7 +530,7 @@ def test_eq_datatypes(benchmark, dtypes):
 def multiple_joins(table, num_joins):
     for _ in range(num_joins):
         table = table.mutate(dummy=ibis.literal(""))
-        table = table.left_join(table, ["dummy"])[[table]]
+        table = table.left_join(table.view(), ["dummy"])[[table]]
 
 
 @pytest.mark.parametrize("num_joins", [1, 10])
@@ -811,3 +812,38 @@ def test_big_join_compile(benchmark, src, diff):
         warmup_rounds=1,
     )
     assert len(t)
+
+
+@pytest.mark.timeout(5)
+def test_big_expression_compile(benchmark):
+    from ibis.tests.benchmarks.benchfuncs import clean_names
+
+    t = ibis.table(
+        schema={
+            "id": "int64",
+            "prefix": "string",
+            "first_name": "string",
+            "middle_name": "string",
+            "last_name": "string",
+            "suffix": "string",
+            "nickname": "string",
+        },
+        name="names",
+    )
+    t2 = clean_names(t)
+
+    assert benchmark(ibis.to_sql, t2, dialect="duckdb")
+
+
+@pytest.fixture(scope="module")
+def many_cols():
+    return ibis.table({f"x{i:d}": "int" for i in range(10000)}, name="t")
+
+
+@pytest.mark.parametrize(
+    "getter",
+    [itemgetter("x0"), itemgetter(0), attrgetter("x0")],
+    ids=["str", "int", "attr"],
+)
+def test_column_access(benchmark, many_cols, getter):
+    benchmark(getter, many_cols)

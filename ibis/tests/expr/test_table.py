@@ -192,7 +192,7 @@ def test_projection_with_exprs(table):
 
 
 def test_projection_duplicate_names(table):
-    with pytest.raises(com.IntegrityError):
+    with pytest.raises(com.IbisInputError, match="Duplicate column name 'c'"):
         table.select([table.c, table.c])
 
 
@@ -562,11 +562,15 @@ def test_order_by_asc_deferred_sort_key(table):
     assert_equal(result, expected2)
 
 
+# different instantiations create unique objects
+rand = ibis.random()
+
+
 @pytest.mark.parametrize(
     ("key", "expected"),
     [
         param(ibis.NA, ibis.NA.op(), id="na"),
-        param(ibis.random(), ibis.random().op(), id="random"),
+        param(rand, rand.op(), id="random"),
         param(1.0, ibis.literal(1.0).op(), id="float"),
         param(ibis.literal("a"), ibis.literal("a").op(), id="string"),
         param(ibis.literal([1, 2, 3]), ibis.literal([1, 2, 3]).op(), id="array"),
@@ -581,10 +585,8 @@ def test_order_by_scalar(table, key, expected):
     ("key", "exc_type"),
     [
         ("bogus", com.IbisTypeError),
-        # (("bogus", False), com.IbisTypeError),
+        (("bogus", False), com.IbisTypeError),
         (ibis.desc("bogus"), com.IbisTypeError),
-        (1000, IndexError),
-        # ((1000, False), IndexError),
         (_.bogus, AttributeError),
         (_.bogus.desc(), AttributeError),
     ],
@@ -746,7 +748,7 @@ def test_aggregate_keywords(table):
 def test_select_on_literals(table):
     # literal ints and strings are column indices, everything else is a value
     expr1 = table.select(col1=True, col2=1, col3="a")
-    expr2 = table.select(col1=ibis.literal(True), col2=table.b, col3=table.a)
+    expr2 = table.select(col1=ibis.literal(True), col2=ibis.literal(1), col3=table.a)
     assert expr1.equals(expr2)
 
 
@@ -899,7 +901,7 @@ def test_join_no_predicate_list(con):
     pred = region.r_regionkey == nation.n_regionkey
     joined = region.inner_join(nation, pred)
 
-    with join_tables(region, nation) as (r1, r2):
+    with join_tables(joined) as (r1, r2):
         expected = ops.JoinChain(
             first=r1,
             rest=[ops.JoinLink("inner", r2, [r1.r_regionkey == r2.n_regionkey])],
@@ -922,7 +924,7 @@ def test_join_deferred(con):
 
     res = region.join(nation, _.r_regionkey == nation.n_regionkey)
 
-    with join_tables(region, nation) as (r1, r2):
+    with join_tables(res) as (r1, r2):
         expected = ops.JoinChain(
             first=r1,
             rest=[ops.JoinLink("inner", r2, [r1.r_regionkey == r2.n_regionkey])],
@@ -968,7 +970,7 @@ def test_asof_join_with_by():
     right = ibis.table([("time", "int32"), ("key", "int32"), ("value2", "double")])
 
     join_without_by = api.asof_join(left, right, "time")
-    with join_tables(left, right) as (r1, r2):
+    with join_tables(join_without_by) as (r1, r2):
         r2 = join_without_by.op().rest[0].table.to_expr()
         expected = ops.JoinChain(
             first=r1,
@@ -985,7 +987,7 @@ def test_asof_join_with_by():
         assert join_without_by.op() == expected
 
     join_with_predicates = api.asof_join(left, right, "time", predicates="key")
-    with join_tables(left, right) as (r1, r2):
+    with join_tables(join_with_predicates) as (r1, r2):
         expected = ops.JoinChain(
             first=r1,
             rest=[
@@ -1203,7 +1205,7 @@ def test_cross_join_multiple(table):
     c = table["f", "h"]
 
     joined = ibis.cross_join(a, b, c)
-    with join_tables(a, b, c) as (r1, r2, r3):
+    with join_tables(joined) as (r1, r2, r3):
         expected = ops.JoinChain(
             first=r1,
             rest=[
@@ -1280,7 +1282,7 @@ def test_inner_join_overlapping_column_names():
         lambda t1, t2: [(t1.foo_id, t2.foo_id)],
         lambda t1, t2: [(_.foo_id, _.foo_id)],
         lambda t1, t2: [(t1.foo_id, _.foo_id)],
-        lambda t1, t2: [(2, 0)],  # foo_id is 2nd in t1, 0th in t2
+        lambda t1, t2: [(t1[2], t2[0])],  # foo_id is 2nd in t1, 0th in t2
         lambda t1, t2: [(lambda t: t.foo_id, lambda t: t.foo_id)],
     ],
 )
@@ -1290,7 +1292,7 @@ def test_join_key_alternatives(con, key_maker):
     key = key_maker(t1, t2)
 
     joined = t1.inner_join(t2, key)
-    with join_tables(t1, t2) as (r1, r2):
+    with join_tables(joined) as (r1, r2):
         expected = ops.JoinChain(
             first=r1,
             rest=[
@@ -1374,7 +1376,7 @@ def test_unravel_compound_equijoin(table):
     p3 = t1.key3 == t2.key3
 
     joined = t1.inner_join(t2, [p1 & p2 & p3])
-    with join_tables(t1, t2) as (r1, r2):
+    with join_tables(joined) as (r1, r2):
         expected = ops.JoinChain(
             first=r1,
             rest=[
@@ -2075,3 +2077,101 @@ def test_unbind_with_namespace():
 
     assert s.op() == expected.op()
     assert s.equals(expected)
+
+
+def test_table_bind():
+    def eq(left, right):
+        return all(a.equals(b) for a, b in zip(left, right))
+
+    t = ibis.table({"a": "int", "b": "string"}, name="t")
+
+    # boolean literals
+    exprs = t.bind(True, False)
+    expected = (ibis.literal(True), ibis.literal(False))
+    assert eq(exprs, expected)
+
+    # int literals
+    exprs = t.bind(1, 2)
+    expected = (ibis.literal(1), ibis.literal(2))
+    assert eq(exprs, expected)
+
+    # lambda input
+    exprs = t.bind(lambda t: t.a, lambda t: t.b, lambda _: 2)
+    expected = (t.a, t.b, ibis.literal(2))
+    assert eq(exprs, expected)
+
+    # deferred input
+    exprs = t.bind(_.a, _.b)
+    expected = (t.a, t.b)
+    assert eq(exprs, expected)
+
+    # single table arg
+    exprs = t.bind(t)
+    expected = (t.a, t.b)
+    assert eq(exprs, expected)
+
+    # single selector arg
+    exprs = t.bind(s.all())
+    expected = (t.a, t.b)
+    assert eq(exprs, expected)
+
+    # single tuple arg
+    exprs = t.bind((1, "a"))
+    expected = (ibis.literal(1), t.a)
+    assert eq(exprs, expected)
+
+    # generator arg
+    exprs = t.bind(c for c in (1, "a"))
+    expected = (ibis.literal(1), t.a)
+    assert eq(exprs, expected)
+
+    # single list arg
+    exprs = t.bind([1, 2, "b"])
+    expected = (ibis.literal(1), ibis.literal(2), t.b)
+    assert eq(exprs, expected)
+
+    # single list arg with kwargs
+    exprs = t.bind([1], b=2)
+    expected = (ibis.literal(1), ibis.literal(2).name("b"))
+    assert eq(exprs, expected)
+
+    # single dict arg
+    exprs = t.bind({"c": 1, "d": 2})
+    expected = (ibis.literal(1).name("c"), ibis.literal(2).name("d"))
+    assert eq(exprs, expected)
+
+    # single dict arg with kwargs
+    exprs = t.bind({"c": 1}, d=2)
+    expected = (ibis.literal(1).name("c"), ibis.literal(2).name("d"))
+    assert eq(exprs, expected)
+
+    # single dict arg with overlapping kwargs
+    exprs = t.bind({"c": 1, "d": 2}, c=2)
+    expected = (ibis.literal(2).name("c"), ibis.literal(2).name("d"))
+    assert eq(exprs, expected)
+
+    # kwargs cannot cannot produce more than one value
+    with pytest.raises(com.IbisInputError):
+        t.bind(alias=t)
+    with pytest.raises(com.IbisInputError):
+        t.bind(alias=s.all())
+
+    # multiple args
+    exprs = t.bind(t, ["a", "b"], {"c": 1}, d=2)
+    expected = (
+        t.a,
+        t.b,
+        ibis.literal(["a", "b"]),
+        ibis.literal({"c": 1}),
+        ibis.literal(2).name("d"),
+    )
+    assert eq(exprs, expected)
+
+    # no args
+    assert t.bind() == ()
+
+    def utter_failure(x):
+        raise ValueError("¡moo!")
+
+    with pytest.raises(ValueError, match="¡moo!"):
+        t.bind(foo=utter_failure)

@@ -14,7 +14,6 @@ from ibis.backends.sql.compiler import FALSE, NULL, STAR, SQLGlotCompiler
 from ibis.backends.sql.datatypes import TrinoType
 from ibis.backends.sql.dialects import Trino
 from ibis.backends.sql.rewrites import exclude_unsupported_window_frame_from_ops
-from ibis.expr.rewrites import rewrite_stringslice
 
 
 class TrinoCompiler(SQLGlotCompiler):
@@ -24,7 +23,6 @@ class TrinoCompiler(SQLGlotCompiler):
     type_mapper = TrinoType
     rewrites = (
         exclude_unsupported_window_frame_from_ops,
-        rewrite_stringslice,
         *SQLGlotCompiler.rewrites,
     )
     quoted = True
@@ -33,15 +31,17 @@ class TrinoCompiler(SQLGlotCompiler):
     POS_INF = sg.func("infinity")
     NEG_INF = -POS_INF
 
-    UNSUPPORTED_OPERATIONS = frozenset(
-        (
-            ops.Quantile,
-            ops.MultiQuantile,
-            ops.Median,
-            ops.RowID,
-            ops.TimestampBucket,
-        )
+    UNSUPPORTED_OPS = (
+        ops.Quantile,
+        ops.MultiQuantile,
+        ops.Median,
+        ops.RowID,
+        ops.TimestampBucket,
     )
+
+    LOWERED_OPS = {
+        ops.Sample: None,
+    }
 
     SIMPLE_OPS = {
         ops.Arbitrary: "any_value",
@@ -80,7 +80,7 @@ class TrinoCompiler(SQLGlotCompiler):
         ops.ExtractPath: "url_extract_path",
         ops.ExtractFragment: "url_extract_fragment",
         ops.ArrayPosition: "array_position",
-        ops.RandomUUID: "uuid",
+        ops.ExtractIsoYear: "year_of_week",
     }
 
     def _aggregate(self, funcname: str, *args, where):
@@ -173,6 +173,35 @@ class TrinoCompiler(SQLGlotCompiler):
         fmt = "%d" if op.index.dtype.is_integer() else '"%s"'
         return self.f.json_extract(arg, self.f.format(f"$[{fmt}]", index))
 
+    def visit_UnwrapJSONString(self, op, *, arg):
+        return self.f.json_value(
+            self.f.json_format(arg), 'strict $?($.type() == "string")'
+        )
+
+    def visit_UnwrapJSONInt64(self, op, *, arg):
+        value = self.f.json_value(
+            self.f.json_format(arg), 'strict $?($.type() == "number")'
+        )
+        return self.cast(
+            self.if_(self.f.regexp_like(value, r"^\d+$"), value, NULL), op.dtype
+        )
+
+    def visit_UnwrapJSONFloat64(self, op, *, arg):
+        return self.cast(
+            self.f.json_value(
+                self.f.json_format(arg), 'strict $?($.type() == "number")'
+            ),
+            op.dtype,
+        )
+
+    def visit_UnwrapJSONBoolean(self, op, *, arg):
+        return self.cast(
+            self.f.json_value(
+                self.f.json_format(arg), 'strict $?($.type() == "boolean")'
+            ),
+            op.dtype,
+        )
+
     def visit_DayOfWeekIndex(self, op, *, arg):
         return self.cast(
             sge.paren(self.f.day_of_week(arg) + 6, copy=False) % 7, op.dtype
@@ -253,6 +282,16 @@ class TrinoCompiler(SQLGlotCompiler):
         else:
             raise com.UnsupportedOperationError(f"{unit!r} unit is not supported")
         return self.cast(res, op.dtype)
+
+    def visit_InSubquery(self, op, *, rel, needle):
+        # cast the needle to the same type as the column being queried, since
+        # trino is very strict about structs
+        if op.needle.dtype.is_struct():
+            needle = self.cast(
+                sge.Struct.from_arg_list([needle]), op.rel.schema.as_struct()
+            )
+
+        return super().visit_InSubquery(op, rel=rel, needle=needle)
 
     def visit_StructColumn(self, op, *, names, values):
         return self.cast(sge.Struct(expressions=list(values)), op.dtype)
@@ -447,3 +486,23 @@ class TrinoCompiler(SQLGlotCompiler):
         # sqlglot doesn't support the third `group` argument for trino so work
         # around that limitation using an anonymous function
         return self.f.anon.regexp_extract(arg, pattern, index)
+
+    def visit_ToJSONMap(self, op, *, arg):
+        return self.cast(
+            self.f.json_parse(
+                self.f.json_query(
+                    self.f.json_format(arg), 'strict $?($.type() == "object")'
+                )
+            ),
+            dt.Map(dt.string, dt.json),
+        )
+
+    def visit_ToJSONArray(self, op, *, arg):
+        return self.cast(
+            self.f.json_parse(
+                self.f.json_query(
+                    self.f.json_format(arg), 'strict $?($.type() == "array")'
+                )
+            ),
+            dt.Array(dt.json),
+        )
