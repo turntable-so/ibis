@@ -26,7 +26,7 @@ import ibis
 
 # def test_public_backend_methods():
 #     public = {m for m in dir(ibis.sqlite) if not m.startswith("_")}
-#     assert public == {"connect", "compile", "has_operation", "add_operation", "name"}
+#     assert public == {"connect", "compile", "has_operation", "name"}
 
 
 def test_missing_backend():
@@ -51,10 +51,7 @@ def test_multiple_backends(mocker):
             group="ibis.backends",
         ),
     ]
-    if sys.version_info < (3, 10):
-        return_value = {"ibis.backends": entrypoints}
-    else:
-        return_value = entrypoints
+    return_value = entrypoints
 
     mocker.patch("importlib.metadata.entry_points", return_value=return_value)
 
@@ -72,3 +69,10 @@ import sys
 assert "{module}" not in sys.modules
 """
     subprocess.run([sys.executable, "-c", script], check=True)
+
+
+def test_ibis_na_deprecation_warning():
+    with pytest.warns(
+        DeprecationWarning, match="The 'ibis.NA' constant is deprecated as of v9.1"
+    ):
+        assert ibis.NA is ibis.null()

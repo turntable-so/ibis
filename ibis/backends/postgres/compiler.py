@@ -11,9 +11,10 @@ import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
 import ibis.expr.rules as rlz
-from ibis.backends.sql.compiler import NULL, STAR, SQLGlotCompiler
+from ibis.backends.sql.compiler import NULL, STAR, AggGen, SQLGlotCompiler
 from ibis.backends.sql.datatypes import PostgresType
 from ibis.backends.sql.dialects import Postgres
+from ibis.backends.sql.rewrites import exclude_nulls_from_array_collect
 
 
 class PostgresUDFNode(ops.Value):
@@ -26,6 +27,10 @@ class PostgresCompiler(SQLGlotCompiler):
 
     dialect = Postgres
     type_mapper = PostgresType
+
+    rewrites = (exclude_nulls_from_array_collect, *SQLGlotCompiler.rewrites)
+
+    agg = AggGen(supports_filter=True)
 
     NAN = sge.Literal.number("'NaN'::double precision")
     POS_INF = sge.Literal.number("'Inf'::double precision")
@@ -95,12 +100,6 @@ class PostgresCompiler(SQLGlotCompiler):
         ops.RegexSearch: "regexp_like",
         ops.TimeFromHMS: "make_time",
     }
-
-    def _aggregate(self, funcname: str, *args, where):
-        expr = self.f[funcname](*args)
-        if where is not None:
-            return sge.Filter(this=expr, expression=sge.Where(this=where))
-        return expr
 
     def visit_RandomUUID(self, op, **kwargs):
         return self.f.gen_random_uuid()
@@ -229,7 +228,9 @@ class PostgresCompiler(SQLGlotCompiler):
 
     def visit_ArrayContains(self, op, *, arg, other):
         arg_dtype = op.arg.dtype
-        return sge.ArrayContains(
+        # ArrayContainsAll introduced in 24, keep backcompat if it doesn't exist
+        cls = getattr(sge, "ArrayContainsAll", sge.ArrayContains)
+        return cls(
             this=self.cast(arg, arg_dtype),
             expression=self.f.array(self.cast(other, arg_dtype.value_type)),
         )
@@ -321,7 +322,7 @@ class PostgresCompiler(SQLGlotCompiler):
 
     def visit_UnwrapJSONString(self, op, *, arg):
         return self.if_(
-            self.f.json_typeof(arg).eq("string"),
+            self.f.json_typeof(arg).eq(sge.convert("string")),
             self.f.json_extract_path_text(
                 arg,
                 # this is apparently how you pass in no additional arguments to
@@ -338,7 +339,7 @@ class PostgresCompiler(SQLGlotCompiler):
             arg, sge.Var(this="VARIADIC ARRAY[]::TEXT[]")
         )
         return self.if_(
-            self.f.json_typeof(arg).eq("number"),
+            self.f.json_typeof(arg).eq(sge.convert("number")),
             self.cast(
                 self.if_(self.f.regexp_like(text, r"^\d+$", "g"), text, NULL),
                 op.dtype,
@@ -351,12 +352,14 @@ class PostgresCompiler(SQLGlotCompiler):
             arg, sge.Var(this="VARIADIC ARRAY[]::TEXT[]")
         )
         return self.if_(
-            self.f.json_typeof(arg).eq("number"), self.cast(text, op.dtype), NULL
+            self.f.json_typeof(arg).eq(sge.convert("number")),
+            self.cast(text, op.dtype),
+            NULL,
         )
 
     def visit_UnwrapJSONBoolean(self, op, *, arg):
         return self.if_(
-            self.f.json_typeof(arg).eq("boolean"),
+            self.f.json_typeof(arg).eq(sge.convert("boolean")),
             self.cast(
                 self.f.json_extract_path_text(
                     arg, sge.Var(this="VARIADIC ARRAY[]::TEXT[]")
@@ -585,3 +588,26 @@ class PostgresCompiler(SQLGlotCompiler):
         return self.cast(arg, op.to)
 
     visit_TryCast = visit_Cast
+
+    def visit_Hash(self, op, *, arg):
+        arg_dtype = op.arg.dtype
+
+        if arg_dtype.is_int16():
+            return self.f.hashint2extended(arg, 0)
+        elif arg_dtype.is_int32():
+            return self.f.hashint4extended(arg, 0)
+        elif arg_dtype.is_int64():
+            return self.f.hashint8extended(arg, 0)
+        elif arg_dtype.is_float32():
+            return self.f.hashfloat4extended(arg, 0)
+        elif arg_dtype.is_float64():
+            return self.f.hashfloat8extended(arg, 0)
+        elif arg_dtype.is_string():
+            return self.f.hashtextextended(arg, 0)
+        elif arg_dtype.is_macaddr():
+            return self.f.hashmacaddr8extended(arg, 0)
+
+        raise com.UnsupportedOperationError(
+            f"Hash({arg_dtype!r}) operation is not supported in the "
+            f"{self.dialect} backend"
+        )

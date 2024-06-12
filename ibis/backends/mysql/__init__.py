@@ -24,6 +24,7 @@ import ibis.expr.types as ir
 from ibis import util
 from ibis.backends import CanCreateDatabase
 from ibis.backends.mysql.compiler import MySQLCompiler
+from ibis.backends.mysql.datatypes import _type_from_cursor_info
 from ibis.backends.sql import SQLBackend
 from ibis.backends.sql.compiler import TRUE, C
 
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
     import pandas as pd
+    import polars as pl
     import pyarrow as pa
 
 
@@ -188,14 +190,15 @@ class Backend(SQLBackend, CanCreateDatabase):
         return self._filter_with_like(databases, like)
 
     def _get_schema_using_query(self, query: str) -> sch.Schema:
-        table = util.gen_name(f"{self.name}_metadata")
-
         with self.begin() as cur:
-            cur.execute(f"CREATE TEMPORARY TABLE {table} AS {query}")
-            try:
-                return self.get_schema(table)
-            finally:
-                cur.execute(f"DROP TABLE {table}")
+            cur.execute(f"SELECT * FROM ({query}) AS tmp LIMIT 0")
+
+            return sch.Schema(
+                {
+                    field.name: _type_from_cursor_info(descr, field)
+                    for descr, field in zip(cur.description, cur._result.fields)
+                }
+            )
 
     def get_schema(
         self, name: str, *, catalog: str | None = None, database: str | None = None
@@ -326,8 +329,6 @@ class Backend(SQLBackend, CanCreateDatabase):
                 sg_db.args["quoted"] = False
             conditions = [C.table_schema.eq(sge.convert(table_loc.sql(self.name)))]
 
-            # conditions.append(C.table_schema.eq(table_loc))
-
         col = "table_name"
         sql = (
             sg.select(col)
@@ -360,7 +361,12 @@ class Backend(SQLBackend, CanCreateDatabase):
     def create_table(
         self,
         name: str,
-        obj: pd.DataFrame | pa.Table | ir.Table | None = None,
+        obj: ir.Table
+        | pd.DataFrame
+        | pa.Table
+        | pl.DataFrame
+        | pl.LazyFrame
+        | None = None,
         *,
         schema: ibis.Schema | None = None,
         database: str | None = None,
@@ -382,9 +388,11 @@ class Backend(SQLBackend, CanCreateDatabase):
         if temp:
             properties.append(sge.TemporaryProperty())
 
+        temp_memtable_view = None
         if obj is not None:
             if not isinstance(obj, ir.Expr):
                 table = ibis.memtable(obj)
+                temp_memtable_view = table.op().name
             else:
                 table = obj
 
@@ -436,6 +444,11 @@ class Backend(SQLBackend, CanCreateDatabase):
                 )
 
         if schema is None:
+            # Clean up temporary memtable if we've created one
+            # for in-memory reads
+            if temp_memtable_view is not None:
+                self.drop_table(temp_memtable_view)
+
             return self.table(name, database=database)
 
         # preserve the input schema if it was provided

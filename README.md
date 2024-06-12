@@ -56,7 +56,7 @@ Then use Ibis:
 │ Adelie  │ Torgersen │           42.0 │          20.2 │               190 │        4250 │ NULL   │  2007 │
 │ …       │ …         │              … │             … │                 … │           … │ …      │     … │
 └─────────┴───────────┴────────────────┴───────────────┴───────────────────┴─────────────┴────────┴───────┘
->>> g = t.group_by(["species", "island"]).agg(count=t.count()).order_by("count")
+>>> g = t.group_by("species", "island").agg(count=t.count()).order_by("count")
 >>> g
 ┏━━━━━━━━━━━┳━━━━━━━━━━━┳━━━━━━━┓
 ┃ species   ┃ island    ┃ count ┃
@@ -210,7 +210,7 @@ This allows you to iterate locally and deploy remotely by changing a single line
 Ibis is an open source project and welcomes contributions from anyone in the community.
 
 - Read [the contributing guide](https://github.com/ibis-project/ibis/blob/main/docs/CONTRIBUTING.md).
-- We care about keeping the community welcoming for all. Check out [the code of conduct](https://github.com/ibis-project/ibis/blob/main/docs/CODE_OF_CONDUCT.md).
+- We care about keeping the community welcoming for all. Check out [the code of conduct](https://github.com/ibis-project/ibis/blob/main/CODE_OF_CONDUCT.md).
 - The Ibis project is open sourced under the [Apache License](https://github.com/ibis-project/ibis/blob/main/LICENSE.txt).
 
 Join our community by interacting on GitHub or chatting with us on [Zulip](https://ibis-project.zulipchat.com/).

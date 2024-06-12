@@ -10,10 +10,13 @@ import toolz
 import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
-from ibis.backends.sql.compiler import FALSE, NULL, STAR, SQLGlotCompiler
+from ibis.backends.sql.compiler import FALSE, NULL, STAR, AggGen, SQLGlotCompiler
 from ibis.backends.sql.datatypes import TrinoType
 from ibis.backends.sql.dialects import Trino
-from ibis.backends.sql.rewrites import exclude_unsupported_window_frame_from_ops
+from ibis.backends.sql.rewrites import (
+    exclude_nulls_from_array_collect,
+    exclude_unsupported_window_frame_from_ops,
+)
 
 
 class TrinoCompiler(SQLGlotCompiler):
@@ -21,7 +24,11 @@ class TrinoCompiler(SQLGlotCompiler):
 
     dialect = Trino
     type_mapper = TrinoType
+
+    agg = AggGen(supports_filter=True)
+
     rewrites = (
+        exclude_nulls_from_array_collect,
         exclude_unsupported_window_frame_from_ops,
         *SQLGlotCompiler.rewrites,
     )
@@ -82,12 +89,6 @@ class TrinoCompiler(SQLGlotCompiler):
         ops.ArrayPosition: "array_position",
         ops.ExtractIsoYear: "year_of_week",
     }
-
-    def _aggregate(self, funcname: str, *args, where):
-        expr = self.f[funcname](*args)
-        if where is not None:
-            return sge.Filter(this=expr, expression=sge.Where(this=where))
-        return expr
 
     @staticmethod
     def _minimize_spec(start, end, spec):
@@ -361,9 +362,13 @@ class TrinoCompiler(SQLGlotCompiler):
         return self.f.array_join(arg, sep)
 
     def visit_First(self, op, *, arg, where):
+        cond = arg.is_(sg.not_(NULL, copy=False))
+        where = cond if where is None else sge.And(this=cond, expression=where)
         return self.f.element_at(self.agg.array_agg(arg, where=where), 1)
 
     def visit_Last(self, op, *, arg, where):
+        cond = arg.is_(sg.not_(NULL, copy=False))
+        where = cond if where is None else sge.And(this=cond, expression=where)
         return self.f.element_at(self.agg.array_agg(arg, where=where), -1)
 
     def visit_ArrayZip(self, op, *, arg):

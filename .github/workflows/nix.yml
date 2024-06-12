@@ -32,25 +32,29 @@ jobs:
       fail-fast: false
       matrix:
         os:
-          - ubuntu-latest
+          - ubuntu-latest # x86_64-linux
         python-version:
-          - "3.9"
           - "3.10"
           - "3.11"
           - "3.12"
+        include:
+          - os: ubuntu-arm64-small
+            python-version: "3.12"
+          - os: macos-14
+            python-version: "3.10"
     steps:
       - name: checkout
         uses: actions/checkout@v4
 
       - name: install nix
-        uses: cachix/install-nix-action@v26
+        uses: cachix/install-nix-action@v27
         with:
           nix_path: nixpkgs=channel:nixos-unstable-small
           extra_nix_config: |
             access-tokens = github.com=${{ secrets.GITHUB_TOKEN }}
 
       - name: setup cachix
-        uses: cachix/cachix-action@v14
+        uses: cachix/cachix-action@v15
         with:
           name: ibis
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
@@ -63,11 +67,16 @@ jobs:
           nix build ".#ibis${version//./}" --fallback --keep-going --print-build-logs
 
       - name: nix build devShell
-        if: github.event_name == 'push'
         run: |
           set -euo pipefail
 
           version='${{ matrix.python-version }}'
           host_system="$(nix eval --raw 'nixpkgs#stdenv.hostPlatform.system')"
           flake=".#devShells.${host_system}.ibis${version//./}"
-          nix build "$flake" --fallback --keep-going --print-build-logs
+
+          args=()
+          if [[ "${{ github.event_name }}" != "push" ]]; then
+            args+=("--dry-run")
+          fi
+
+          nix build "$flake" --fallback --keep-going --print-build-logs "${args[@]}"

@@ -268,7 +268,9 @@ def test_connect_duckdb(url, tmp_path):
 )
 def test_connect_local_file(out_method, extension, test_employee_data_1, tmp_path):
     getattr(test_employee_data_1, out_method)(tmp_path / f"out.{extension}")
-    con = ibis.connect(tmp_path / f"out.{extension}")
+    with pytest.warns(FutureWarning, match="v9.1"):
+        # ibis.connect uses con.register
+        con = ibis.connect(tmp_path / f"out.{extension}")
     t = next(iter(con.tables.values()))
     assert not t.head().execute().empty
 
@@ -304,3 +306,19 @@ def test_settings_repr():
     view = repr(con.settings)
     assert "name" in view
     assert "value" in view
+
+
+def test_connect_named_in_memory_db():
+    con_named_db = ibis.duckdb.connect(":memory:mydb")
+
+    con_named_db.create_table("ork", schema=ibis.schema(dict(bork="int32")))
+    assert "ork" in con_named_db.list_tables()
+
+    con_named_db_2 = ibis.duckdb.connect(":memory:mydb")
+    assert "ork" in con_named_db_2.list_tables()
+
+    unnamed_memory_db = ibis.duckdb.connect(":memory:")
+    assert "ork" not in unnamed_memory_db.list_tables()
+
+    default_memory_db = ibis.duckdb.connect()
+    assert "ork" not in default_memory_db.list_tables()

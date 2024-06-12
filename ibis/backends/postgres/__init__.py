@@ -8,7 +8,7 @@ import textwrap
 from functools import partial
 from itertools import repeat, takewhile
 from operator import itemgetter
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
@@ -32,7 +32,10 @@ from ibis.backends.sql.compiler import TRUE, C, ColGen, F
 from ibis.common.exceptions import InvalidDecoratorError
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import pandas as pd
+    import polars as pl
     import pyarrow as pa
 
 
@@ -349,11 +352,11 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
         if (db := table_loc.args["db"]) is not None:
             db.args["quoted"] = False
             db = db.sql(dialect=self.name)
-            conditions.append(C.table_schema.eq(db))
+            conditions.append(C.table_schema.eq(sge.convert(db)))
         if (catalog := table_loc.args["catalog"]) is not None:
             catalog.args["quoted"] = False
             catalog = catalog.sql(dialect=self.name)
-            conditions.append(C.table_catalog.eq(catalog))
+            conditions.append(C.table_catalog.eq(sge.convert(catalog)))
 
         sql = (
             sg.select("table_name")
@@ -382,7 +385,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
             sg.select("table_name")
             .from_(sg.table("tables", db="information_schema"))
             .distinct()
-            .where(C.table_type.eq("LOCAL TEMPORARY"))
+            .where(C.table_type.eq(sge.convert("LOCAL TEMPORARY")))
             .sql(self.dialect)
         )
 
@@ -431,7 +434,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
         p = ColGen(table="p")
         f = self.compiler.f
 
-        predicates = [p.proname.eq(name)]
+        predicates = [p.proname.eq(sge.convert(name))]
 
         if database is not None:
             predicates.append(n.nspname.rlike(sge.convert(f"^({database})$")))
@@ -582,8 +585,8 @@ $$""".format(**self._get_udf_source(udf_node))
             .where(
                 a.attnum > 0,
                 sg.not_(a.attisdropped),
-                n.nspname.eq(database) if database is not None else TRUE,
-                c.relname.eq(name),
+                n.nspname.eq(sge.convert(database)) if database is not None else TRUE,
+                c.relname.eq(sge.convert(name)),
             )
             .order_by(a.attnum)
         )
@@ -661,7 +664,12 @@ $$""".format(**self._get_udf_source(udf_node))
     def create_table(
         self,
         name: str,
-        obj: pd.DataFrame | pa.Table | ir.Table | None = None,
+        obj: ir.Table
+        | pd.DataFrame
+        | pa.Table
+        | pl.DataFrame
+        | pl.LazyFrame
+        | None = None,
         *,
         schema: ibis.Schema | None = None,
         database: str | None = None,

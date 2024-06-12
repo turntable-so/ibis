@@ -18,6 +18,7 @@ from ibis.backends.sql.dialects import PySpark
 from ibis.backends.sql.rewrites import FirstValue, LastValue, p
 from ibis.common.patterns import replace
 from ibis.config import options
+from ibis.expr.operations.udf import InputType
 from ibis.util import gen_name
 
 
@@ -84,12 +85,6 @@ class PySparkCompiler(SQLGlotCompiler):
         ops.UnwrapJSONFloat64: "unwrap_json_float",
         ops.UnwrapJSONBoolean: "unwrap_json_bool",
     }
-
-    def _aggregate(self, funcname: str, *args, where):
-        func = self.f[funcname]
-        if where is not None:
-            args = tuple(self.if_(where, arg, NULL) for arg in args)
-        return func(*args)
 
     def visit_InSubquery(self, op, *, rel, needle):
         if op.needle.dtype.is_struct():
@@ -326,6 +321,10 @@ class PySparkCompiler(SQLGlotCompiler):
             name = op.func.__name__
         else:
             raise TypeError(f"Cannot get SQL name for {type(op).__name__}")
+
+        # builtin functions will not modify the name
+        if getattr(op, "__input_type__", None) == InputType.BUILTIN:
+            return name
 
         if not name.isidentifier():
             # replace invalid characters with underscores

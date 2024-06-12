@@ -275,7 +275,7 @@ def aggregation(op, **kw):
 
     if op.groups:
         # project first to handle computed group by columns
-        lf = (
+        func = (
             lf.with_columns(
                 [translate(arg, **kw).alias(name) for name, arg in op.groups.items()]
             )
@@ -283,13 +283,16 @@ def aggregation(op, **kw):
             .agg
         )
     else:
-        lf = lf.select
+        func = lf.select
 
     if op.metrics:
-        metrics = [translate(arg, **kw).alias(name) for name, arg in op.metrics.items()]
-        lf = lf(metrics)
+        metrics = [
+            translate(arg, in_group_by=bool(op.groups), **kw).alias(name)
+            for name, arg in op.metrics.items()
+        ]
+        return func(metrics)
 
-    return lf
+    return func()
 
 
 @translate.register(PandasRename)
@@ -315,8 +318,10 @@ def join(op, **kw):
     if how == "right":
         how = "left"
         left, right = right, left
+    elif how == "outer":
+        how = "full"
 
-    joined = left.join(right, on=on, how=how)
+    joined = left.join(right, on=on, how=how, coalesce=False)
 
     try:
         joined = joined.drop(*on)
@@ -362,8 +367,8 @@ def asof_join(op, **kw):
     return joined
 
 
-@translate.register(ops.DropNa)
-def dropna(op, **kw):
+@translate.register(ops.DropNull)
+def drop_null(op, **kw):
     lf = translate(op.parent, **kw)
 
     if op.subset is None:
@@ -380,8 +385,8 @@ def dropna(op, **kw):
     return lf.drop_nulls(subset)
 
 
-@translate.register(ops.FillNa)
-def fillna(op, **kw):
+@translate.register(ops.FillNull)
+def fill_null(op, **kw):
     table = translate(op.parent, **kw)
 
     columns = []
@@ -986,11 +991,16 @@ def array_column(op, **kw):
 
 
 @translate.register(ops.ArrayCollect)
-def array_collect(op, **kw):
+def array_collect(op, in_group_by=False, **kw):
     arg = translate(op.arg, **kw)
     if (where := op.where) is not None:
         arg = arg.filter(translate(where, **kw))
-    return arg
+    out = arg.drop_nulls()
+    if not in_group_by:
+        # Polars' behavior changes for `implode` within a `group_by` currently.
+        # See https://github.com/pola-rs/polars/issues/16756
+        out = out.implode()
+    return out
 
 
 @translate.register(ops.ArrayFlatten)
@@ -1206,7 +1216,8 @@ def execute_union(op, **kw):
 
 @translate.register(ops.Hash)
 def execute_hash(op, **kw):
-    return translate(op.arg, **kw).hash()
+    # polars' hash() returns a uint64, but we want to return an int64
+    return translate(op.arg, **kw).hash().reinterpret(signed=True)
 
 
 def _arg_min_max(op, func, **kw):

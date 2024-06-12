@@ -387,7 +387,9 @@ keys = pytest.mark.parametrize(
             [1.0, 2.0],
             marks=[
                 pytest.mark.notyet(
-                    "clickhouse", reason="only supports str,int,bool,timestamp keys"
+                    "clickhouse",
+                    reason="only supports str,int,bool,timestamp keys",
+                    strict=False,
                 ),
                 mark_notyet_postgres,
                 mark_notyet_snowflake,
@@ -604,7 +606,7 @@ def test_map_get_with_incompatible_value_different_kind(con):
 
 @mark_notimpl_risingwave_hstore
 @mark_notyet_postgres
-@pytest.mark.parametrize("null_value", [None, ibis.NA])
+@pytest.mark.parametrize("null_value", [None, ibis.null()])
 def test_map_get_with_null_on_not_nullable(con, null_value):
     map_type = dt.Map(dt.string, dt.Int16(nullable=False))
     value = ibis.literal({"A": 1000, "B": 2000}).cast(map_type)
@@ -613,7 +615,7 @@ def test_map_get_with_null_on_not_nullable(con, null_value):
     assert pd.isna(result)
 
 
-@pytest.mark.parametrize("null_value", [None, ibis.NA])
+@pytest.mark.parametrize("null_value", [None, ibis.null()])
 @pytest.mark.notyet(
     ["flink"], raises=Py4JJavaError, reason="Flink cannot handle typeless nulls"
 )

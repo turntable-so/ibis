@@ -13,7 +13,7 @@ jobs:
       cancel-in-progress: true
     if: github.event.label.name == 'docs-preview'
     steps:
-      - uses: actions/create-github-app-token@v1.10.0
+      - uses: actions/create-github-app-token@v1.10.1
         id: generate_token
         with:
           app-id: ${{ secrets.DOCS_BOT_APP_ID }}
@@ -26,13 +26,13 @@ jobs:
           github_token: ${{ steps.generate_token.outputs.token }}
 
       - name: install nix
-        uses: cachix/install-nix-action@v26
+        uses: cachix/install-nix-action@v27
         with:
           extra_nix_config: |
             access-tokens = github.com=${{ steps.generate_token.outputs.token }}
 
       - name: setup cachix
-        uses: cachix/cachix-action@v14
+        uses: cachix/cachix-action@v15
         with:
           name: ibis
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}

@@ -111,9 +111,9 @@ def sort_to_select(_, **kwargs):
     return Select(_.parent, selections=_.values, sort_keys=_.keys)
 
 
-@replace(p.FillNa)
-def fillna_to_select(_, **kwargs):
-    """Rewrite FillNa to a Select node."""
+@replace(p.FillNull)
+def fill_null_to_select(_, **kwargs):
+    """Rewrite FillNull to a Select node."""
     if isinstance(_.replacements, Mapping):
         mapping = _.replacements
     else:
@@ -136,9 +136,9 @@ def fillna_to_select(_, **kwargs):
     return Select(_.parent, selections=selections)
 
 
-@replace(p.DropNa)
-def dropna_to_select(_, **kwargs):
-    """Rewrite DropNa to a Select node."""
+@replace(p.DropNull)
+def drop_null_to_select(_, **kwargs):
+    """Rewrite DropNull to a Select node."""
     if _.subset is None:
         columns = [ops.Field(_.parent, name) for name in _.parent.schema.names]
     else:
@@ -290,8 +290,8 @@ def sqlize(
         | project_to_select
         | filter_to_select
         | sort_to_select
-        | fillna_to_select
-        | dropna_to_select
+        | fill_null_to_select
+        | drop_null_to_select
         | first_to_firstvalue,
         context=context,
     )
@@ -372,6 +372,14 @@ def exclude_unsupported_window_frame_from_rank(_, **kwargs):
 )
 def exclude_unsupported_window_frame_from_ops(_, **kwargs):
     return _.copy(start=None, end=0, order_by=_.order_by or (ops.NULL,))
+
+
+@replace(p.ArrayCollect)
+def exclude_nulls_from_array_collect(_, **kwargs):
+    where = ops.NotNull(_.arg)
+    if _.where is not None:
+        where = ops.And(where, _.where)
+    return _.copy(where=where)
 
 
 # Rewrite rules for lowering a high-level operation into one composed of more

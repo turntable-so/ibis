@@ -28,21 +28,17 @@ from ibis.backends.duckdb.compiler import DuckDBCompiler
 from ibis.backends.duckdb.converter import DuckDBPandasData
 from ibis.backends.sql import SQLBackend
 from ibis.backends.sql.compiler import STAR, C
+from ibis.common.dispatch import lazy_singledispatch
 from ibis.expr.operations.udf import InputType
+from ibis.util import deprecated
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping, MutableMapping, Sequence
 
     import pandas as pd
+    import polars as pl
     import torch
     from fsspec import AbstractFileSystem
-
-
-def normalize_filenames(source_list):
-    # Promote to list
-    source_list = util.promote_list(source_list)
-
-    return list(map(util.normalize_filename, source_list))
 
 
 _UDF_INPUT_TYPE_MAPPING = {
@@ -128,7 +124,12 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
     def create_table(
         self,
         name: str,
-        obj: pd.DataFrame | pa.Table | ir.Table | None = None,
+        obj: ir.Table
+        | pd.DataFrame
+        | pa.Table
+        | pl.DataFrame
+        | pl.LazyFrame
+        | None = None,
         *,
         schema: ibis.Schema | None = None,
         database: str | None = None,
@@ -461,10 +462,8 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
         <ibis.backends.duckdb.Backend object at ...>
 
         """
-        if (
-            not isinstance(database, Path)
-            and database != ":memory:"
-            and not database.startswith(("md:", "motherduck:"))
+        if not isinstance(database, Path) and not database.startswith(
+            ("md:", "motherduck:", ":memory:")
         ):
             database = Path(database).absolute()
 
@@ -543,6 +542,10 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
         with self._safe_raw_sql(sge.Drop(this=name, kind="SCHEMA", replace=force)):
             pass
 
+    @deprecated(
+        as_of="9.1",
+        instead="use the explicit `read_*` method for the filetype you are trying to read, e.g., read_parquet, read_csv, etc.",
+    )
     def register(
         self,
         source: str | Path | Any,
@@ -649,7 +652,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
             table_name,
             sg.select(STAR).from_(
                 self.compiler.f.read_json_auto(
-                    normalize_filenames(source_list), *options
+                    util.normalize_filenames(source_list), *options
                 )
             ),
         )
@@ -682,7 +685,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
             The just-registered table
 
         """
-        source_list = normalize_filenames(source_list)
+        source_list = util.normalize_filenames(source_list)
 
         if not table_name:
             table_name = util.gen_name("read_csv")
@@ -807,7 +810,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
             The just-registered table
 
         """
-        source_list = normalize_filenames(source_list)
+        source_list = util.normalize_filenames(source_list)
 
         table_name = table_name or util.gen_name("read_parquet")
 
@@ -855,11 +858,19 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
         # explicitly.
 
     def read_in_memory(
+        # TODO: deprecate this in favor of `create_table`
         self,
-        source: pd.DataFrame | pa.Table | pa.ipc.RecordBatchReader,
+        source: pd.DataFrame
+        | pa.Table
+        | pa.RecordBatchReader
+        | pl.DataFrame
+        | pl.LazyFrame,
         table_name: str | None = None,
     ) -> ir.Table:
-        """Register a Pandas DataFrame or pyarrow object as a table in the current database.
+        """Register an in-memory table object in the current database.
+
+        Supported objects include pandas DataFrame, a Polars
+        DataFrame/LazyFrame, or a PyArrow Table or RecordBatchReader.
 
         Parameters
         ----------
@@ -876,13 +887,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
 
         """
         table_name = table_name or util.gen_name("read_in_memory")
-        self.con.register(table_name, source)
-
-        if isinstance(source, pa.ipc.RecordBatchReader):
-            # Ensure the reader isn't marked as started, in case the name is
-            # being overwritten.
-            self._record_batch_readers_consumed[table_name] = False
-
+        _read_in_memory(source, table_name, self)
         return self.table(table_name)
 
     def read_delta(
@@ -910,7 +915,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
             The just-registered table.
 
         """
-        source_table = normalize_filenames(source_table)[0]
+        source_table = util.normalize_filenames(source_table)[0]
 
         table_name = table_name or util.gen_name("read_delta")
 
@@ -1003,12 +1008,10 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
             .from_(sg.table("tables", db="information_schema"))
             .distinct()
             .where(
-                C.table_catalog.eq(catalog).or_(
-                    C.table_catalog.eq(sge.convert("temp"))
-                ),
-                C.table_schema.eq(database),
+                C.table_catalog.isin(sge.convert(catalog), sge.convert("temp")),
+                C.table_schema.eq(sge.convert(database)),
             )
-            .sql(self.name, pretty=True)
+            .sql(self.dialect)
         )
         out = self.con.execute(sql).fetch_arrow_table()
 
@@ -1617,3 +1620,28 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema, UrlFromPath):
     def _create_temp_view(self, table_name, source):
         with self._safe_raw_sql(self._get_temp_view_definition(table_name, source)):
             pass
+
+
+@lazy_singledispatch
+def _read_in_memory(source: Any, table_name: str, _conn: Backend, **kwargs: Any):
+    raise NotImplementedError(
+        f"The `{_conn.name}` backend currently does not support "
+        f"reading data of {type(source)!r}"
+    )
+
+
+@_read_in_memory.register("polars.DataFrame")
+@_read_in_memory.register("polars.LazyFrame")
+@_read_in_memory.register("pyarrow.Table")
+@_read_in_memory.register("pandas.DataFrame")
+@_read_in_memory.register("pyarrow.dataset.Dataset")
+def _default(source, table_name, _conn, **kwargs: Any):
+    _conn.con.register(table_name, source)
+
+
+@_read_in_memory.register("pyarrow.RecordBatchReader")
+def _pyarrow_rbr(source, table_name, _conn, **kwargs: Any):
+    _conn.con.register(table_name, source)
+    # Ensure the reader isn't marked as started, in case the name is
+    # being overwritten.
+    _conn._record_batch_readers_consumed[table_name] = False

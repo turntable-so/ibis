@@ -11,9 +11,10 @@ import sqlglot.expressions as sge
 import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
-from ibis.backends.sql.compiler import FALSE, NULL, STAR, SQLGlotCompiler
+from ibis.backends.sql.compiler import FALSE, NULL, STAR, AggGen, SQLGlotCompiler
 from ibis.backends.sql.datatypes import DataFusionType
 from ibis.backends.sql.dialects import DataFusion
+from ibis.backends.sql.rewrites import exclude_nulls_from_array_collect
 from ibis.common.temporal import IntervalUnit, TimestampUnit
 from ibis.expr.operations.udf import InputType
 from ibis.formats.pyarrow import PyArrowType
@@ -24,6 +25,13 @@ class DataFusionCompiler(SQLGlotCompiler):
 
     dialect = DataFusion
     type_mapper = DataFusionType
+
+    rewrites = (
+        exclude_nulls_from_array_collect,
+        *SQLGlotCompiler.rewrites,
+    )
+
+    agg = AggGen(supports_filter=True)
 
     UNSUPPORTED_OPS = (
         ops.ArgMax,
@@ -63,8 +71,6 @@ class DataFusionCompiler(SQLGlotCompiler):
         ops.BitXor: "bit_xor",
         ops.Cot: "cot",
         ops.ExtractMicrosecond: "extract_microsecond",
-        ops.First: "first_value",
-        ops.Last: "last_value",
         ops.Median: "median",
         ops.StringLength: "character_length",
         ops.RegexSplit: "regex_split",
@@ -72,12 +78,6 @@ class DataFusionCompiler(SQLGlotCompiler):
         ops.ArrayIntersect: "array_intersect",
         ops.ArrayUnion: "array_union",
     }
-
-    def _aggregate(self, funcname: str, *args, where):
-        expr = self.f[funcname](*args)
-        if where is not None:
-            return sg.exp.Filter(this=expr, expression=sg.exp.Where(this=where))
-        return expr
 
     def _to_timestamp(self, value, target_dtype, literal=False):
         tz = (
@@ -140,7 +140,7 @@ class DataFusionCompiler(SQLGlotCompiler):
         return self.cast(arg, to)
 
     def visit_Arbitrary(self, op, *, arg, where):
-        cond = ~arg.is_(None)
+        cond = ~arg.is_(NULL)
         if where is not None:
             cond &= where
         return self.agg.first_value(arg, where=cond)
@@ -164,7 +164,7 @@ class DataFusionCompiler(SQLGlotCompiler):
     def visit_ScalarUDF(self, op, **kw):
         input_type = op.__input_type__
         if input_type in (InputType.PYARROW, InputType.BUILTIN):
-            return self.f[op.__func_name__](*kw.values())
+            return self.f.anon[op.__func_name__](*kw.values())
         else:
             raise NotImplementedError(
                 f"DataFusion only supports PyArrow UDFs: got a {input_type.name.lower()} UDF"
@@ -421,6 +421,16 @@ class DataFusionCompiler(SQLGlotCompiler):
         return self.if_(
             sg.or_(*any_args_null), self.cast(NULL, dt.string), self.f.concat(*arg)
         )
+
+    def visit_First(self, op, *, arg, where):
+        cond = arg.is_(sg.not_(NULL, copy=False))
+        where = cond if where is None else sge.And(this=cond, expression=where)
+        return self.agg.first_value(arg, where=where)
+
+    def visit_Last(self, op, *, arg, where):
+        cond = arg.is_(sg.not_(NULL, copy=False))
+        where = cond if where is None else sge.And(this=cond, expression=where)
+        return self.agg.last_value(arg, where=where)
 
     def visit_Aggregate(self, op, *, parent, groups, metrics):
         """Support `GROUP BY` expressions in `SELECT` since DataFusion does not."""

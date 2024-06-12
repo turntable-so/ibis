@@ -7,7 +7,9 @@
 , ibisTestingData
 }:
 let
-  backends = [ "dask" "datafusion" "duckdb" "pandas" "polars" "sqlite" ];
+  backends = [ "datafusion" "duckdb" "pandas" "polars" "sqlite" ]
+    # dask version has a show-stopping bug for Python >=3.11
+    ++ lib.optionals (python3.pythonOlder "3.11") [ "dask" ];
   markers = lib.concatStringsSep " or " (backends ++ [ "core" ]);
 in
 poetry2nix.mkPoetryApplication rec {
@@ -16,7 +18,7 @@ poetry2nix.mkPoetryApplication rec {
   checkGroups = [ "test" ];
   projectDir = gitignoreSource ../.;
   src = gitignoreSource ../.;
-  extras = backends ++ [ "decompiler" ];
+  extras = backends ++ [ "decompiler" "visualization" ];
   overrides = [
     (import ../poetry-overrides.nix)
     poetry2nix.defaultPoetryOverrides
@@ -26,9 +28,7 @@ poetry2nix.mkPoetryApplication rec {
 
   POETRY_DYNAMIC_VERSIONING_BYPASS = "1";
 
-  buildInputs = [ graphviz-nox sqlite ];
-  checkInputs = buildInputs;
-  nativeCheckInputs = checkInputs;
+  nativeCheckInputs = [ graphviz-nox sqlite ];
 
   preCheck = ''
     set -euo pipefail

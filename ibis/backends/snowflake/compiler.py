@@ -48,8 +48,6 @@ class SnowflakeCompiler(SQLGlotCompiler):
     }
 
     UNSUPPORTED_OPS = (
-        ops.ArrayMap,
-        ops.ArrayFilter,
         ops.RowID,
         ops.MultiQuantile,
         ops.IntervalFromInteger,
@@ -88,13 +86,6 @@ class SnowflakeCompiler(SQLGlotCompiler):
     def __init__(self):
         super().__init__()
         self.f = SnowflakeFuncGen()
-
-    def _aggregate(self, funcname: str, *args, where):
-        if where is not None:
-            args = [self.if_(where, arg, NULL) for arg in args]
-
-        func = self.f[funcname]
-        return func(*args)
 
     @staticmethod
     def _minimize_spec(start, end, spec):
@@ -314,11 +305,6 @@ class SnowflakeCompiler(SQLGlotCompiler):
 
     def visit_ArrayContains(self, op, *, arg, other):
         return self.f.array_contains(arg, self.f.to_variant(other))
-
-    def visit_ArrayCollect(self, op, *, arg, where):
-        return self.agg.array_agg(
-            self.f.ifnull(arg, self.f.parse_json("null")), where=where
-        )
 
     def visit_ArrayConcat(self, op, *, arg):
         # array_cat only accepts two arguments
@@ -634,3 +620,37 @@ class SnowflakeCompiler(SQLGlotCompiler):
             seed=None if seed is None else sge.convert(seed),
         )
         return sg.select(STAR).from_(sample)
+
+    def visit_ArrayMap(self, op, *, arg, param, body):
+        return self.f.transform(arg, sge.Lambda(this=body, expressions=[param]))
+
+    def visit_ArrayFilter(self, op, *, arg, param, body):
+        return self.f.filter(
+            arg,
+            sge.Lambda(
+                this=sg.and_(
+                    body,
+                    # necessary otherwise null values are treated as JSON nulls
+                    # instead of SQL NULLs
+                    self.cast(sg.to_identifier(param), op.dtype.value_type).is_(
+                        sg.not_(NULL)
+                    ),
+                ),
+                expressions=[param],
+            ),
+        )
+
+    def visit_JoinLink(self, op, *, how, table, predicates):
+        assert (
+            predicates or how == "cross"
+        ), "expected non-empty predicates when not a cross join"
+
+        if how == "asof":
+            # the asof join match condition is always the first predicate by
+            # construction
+            match_condition, *predicates = predicates
+            on = sg.and_(*predicates) if predicates else None
+            return sge.Join(
+                this=table, kind=how, on=on, match_condition=match_condition
+            )
+        return super().visit_JoinLink(op, how=how, table=table, predicates=predicates)

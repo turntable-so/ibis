@@ -45,8 +45,8 @@ website:
     type: overlay
     algolia:
       index-name: prod_ibis
-      application-id: HS77W8GWM1
-      search-only-api-key: 8ca4fcd24da322db857322ae4f79d6f3
+      application-id: TNU9HG3L41
+      search-only-api-key: 26350948d1961209df16d9717a7e01d6
       analytics-events: true
       show-logo: true
 
@@ -124,7 +124,7 @@ website:
       collapse-level: 2
       contents:
         - auto: backends/*.qmd
-        - support_matrix.qmd
+        - auto: backends/support
     - id: how-to
       title: "How-to"
       style: "docked"
@@ -297,10 +297,6 @@ quartodoc:
               signature_name: full
             - name: param
               dynamic: true
-              signature_name: full
-            - name: NA
-              # Ideally exposed under `ibis` but that doesn't seem to work??
-              package: ibis.expr.api
               signature_name: full
             - name: "null"
               dynamic: true
@@ -507,6 +503,32 @@ quartodoc:
               package: ibis.expr.types.numeric
 
         - kind: page
+          path: operations
+          package: ibis.expr.operations
+          summary:
+            name: Operations
+            desc: Low level operation classes. Subject to change in non-major releases.
+          contents:
+            - analytic
+            - arrays
+            - generic
+            - geospatial
+            - histograms
+            - json
+            - logical
+            - maps
+            - numeric
+            - reductions
+            - relations
+            - sortkeys
+            - strings
+            - structs
+            - subqueries
+            - temporal
+            - temporal_windows
+            - udf
+            - window
+        - kind: page
           summary:
             name: Column selectors
             desc: Choose Table columns based on dtype, regex, and other criteria
@@ -545,10 +567,10 @@ quartodoc:
               package: ibis
               dynamic: true
               signature_name: full
+            - DataType
             - Array
             - Binary
             - Boolean
-            - DataType
             - Date
             - Decimal
             - Float16

@@ -11,8 +11,9 @@ from sqlglot.dialects import DuckDB
 import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
-from ibis.backends.sql.compiler import NULL, STAR, SQLGlotCompiler
+from ibis.backends.sql.compiler import NULL, STAR, AggGen, SQLGlotCompiler
 from ibis.backends.sql.datatypes import DuckDBType
+from ibis.backends.sql.rewrites import exclude_nulls_from_array_collect
 
 _INTERVAL_SUFFIXES = {
     "ms": "milliseconds",
@@ -33,6 +34,13 @@ class DuckDBCompiler(SQLGlotCompiler):
     dialect = DuckDB
     type_mapper = DuckDBType
 
+    agg = AggGen(supports_filter=True)
+
+    rewrites = (
+        exclude_nulls_from_array_collect,
+        *SQLGlotCompiler.rewrites,
+    )
+
     LOWERED_OPS = {
         ops.Sample: None,
         ops.StringSlice: None,
@@ -46,13 +54,11 @@ class DuckDBCompiler(SQLGlotCompiler):
         ops.BitXor: "bit_xor",
         ops.EndsWith: "suffix",
         ops.ExtractIsoYear: "isoyear",
-        ops.Hash: "hash",
         ops.IntegerRange: "range",
         ops.TimestampRange: "range",
         ops.MapLength: "cardinality",
         ops.Mode: "mode",
         ops.TimeFromHMS: "make_time",
-        ops.TypeOf: "typeof",
         ops.GeoPoint: "st_point",
         ops.GeoAsText: "st_astext",
         ops.GeoArea: "st_area",
@@ -85,12 +91,6 @@ class DuckDBCompiler(SQLGlotCompiler):
         ops.GeoX: "st_x",
         ops.GeoY: "st_y",
     }
-
-    def _aggregate(self, funcname: str, *args, where):
-        expr = self.f[funcname](*args)
-        if where is not None:
-            return sge.Filter(this=expr, expression=sge.Where(this=where))
-        return expr
 
     def visit_StructColumn(self, op, *, names, values):
         return sge.Struct.from_arg_list(
@@ -244,21 +244,21 @@ class DuckDBCompiler(SQLGlotCompiler):
 
     def visit_ToJSONMap(self, op, *, arg):
         return self.if_(
-            self.f.json_type(arg).eq("OBJECT"),
+            self.f.json_type(arg).eq(sge.convert("OBJECT")),
             self.cast(self.cast(arg, dt.json), op.dtype),
             NULL,
         )
 
     def visit_ToJSONArray(self, op, *, arg):
         return self.if_(
-            self.f.json_type(arg).eq("ARRAY"),
+            self.f.json_type(arg).eq(sge.convert("ARRAY")),
             self.cast(self.cast(arg, dt.json), op.dtype),
             NULL,
         )
 
     def visit_UnwrapJSONString(self, op, *, arg):
         return self.if_(
-            self.f.json_type(arg).eq("VARCHAR"),
+            self.f.json_type(arg).eq(sge.convert("VARCHAR")),
             self.f.json_extract_string(arg, "$"),
             NULL,
         )
@@ -266,18 +266,26 @@ class DuckDBCompiler(SQLGlotCompiler):
     def visit_UnwrapJSONInt64(self, op, *, arg):
         arg_type = self.f.json_type(arg)
         return self.if_(
-            arg_type.isin("UBIGINT", "BIGINT"), self.cast(arg, op.dtype), NULL
+            arg_type.isin(sge.convert("UBIGINT"), sge.convert("BIGINT")),
+            self.cast(arg, op.dtype),
+            NULL,
         )
 
     def visit_UnwrapJSONFloat64(self, op, *, arg):
         arg_type = self.f.json_type(arg)
         return self.if_(
-            arg_type.isin("UBIGINT", "BIGINT", "DOUBLE"), self.cast(arg, op.dtype), NULL
+            arg_type.isin(
+                sge.convert("UBIGINT"), sge.convert("BIGINT"), sge.convert("DOUBLE")
+            ),
+            self.cast(arg, op.dtype),
+            NULL,
         )
 
     def visit_UnwrapJSONBoolean(self, op, *, arg):
         return self.if_(
-            self.f.json_type(arg).eq("BOOLEAN"), self.cast(arg, op.dtype), NULL
+            self.f.json_type(arg).eq(sge.convert("BOOLEAN")),
+            self.cast(arg, op.dtype),
+            NULL,
         )
 
     def visit_ArrayConcat(self, op, *, arg):
@@ -453,6 +461,16 @@ class DuckDBCompiler(SQLGlotCompiler):
             arg, pattern, replacement, "g", dialect=self.dialect
         )
 
+    def visit_First(self, op, *, arg, where):
+        cond = arg.is_(sg.not_(NULL, copy=False))
+        where = cond if where is None else sge.And(this=cond, expression=where)
+        return self.agg.first(arg, where=where)
+
+    def visit_Last(self, op, *, arg, where):
+        cond = arg.is_(sg.not_(NULL, copy=False))
+        where = cond if where is None else sge.And(this=cond, expression=where)
+        return self.agg.last(arg, where=where)
+
     def visit_Quantile(self, op, *, arg, quantile, where):
         suffix = "cont" if op.arg.dtype.is_numeric() else "disc"
         funcname = f"percentile_{suffix}"
@@ -466,6 +484,14 @@ class DuckDBCompiler(SQLGlotCompiler):
             return getattr(self.f, how)(arg)
         else:
             raise NotImplementedError(f"No available hashing function for {how}")
+
+    def visit_Hash(self, op, *, arg):
+        # duckdb's hash() returns a uint64, but ops.Hash is supposed to be int64
+        # So do HASH(x)::BITSTRING::BIGINT
+        raw = self.f.hash(arg)
+        bitstring = sg.cast(sge.convert(raw), to=sge.DataType.Type.BIT, copy=False)
+        int64 = sg.cast(bitstring, to=sge.DataType.Type.BIGINT, copy=False)
+        return int64
 
     def visit_StringConcat(self, op, *, arg):
         return reduce(lambda x, y: sge.DPipe(this=x, expression=y), arg)
@@ -492,3 +518,6 @@ class DuckDBCompiler(SQLGlotCompiler):
 
     def visit_RandomUUID(self, op, **kwargs):
         return self.f.uuid()
+
+    def visit_TypeOf(self, op, *, arg):
+        return self.f.coalesce(self.f.nullif(self.f.typeof(arg), '"NULL"'), "NULL")

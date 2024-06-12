@@ -3,15 +3,15 @@ from __future__ import annotations
 import contextlib
 import os
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal
 
 import pyspark
+import pyspark.sql.functions as F
 import sqlglot as sg
 import sqlglot.expressions as sge
 from packaging.version import parse as vparse
 from pyspark import SparkConf
-from pyspark.sql import DataFrame, SparkSession
-from pyspark.sql.functions import PandasUDFType, pandas_udf
+from pyspark.sql import SparkSession
 from pyspark.sql.types import BooleanType, DoubleType, LongType, StringType
 
 import ibis.common.exceptions as com
@@ -27,14 +27,21 @@ from ibis.backends.pyspark.datatypes import PySparkSchema, PySparkType
 from ibis.backends.sql import SQLBackend
 from ibis.expr.operations.udf import InputType
 from ibis.legacy.udf.vectorized import _coerce_to_series
+from ibis.util import deprecated
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
 
     import pandas as pd
+    import polars as pl
     import pyarrow as pa
+    from pyspark.sql.streaming import StreamingQuery
+
+    from ibis.expr.api import Watermark
 
 PYSPARK_LT_34 = vparse(pyspark.__version__) < vparse("3.4")
+
+ConnectionMode = Literal["streaming", "batch"]
 
 
 def normalize_filenames(source_list):
@@ -44,7 +51,7 @@ def normalize_filenames(source_list):
     return list(map(util.normalize_filename, source_list))
 
 
-@pandas_udf(returnType=DoubleType(), functionType=PandasUDFType.SCALAR)
+@F.pandas_udf(returnType=DoubleType(), functionType=F.PandasUDFType.SCALAR)
 def unwrap_json_float(s: pd.Series) -> pd.Series:
     import json
 
@@ -69,7 +76,7 @@ def unwrap_json(typ):
 
     type_mapping = {str: StringType(), int: LongType(), bool: BooleanType()}
 
-    @pandas_udf(returnType=type_mapping[typ], functionType=PandasUDFType.SCALAR)
+    @F.pandas_udf(returnType=type_mapping[typ], functionType=F.PandasUDFType.SCALAR)
     def unwrap(s: pd.Series) -> pd.Series:
         def nullify_type_mismatched_value(raw):
             if pd.isna(raw):
@@ -85,49 +92,8 @@ def unwrap_json(typ):
     return unwrap
 
 
-class _PySparkCursor:
-    """Spark cursor.
-
-    This allows the Spark client to reuse machinery in
-    `ibis/backends/base/sql/client.py`.
-    """
-
-    def __init__(self, query: DataFrame) -> None:
-        """Construct a cursor with query `query`.
-
-        Parameters
-        ----------
-        query
-            PySpark query
-
-        """
-        self.query = query
-
-    def fetchall(self):
-        """Fetch all rows."""
-        result = self.query.collect()  # blocks until finished
-        return result
-
-    def fetchmany(self, nrows: int):
-        raise NotImplementedError()
-
-    @property
-    def columns(self):
-        """Return the columns of the result set."""
-        return self.query.columns
-
-    @property
-    def description(self):
-        """Get the fields of the result set's schema."""
-        return self.query.schema
-
-    def __enter__(self):
-        # For compatibility when constructed from Query.execute()
-        """No-op for compatibility."""
-        return self
-
-    def __exit__(self, exc_type, exc_value, traceback):
-        """No-op for compatibility."""
+def _interval_to_string(interval):
+    return f"{interval.op().value} {interval.op().dtype.unit.name.lower()}"
 
 
 class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
@@ -175,13 +141,20 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         super().__init__(*args, **kwargs)
         self._cached_dataframes = {}
 
-    def do_connect(self, session: SparkSession | None = None) -> None:
+    def do_connect(
+        self, session: SparkSession | None = None, mode: ConnectionMode | None = None
+    ) -> None:
         """Create a PySpark `Backend` for use with Ibis.
 
         Parameters
         ----------
         session
             A SparkSession instance
+        mode
+            Can be either "batch" or "streaming". If "batch", every source, sink, and
+            query executed within this connection will be interpreted as a batch
+            workload. If "streaming", every source, sink, and query executed within
+            this connection will be interpreted as a streaming workload.
 
         Examples
         --------
@@ -197,6 +170,13 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
 
             session = SparkSession.builder.getOrCreate()
 
+        mode = mode or "batch"
+        if mode not in ("batch", "streaming"):
+            raise com.IbisInputError(
+                f"Invalid connection mode: {mode}, must be `streaming` or `batch`"
+            )
+        self._mode = mode
+
         self._session = session
 
         # Spark internally stores timestamps as UTC values, and timestamp data
@@ -210,9 +190,13 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         self._session.stop()
 
     def _get_schema_using_query(self, query: str) -> sch.Schema:
-        cursor = self.raw_sql(query)
-        struct_dtype = PySparkType.to_ibis(cursor.query.schema)
+        df = self.raw_sql(query)
+        struct_dtype = PySparkType.to_ibis(df.schema)
         return sch.Schema(struct_dtype)
+
+    @property
+    def mode(self) -> ConnectionMode:
+        return self._mode
 
     @property
     def version(self):
@@ -320,21 +304,23 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
     def _register_udfs(self, expr: ir.Expr) -> None:
         node = expr.op()
         for udf in node.find(ops.ScalarUDF):
-            udf_name = self.compiler.__sql_name__(udf)
-            udf_func = self._wrap_udf_to_return_pandas(udf.__func__, udf.dtype)
-            udf_return = PySparkType.from_ibis(udf.dtype)
-            if udf.__input_type__ != InputType.PANDAS:
+            if udf.__input_type__ not in (InputType.PANDAS, InputType.BUILTIN):
                 raise NotImplementedError(
-                    "Only Pandas UDFs are support in the PySpark backend"
+                    "Only Builtin UDFs and Pandas UDFs are supported in the PySpark backend"
                 )
-            spark_udf = pandas_udf(udf_func, udf_return, PandasUDFType.SCALAR)
-            self._session.udf.register(udf_name, spark_udf)
+            # register pandas UDFs
+            if udf.__input_type__ == InputType.PANDAS:
+                udf_name = self.compiler.__sql_name__(udf)
+                udf_func = self._wrap_udf_to_return_pandas(udf.__func__, udf.dtype)
+                udf_return = PySparkType.from_ibis(udf.dtype)
+                spark_udf = F.pandas_udf(udf_func, udf_return, F.PandasUDFType.SCALAR)
+                self._session.udf.register(udf_name, spark_udf)
 
         for udf in node.find(ops.ElementWiseVectorizedUDF):
             udf_name = self.compiler.__sql_name__(udf)
             udf_func = self._wrap_udf_to_return_pandas(udf.func, udf.return_type)
             udf_return = PySparkType.from_ibis(udf.return_type)
-            spark_udf = pandas_udf(udf_func, udf_return, PandasUDFType.SCALAR)
+            spark_udf = F.pandas_udf(udf_func, udf_return, F.PandasUDFType.SCALAR)
             self._session.udf.register(udf_name, spark_udf)
 
         for udf in node.find(ops.ReductionVectorizedUDF):
@@ -342,7 +328,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             udf_func = self._wrap_udf_to_return_pandas(udf.func, udf.return_type)
             udf_func = udf.func
             udf_return = PySparkType.from_ibis(udf.return_type)
-            spark_udf = pandas_udf(udf_func, udf_return, PandasUDFType.GROUPED_AGG)
+            spark_udf = F.pandas_udf(udf_func, udf_return, F.PandasUDFType.GROUPED_AGG)
             self._session.udf.register(udf_name, spark_udf)
 
         for typ in (str, int, bool):
@@ -354,18 +340,34 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         df = self._session.createDataFrame(data=op.data.to_frame(), schema=schema)
         df.createOrReplaceTempView(op.name)
 
-    def _fetch_from_cursor(self, cursor, schema):
-        df = cursor.query.toPandas()  # blocks until finished
-        return PySparkPandasData.convert_table(df, schema)
+    @contextlib.contextmanager
+    def _safe_raw_sql(self, query: str) -> Any:
+        yield self.raw_sql(query)
 
-    def _safe_raw_sql(self, query: str) -> _PySparkCursor:
-        return self.raw_sql(query)
-
-    def raw_sql(self, query: str | sg.Expression, **kwargs: Any) -> _PySparkCursor:
+    def raw_sql(self, query: str | sg.Expression, **kwargs: Any) -> Any:
         with contextlib.suppress(AttributeError):
             query = query.sql(dialect=self.dialect)
-        query = self._session.sql(query)
-        return _PySparkCursor(query)
+        return self._session.sql(query, **kwargs)
+
+    def execute(
+        self,
+        expr: ir.Expr,
+        params: Mapping | None = None,
+        limit: str | None = "default",
+        **kwargs: Any,
+    ) -> Any:
+        """Execute an expression."""
+
+        self._run_pre_execute_hooks(expr)
+        table = expr.as_table()
+        sql = self.compile(table, params=params, limit=limit, **kwargs)
+
+        schema = table.schema()
+
+        with self._safe_raw_sql(sql) as query:
+            df = query.toPandas()  # blocks until finished
+            result = PySparkPandasData.convert_table(df, schema)
+        return expr.__pandas_result__(result)
 
     def create_database(
         self,
@@ -465,7 +467,9 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
     def create_table(
         self,
         name: str,
-        obj: ir.Table | pd.DataFrame | pa.Table | None = None,
+        obj: (
+            ir.Table | pd.DataFrame | pa.Table | pl.DataFrame | pl.LazyFrame | None
+        ) = None,
         *,
         schema: sch.Schema | None = None,
         database: str | None = None,
@@ -514,8 +518,13 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
+        temp_memtable_view = None
         if obj is not None:
-            table = obj if isinstance(obj, ir.Expr) else ibis.memtable(obj)
+            if isinstance(obj, ir.Expr):
+                table = obj
+            else:
+                table = ibis.memtable(obj)
+                temp_memtable_view = table.op().name
             query = self.compile(table)
             mode = "overwrite" if overwrite else "error"
             with self._active_catalog_database(catalog, db):
@@ -528,6 +537,11 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
                 self._session.catalog.createTable(name, schema=schema, format=format)
         else:
             raise com.IbisError("The schema or obj parameter is required")
+
+        # Clean up temporary memtable if we've created one
+        # for in-memory reads
+        if temp_memtable_view is not None:
+            self.drop_table(temp_memtable_view)
 
         return self.table(name, database=(catalog, db))
 
@@ -634,7 +648,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
 
     def read_delta(
         self,
-        source: str | Path,
+        path: str | Path,
         table_name: str | None = None,
         **kwargs: Any,
     ) -> ir.Table:
@@ -642,11 +656,11 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
 
         Parameters
         ----------
-        source
+        path
             The path to the Delta Lake table.
         table_name
             An optional name to use for the created table. This defaults to
-            a sequentially generated name.
+            a random generated name.
         kwargs
             Additional keyword arguments passed to PySpark.
             https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrameReader.load.html
@@ -657,8 +671,12 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             The just-registered table
 
         """
-        source = util.normalize_filename(source)
-        spark_df = self._session.read.format("delta").load(source, **kwargs)
+        if self.mode == "streaming":
+            raise NotImplementedError(
+                "Reading a Delta Lake table in streaming mode is not supported"
+            )
+        path = util.normalize_filename(path)
+        spark_df = self._session.read.format("delta").load(path, **kwargs)
         table_name = table_name or util.gen_name("read_delta")
 
         spark_df.createOrReplaceTempView(table_name)
@@ -666,7 +684,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
 
     def read_parquet(
         self,
-        source: str | Path,
+        path: str | Path,
         table_name: str | None = None,
         **kwargs: Any,
     ) -> ir.Table:
@@ -674,11 +692,11 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
 
         Parameters
         ----------
-        source
+        path
             The data source. May be a path to a file or directory of parquet files.
         table_name
             An optional name to use for the created table. This defaults to
-            a sequentially generated name.
+            a random generated name.
         kwargs
             Additional keyword arguments passed to PySpark.
             https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrameReader.parquet.html
@@ -689,8 +707,13 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             The just-registered table
 
         """
-        source = util.normalize_filename(source)
-        spark_df = self._session.read.parquet(source, **kwargs)
+        if self.mode == "streaming":
+            raise NotImplementedError(
+                "Pyspark in streaming mode does not support direction registration of parquet files. "
+                "Please use `read_parquet_directory` instead."
+            )
+        path = util.normalize_filename(path)
+        spark_df = self._session.read.parquet(path, **kwargs)
         table_name = table_name or util.gen_name("read_parquet")
 
         spark_df.createOrReplaceTempView(table_name)
@@ -711,7 +734,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             iterable of CSV files.
         table_name
             An optional name to use for the created table. This defaults to
-            a sequentially generated name.
+            a random generated name.
         kwargs
             Additional keyword arguments passed to PySpark loading function.
             https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrameReader.csv.html
@@ -722,6 +745,11 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             The just-registered table
 
         """
+        if self.mode == "streaming":
+            raise NotImplementedError(
+                "Pyspark in streaming mode does not support direction registration of CSV files. "
+                "Please use `read_csv_directory` instead."
+            )
         inferSchema = kwargs.pop("inferSchema", True)
         header = kwargs.pop("header", True)
         source_list = normalize_filenames(source_list)
@@ -748,7 +776,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             iterable of JSON files.
         table_name
             An optional name to use for the created table. This defaults to
-            a sequentially generated name.
+            a random generated name.
         kwargs
             Additional keyword arguments passed to PySpark loading function.
             https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrameReader.json.html
@@ -759,6 +787,11 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             The just-registered table
 
         """
+        if self.mode == "streaming":
+            raise NotImplementedError(
+                "Pyspark in streaming mode does not support direction registration of JSON files. "
+                "Please use `read_json_directory` instead."
+            )
         source_list = normalize_filenames(source_list)
         spark_df = self._session.read.json(source_list, **kwargs)
         table_name = table_name or util.gen_name("read_json")
@@ -766,6 +799,10 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         spark_df.createOrReplaceTempView(table_name)
         return self.table(table_name)
 
+    @deprecated(
+        as_of="9.1",
+        instead="use the explicit `read_*` method for the filetype you are trying to read, e.g., read_parquet, read_csv, etc.",
+    )
     def register(
         self,
         source: str | Path | Any,
@@ -781,7 +818,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             parquet/csv files, or an iterable of CSV files.
         table_name
             An optional name to use for the created table. This defaults to
-            a sequentially generated name.
+            a random generated name.
         **kwargs
             Additional keyword arguments passed to PySpark loading functions for
             CSV or parquet.
@@ -841,9 +878,14 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             The data source. A string or Path to the Delta Lake table.
 
         **kwargs
-            PySpark Delta Lake table write arguments. https://spark.apache.org/docs/3.1.1/api/python/reference/api/pyspark.sql.DataFrameWriter.save.html
+            PySpark Delta Lake table write arguments.
+            https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrameWriter.save.html
 
         """
+        if self.mode == "streaming":
+            raise NotImplementedError(
+                "Writing to a Delta Lake table in streaming mode is not supported"
+            )
         df = self._session.sql(expr.compile())
         df.write.format("delta").save(os.fspath(path), **kwargs)
 
@@ -854,6 +896,10 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         limit: int | str | None = None,
         **kwargs: Any,
     ) -> pa.Table:
+        if self.mode == "streaming":
+            raise NotImplementedError(
+                "PySpark in streaming mode does not support to_pyarrow"
+            )
         import pyarrow as pa
         import pyarrow_hotfix  # noqa: F401
 
@@ -876,6 +922,10 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         chunk_size: int = 1000000,
         **kwargs: Any,
     ) -> pa.ipc.RecordBatchReader:
+        if self.mode == "streaming":
+            raise NotImplementedError(
+                "PySpark in streaming mode does not support to_pyarrow_batches"
+            )
         pa = self._import_pyarrow()
         pa_table = self.to_pyarrow(
             expr.as_table(), params=params, limit=limit, **kwargs
@@ -883,3 +933,110 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         return pa.ipc.RecordBatchReader.from_batches(
             pa_table.schema, pa_table.to_batches(max_chunksize=chunk_size)
         )
+
+    @util.experimental
+    def read_kafka(
+        self,
+        table_name: str | None = None,
+        watermark: Watermark | None = None,
+        auto_parse: bool = False,
+        schema: sch.Schema | None = None,
+        options: Mapping[str, str] | None = None,
+    ) -> ir.Table:
+        """Register a Kafka topic as a table.
+
+        Parameters
+        ----------
+        table_name
+            An optional name to use for the created table. This defaults to
+            a sequentially generated name.
+        watermark
+            Watermark strategy for the table.
+        auto_parse
+            Whether to parse Kafka messages automatically. If `False`, the source is read
+            as binary keys and values. If `True`, the key is discarded and the value is
+            parsed using the provided schema.
+        schema
+            Schema of the value of the Kafka messages.
+        options
+            Additional arguments passed to PySpark as .option("key", "value").
+            https://spark.apache.org/docs/latest/structured-streaming-kafka-integration.html
+
+        Returns
+        -------
+        ir.Table
+            The just-registered table
+        """
+        if self.mode == "batch":
+            raise NotImplementedError(
+                "Reading from Kafka in batch mode is not supported"
+            )
+        spark_df = self._session.readStream.format("kafka")
+        for k, v in (options or {}).items():
+            spark_df = spark_df.option(k, v)
+        spark_df = spark_df.load()
+
+        # parse the values of the Kafka messages using the provided schema
+        if auto_parse:
+            if schema is None:
+                raise com.IbisError(
+                    "When auto_parse is True, a schema must be provided to parse the messages"
+                )
+            schema = PySparkSchema.from_ibis(schema)
+            spark_df = spark_df.select(
+                F.from_json(F.col("value").cast("string"), schema).alias("parsed_value")
+            ).select("parsed_value.*")
+
+        if watermark is not None:
+            spark_df = spark_df.withWatermark(
+                watermark.time_col,
+                _interval_to_string(watermark.allowed_delay),
+            )
+
+        table_name = table_name or util.gen_name("read_kafka")
+        spark_df.createOrReplaceTempView(table_name)
+        return self.table(table_name)
+
+    @util.experimental
+    def to_kafka(
+        self,
+        expr: ir.Expr,
+        auto_format: bool = False,
+        options: Mapping[str, str] | None = None,
+    ) -> StreamingQuery:
+        """Write the results of executing the given expression to a Kafka topic.
+
+        This method does not return outputs. Streaming queries are run continuously in
+        the background.
+
+        Parameters
+        ----------
+        expr
+            The ibis expression to execute and persist to a Kafka topic.
+        auto_format
+            Whether to format the Kafka messages before writing. If `False`, the output is
+            written as-is. If `True`, the output is converted into JSON and written as the
+            value of the Kafka messages.
+        options
+            PySpark Kafka write arguments.
+            https://spark.apache.org/docs/latest/structured-streaming-kafka-integration.html
+
+        Returns
+        -------
+        StreamingQuery
+            A Pyspark StreamingQuery object
+        """
+        if self.mode == "batch":
+            raise NotImplementedError("Writing to Kafka in batch mode is not supported")
+        df = self._session.sql(expr.compile())
+        if auto_format:
+            df = df.select(
+                F.to_json(F.struct([F.col(c).alias(c) for c in df.columns])).alias(
+                    "value"
+                )
+            )
+        sq = df.writeStream.format("kafka")
+        for k, v in (options or {}).items():
+            sq = sq.option(k, v)
+        sq.start()
+        return sq

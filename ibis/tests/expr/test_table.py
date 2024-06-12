@@ -569,7 +569,7 @@ rand = ibis.random()
 @pytest.mark.parametrize(
     ("key", "expected"),
     [
-        param(ibis.NA, ibis.NA.op(), id="na"),
+        param(ibis.null(), ibis.null().op(), id="na"),
         param(rand, rand.op(), id="random"),
         param(1.0, ibis.literal(1.0).op(), id="float"),
         param(ibis.literal("a"), ibis.literal("a").op(), id="string"),
@@ -629,10 +629,26 @@ def test_invalid_slice(table, step):
         table[:5:step]
 
 
-def test_table_count(table):
-    result = table.count()
+@pytest.mark.parametrize(
+    "method, op_cls", [("count", ops.CountStar), ("nunique", ops.CountDistinctStar)]
+)
+def test_table_count_nunique(table, method, op_cls):
+    def f(t, **kwargs):
+        return getattr(t, method)(**kwargs)
+
+    result = f(table)
     assert isinstance(result, ir.IntegerScalar)
-    assert isinstance(result.op(), ops.CountStar)
+    assert isinstance(result.op(), op_cls)
+    assert result.op().where is None
+
+    r1 = f(table, where=table.h)
+    r2 = f(table, where="h")
+    r3 = f(table, where=_.h)
+    r4 = f(table, where=lambda t: t.h)
+    assert r1.equals(r2)
+    assert r1.equals(r3)
+    assert r1.equals(r4)
+    assert r1.op().where.equals(table.h.op())
 
 
 def test_len_raises_expression_error(table):
@@ -1715,8 +1731,8 @@ def test_unbound_table_using_class_definition():
 
 def test_mutate_chain():
     one = ibis.table([("a", "string"), ("b", "string")], name="t")
-    two = one.mutate(b=lambda t: t.b.fillna("Short Term"))
-    three = two.mutate(a=lambda t: t.a.fillna("Short Term"))
+    two = one.mutate(b=lambda t: t.b.fill_null("Short Term"))
+    three = two.mutate(a=lambda t: t.a.fill_null("Short Term"))
 
     values = three.op().values
     assert isinstance(values["a"], ops.Coalesce)
@@ -1727,8 +1743,8 @@ def test_mutate_chain():
     assert three_opt == ops.Project(
         parent=one,
         values={
-            "a": one.a.fillna("Short Term"),
-            "b": one.b.fillna("Short Term"),
+            "a": one.a.fill_null("Short Term"),
+            "b": one.b.fill_null("Short Term"),
         },
     )
 
@@ -2175,3 +2191,17 @@ def test_table_bind():
 
     with pytest.raises(ValueError, match="¡moo!"):
         t.bind(foo=utter_failure)
+
+
+# TODO: remove when dropna is fully deprecated
+def test_table_dropna_depr_warn():
+    t = ibis.memtable([{"a": 1, "b": None}, {"a": 2, "b": "baz"}])
+    with pytest.warns(FutureWarning, match="v9.1"):
+        t.dropna()
+
+
+# TODO: remove when fillna is fully deprecated
+def test_table_fillna_depr_warn():
+    t = ibis.memtable([{"a": 1, "b": None}, {"a": 2, "b": "baz"}])
+    with pytest.warns(FutureWarning, match="v9.1"):
+        t.fillna({"b": "missing"})

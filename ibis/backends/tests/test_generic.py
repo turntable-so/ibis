@@ -118,13 +118,13 @@ def test_boolean_literal(con, backend):
 @pytest.mark.parametrize(
     ("expr", "expected"),
     [
-        param(ibis.NA.fillna(5), 5, id="na_fillna"),
-        param(ibis.literal(5).fillna(10), 5, id="non_na_fillna"),
+        param(ibis.null().fill_null(5), 5, id="na_fill_null"),
+        param(ibis.literal(5).fill_null(10), 5, id="non_na_fill_null"),
         param(ibis.literal(5).nullif(5), None, id="nullif_null"),
         param(ibis.literal(10).nullif(5), 10, id="nullif_not_null"),
     ],
 )
-def test_scalar_fillna_nullif(con, expr, expected):
+def test_scalar_fill_null_nullif(con, expr, expected):
     if expected is None:
         # The exact kind of null value used differs per backend (and version).
         # Example 1: Pandas returns np.nan while BigQuery returns None.
@@ -159,7 +159,10 @@ def test_scalar_fillna_nullif(con, expr, expected):
             id="nan_col",
         ),
         param(
-            "none_col", ibis.NA.cast("float64"), methodcaller("isnull"), id="none_col"
+            "none_col",
+            ibis.null().cast("float64"),
+            methodcaller("isnull"),
+            id="none_col",
         ),
     ],
 )
@@ -211,11 +214,11 @@ def test_isna(backend, alltypes, col, value, filt):
         ),
     ],
 )
-def test_column_fillna(backend, alltypes, value):
+def test_column_fill_null(backend, alltypes, value):
     table = alltypes.mutate(missing=ibis.literal(value).cast("float64"))
     pd_table = table.execute()
 
-    res = table.mutate(missing=table.missing.fillna(0.0)).execute()
+    res = table.mutate(missing=table.missing.fill_null(0.0)).execute()
     sol = pd_table.assign(missing=pd_table.missing.fillna(0.0))
     backend.assert_frame_equal(res.reset_index(drop=True), sol.reset_index(drop=True))
 
@@ -224,8 +227,8 @@ def test_column_fillna(backend, alltypes, value):
     ("expr", "expected"),
     [
         param(ibis.coalesce(5, None, 4), 5, id="generic"),
-        param(ibis.coalesce(ibis.NA, 4, ibis.NA), 4, id="null_start_end"),
-        param(ibis.coalesce(ibis.NA, ibis.NA, 3.14), 3.14, id="non_null_last"),
+        param(ibis.coalesce(ibis.null(), 4, ibis.null()), 4, id="null_start_end"),
+        param(ibis.coalesce(ibis.null(), ibis.null(), 3.14), 3.14, id="non_null_last"),
     ],
 )
 def test_coalesce(con, expr, expected):
@@ -441,21 +444,21 @@ def test_select_filter_mutate(backend, alltypes, df):
     backend.assert_series_equal(result.float_col, expected.float_col)
 
 
-def test_table_fillna_invalid(alltypes):
+def test_table_fill_null_invalid(alltypes):
     with pytest.raises(
         com.IbisTypeError, match=r"Column 'invalid_col' is not found in table"
     ):
-        alltypes.fillna({"invalid_col": 0.0})
+        alltypes.fill_null({"invalid_col": 0.0})
 
     with pytest.raises(
-        com.IbisTypeError, match="Cannot fillna on column 'string_col' of type.*"
+        com.IbisTypeError, match="Cannot fill_null on column 'string_col' of type.*"
     ):
-        alltypes[["int_col", "string_col"]].fillna(0)
+        alltypes[["int_col", "string_col"]].fill_null(0)
 
     with pytest.raises(
-        com.IbisTypeError, match="Cannot fillna on column 'int_col' of type.*"
+        com.IbisTypeError, match="Cannot fill_null on column 'int_col' of type.*"
     ):
-        alltypes.fillna({"int_col": "oops"})
+        alltypes.fill_null({"int_col": "oops"})
 
 
 @pytest.mark.parametrize(
@@ -467,7 +470,7 @@ def test_table_fillna_invalid(alltypes):
         param({}, id="empty"),
     ],
 )
-def test_table_fillna_mapping(backend, alltypes, replacements):
+def test_table_fill_null_mapping(backend, alltypes, replacements):
     table = alltypes.mutate(
         int_col=alltypes.int_col.nullif(1),
         double_col=alltypes.double_col.nullif(3.0),
@@ -475,13 +478,13 @@ def test_table_fillna_mapping(backend, alltypes, replacements):
     ).select("id", "int_col", "double_col", "string_col")
     pd_table = table.execute()
 
-    result = table.fillna(replacements).execute().reset_index(drop=True)
+    result = table.fill_null(replacements).execute().reset_index(drop=True)
     expected = pd_table.fillna(replacements).reset_index(drop=True)
 
     backend.assert_frame_equal(result, expected, check_dtype=False)
 
 
-def test_table_fillna_scalar(backend, alltypes):
+def test_table_fill_null_scalar(backend, alltypes):
     table = alltypes.mutate(
         int_col=alltypes.int_col.nullif(1),
         double_col=alltypes.double_col.nullif(3.0),
@@ -489,11 +492,11 @@ def test_table_fillna_scalar(backend, alltypes):
     ).select("id", "int_col", "double_col", "string_col")
     pd_table = table.execute()
 
-    res = table[["int_col", "double_col"]].fillna(0).execute().reset_index(drop=True)
+    res = table[["int_col", "double_col"]].fill_null(0).execute().reset_index(drop=True)
     sol = pd_table[["int_col", "double_col"]].fillna(0).reset_index(drop=True)
     backend.assert_frame_equal(res, sol, check_dtype=False)
 
-    res = table[["string_col"]].fillna("missing").execute().reset_index(drop=True)
+    res = table[["string_col"]].fill_null("missing").execute().reset_index(drop=True)
     sol = pd_table[["string_col"]].fillna("missing").reset_index(drop=True)
     backend.assert_frame_equal(res, sol, check_dtype=False)
 
@@ -509,14 +512,14 @@ def test_mutate_rename(alltypes):
     assert list(result.columns) == ["bool_col", "string_col", "dupe_col"]
 
 
-def test_dropna_invalid(alltypes):
+def test_drop_null_invalid(alltypes):
     with pytest.raises(
         com.IbisTypeError, match=r"Column 'invalid_col' is not found in table"
     ):
-        alltypes.dropna(subset=["invalid_col"])
+        alltypes.drop_null(subset=["invalid_col"])
 
     with pytest.raises(ValidationError):
-        alltypes.dropna(how="invalid")
+        alltypes.drop_null(how="invalid")
 
 
 @pytest.mark.parametrize("how", ["any", "all"])
@@ -534,18 +537,18 @@ def test_dropna_invalid(alltypes):
         param(["col_1", "col_3"], id="one-and-three"),
     ],
 )
-def test_dropna_table(backend, alltypes, how, subset):
+def test_drop_null_table(backend, alltypes, how, subset):
     is_two = alltypes.int_col == 2
     is_four = alltypes.int_col == 4
 
     table = alltypes.mutate(
-        col_1=is_two.ifelse(ibis.NA, alltypes.float_col),
-        col_2=is_four.ifelse(ibis.NA, alltypes.float_col),
-        col_3=(is_two | is_four).ifelse(ibis.NA, alltypes.float_col),
+        col_1=is_two.ifelse(ibis.null(), alltypes.float_col),
+        col_2=is_four.ifelse(ibis.null(), alltypes.float_col),
+        col_3=(is_two | is_four).ifelse(ibis.null(), alltypes.float_col),
     ).select("col_1", "col_2", "col_3")
 
     table_pandas = table.execute()
-    result = table.dropna(subset, how).execute().reset_index(drop=True)
+    result = table.drop_null(subset, how).execute().reset_index(drop=True)
     expected = table_pandas.dropna(how=how, subset=subset).reset_index(drop=True)
 
     backend.assert_frame_equal(result, expected)
@@ -617,6 +620,23 @@ def test_table_info(alltypes):
     assert expr.columns == list(df.columns)
 
 
+@pytest.mark.notyet(
+    ["druid"],
+    raises=PyDruidProgrammingError,
+    reason="Druid only supports trivial unions",
+)
+@pytest.mark.notyet(
+    ["flink"], reason="IOException - Insufficient number of network buffers"
+)
+def test_table_info_large(con):
+    num_cols = 129
+    col_names = [f"col_{i}" for i in range(num_cols)]
+    t = ibis.memtable({col: [0, 1] for col in col_names})
+    result = con.execute(t.info())
+    assert list(result.name) == col_names
+    assert result.pos.dtype == np.int16
+
+
 @pytest.mark.notimpl(
     [
         "datafusion",
@@ -660,6 +680,7 @@ def test_table_info(alltypes):
             ),
             [
                 "name",
+                "pos",
                 "type",
                 "count",
                 "nulls",
@@ -712,6 +733,7 @@ def test_table_info(alltypes):
             s.of_type("numeric"),
             [
                 "name",
+                "pos",
                 "type",
                 "count",
                 "nulls",
@@ -742,6 +764,7 @@ def test_table_info(alltypes):
             s.of_type("string"),
             [
                 "name",
+                "pos",
                 "type",
                 "count",
                 "nulls",
@@ -782,6 +805,47 @@ def test_table_describe(alltypes, selector, expected_columns):
     assert sorted(sometypes.columns) == sorted(df.name)
     assert sorted(expr.columns) == sorted(expected_columns)
     assert sorted(expr.columns) == sorted(df.columns)
+
+
+@pytest.mark.notimpl(
+    [
+        "datafusion",
+        "bigquery",
+        "impala",
+        "mysql",
+        "mssql",
+        "trino",
+        "flink",
+        "sqlite",
+    ],
+    raises=com.OperationNotDefinedError,
+    reason="quantile is not supported",
+)
+@pytest.mark.notimpl(
+    [
+        "exasol",
+        "druid",
+    ],
+    raises=com.OperationNotDefinedError,
+    reason="StandardDev is not supported",
+)
+@pytest.mark.notyet(
+    ["druid"],
+    raises=PyDruidProgrammingError,
+    reason="Druid only supports trivial unions",
+)
+@pytest.mark.notyet(
+    ["oracle"],
+    raises=OracleDatabaseError,
+    reason="Mode is not supported and ORA-02000: missing AS keyword",
+)
+def test_table_describe_large(con):
+    num_cols = 129
+    col_names = [f"col_{i}" for i in range(num_cols)]
+    t = ibis.memtable({col: [0, 1] for col in col_names})
+    result = con.execute(t.describe())
+    assert set(result.name) == set(col_names)
+    assert result.pos.dtype == np.int16
 
 
 @pytest.mark.parametrize(
@@ -870,12 +934,12 @@ def test_logical_negation_column(backend, alltypes, df, op):
     [("int64", 0, 1), ("float64", 0.0, 1.0)],
 )
 def test_zero_ifnull_literals(con, dtype, zero, expected):
-    assert con.execute(ibis.NA.cast(dtype).fillna(0)) == zero
-    assert con.execute(ibis.literal(expected, type=dtype).fillna(0)) == expected
+    assert con.execute(ibis.null().cast(dtype).fill_null(0)) == zero
+    assert con.execute(ibis.literal(expected, type=dtype).fill_null(0)) == expected
 
 
 def test_zero_ifnull_column(backend, alltypes, df):
-    expr = alltypes.int_col.nullif(1).fillna(0).name("tmp")
+    expr = alltypes.int_col.nullif(1).fill_null(0).name("tmp")
     result = expr.execute().astype("int32")
     expected = df.int_col.replace(1, 0).rename("tmp").astype("int32")
     backend.assert_series_equal(result, expected)
@@ -1230,9 +1294,7 @@ def test_many_subqueries(con, snapshot):
     snapshot.assert_match(str(ibis.to_sql(t3, dialect=con.name)), "out.sql")
 
 
-@pytest.mark.notimpl(
-    ["dask", "pandas", "oracle", "exasol"], raises=com.OperationNotDefinedError
-)
+@pytest.mark.notimpl(["oracle", "exasol"], raises=com.OperationNotDefinedError)
 @pytest.mark.notimpl(["druid"], raises=AssertionError)
 @pytest.mark.notyet(
     ["datafusion", "impala", "mssql", "mysql", "sqlite"],
@@ -1282,6 +1344,9 @@ def test_pivot_longer(backend):
     assert len(res.execute()) == len(expected)
 
 
+@pytest.mark.xfail_version(
+    datafusion=["datafusion==38.0.1"], reason="internal error about MEDIAN(G) naming"
+)
 def test_pivot_wider(backend):
     diamonds = backend.diamonds
     expr = (
@@ -1338,13 +1403,13 @@ def test_pivot_wider(backend):
     reason="backend doesn't implement deduplication",
 )
 @pytest.mark.notimpl(
-    ["exasol"],
-    raises=com.OperationNotDefinedError,
-)
-@pytest.mark.notimpl(
     ["risingwave"],
     raises=PsycoPg2InternalError,
     reason="function last(double precision) does not exist, do you mean left or least",
+)
+@pytest.mark.notyet(
+    ["datafusion"],
+    reason="datafusion 38.0.1 has a bug in FILTER handling that causes this test to fail",
 )
 def test_distinct_on_keep(backend, on, keep):
     from ibis import _
@@ -1393,10 +1458,6 @@ def test_distinct_on_keep(backend, on, keep):
     reason="arbitrary not implemented in the backend",
 )
 @pytest.mark.notimpl(
-    ["exasol"],
-    raises=com.OperationNotDefinedError,
-)
-@pytest.mark.notimpl(
     ["polars"],
     raises=com.OperationNotDefinedError,
     reason="backend doesn't implement ops.WindowFunction",
@@ -1410,6 +1471,10 @@ def test_distinct_on_keep(backend, on, keep):
     ["risingwave"],
     raises=PsycoPg2InternalError,
     reason="function first(double precision) does not exist",
+)
+@pytest.mark.notyet(
+    ["datafusion"],
+    reason="datafusion 38.0.1 has a bug in FILTER handling that causes this test to fail",
 )
 def test_distinct_on_keep_is_none(backend, on):
     from ibis import _
@@ -1429,7 +1494,7 @@ def test_distinct_on_keep_is_none(backend, on):
     assert len(result) == len(expected)
 
 
-@pytest.mark.notimpl(["dask", "pandas", "postgres", "risingwave", "flink", "exasol"])
+@pytest.mark.notimpl(["dask", "pandas", "risingwave", "flink", "exasol"])
 @pytest.mark.notyet(
     [
         "sqlite",
@@ -1439,11 +1504,17 @@ def test_distinct_on_keep_is_none(backend, on):
         "trino",  # checksum returns varbinary
     ]
 )
-def test_hash_consistent(backend, alltypes):
-    h1 = alltypes.string_col.hash().execute(limit=10)
-    h2 = alltypes.string_col.hash().execute(limit=10)
+@pytest.mark.parametrize(
+    "dtype", ["smallint", "int", "bigint", "float", "double", "string"]
+)
+def test_hash(backend, alltypes, dtype):
+    # check that multiple executions return the same result
+    h1 = alltypes[f"{dtype}_col"].hash().execute(limit=20)
+    h2 = alltypes[f"{dtype}_col"].hash().execute(limit=20)
     backend.assert_series_equal(h1, h2)
-    assert h1.dtype in ("i8", "uint64")  # polars likes returning uint64 for this
+    # check that the result is a signed 64-bit integer, no nulls
+    assert h1.dtype == "i8"
+    assert h1.notnull().all()
 
 
 @pytest.mark.notimpl(["trino", "oracle", "exasol", "snowflake"])
@@ -2223,3 +2294,21 @@ def test_null_isin_null_is_null(con):
     t = ibis.memtable({"x": [1]})
     expr = t.x.isin([None])
     assert pd.isna(con.to_pandas(expr).iat[0])
+
+
+def test_value_counts_on_tables(backend, df):
+    if backend.name() == "dask":
+        pytest.skip(reason="flaky errors about sorting on multi-partition dataframes")
+    from ibis import selectors as s
+
+    t = backend.functional_alltypes
+    expr = t[["bigint_col", "int_col"]].value_counts().order_by(s.all())
+    result = expr.execute()
+    expected = (
+        df.groupby(["bigint_col", "int_col"])
+        .string_col.count()
+        .reset_index()
+        .rename(columns=dict(string_col="bigint_col_int_col_count"))
+    )
+    expected = expected.sort_values(expected.columns.tolist()).reset_index(drop=True)
+    backend.assert_frame_equal(result, expected, check_dtype=False)

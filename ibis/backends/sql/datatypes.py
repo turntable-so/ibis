@@ -182,7 +182,7 @@ class SqlglotType(TypeMapper):
 
     @classmethod
     def from_ibis(cls, dtype: dt.DataType) -> sge.DataType:
-        """Convert a sqlglot type to an ibis type."""
+        """Convert an Ibis dtype to an sqlglot dtype."""
 
         if method := getattr(cls, f"_from_ibis_{dtype.name}", None):
             return method(dtype)
@@ -489,8 +489,19 @@ class MySQLType(SqlglotType):
             return dt.Int8(nullable=cls.default_nullable)
 
     @classmethod
-    def _from_sqlglot_DATETIME(cls) -> dt.Timestamp:
-        return dt.Timestamp(nullable=cls.default_nullable)
+    def _from_sqlglot_DATETIME(cls, scale=None) -> dt.Timestamp:
+        if scale is not None:
+            scale = int(scale.this.this)
+        return dt.Timestamp(
+            # scale of zero means "no scale", which differs from the SQL
+            # standard
+            #
+            # see
+            # https://dev.mysql.com/doc/refman/8.4/en/fractional-seconds.html
+            # for details
+            scale=scale or None,
+            nullable=cls.default_nullable,
+        )
 
     @classmethod
     def _from_sqlglot_TIMESTAMP(cls) -> dt.Timestamp:
@@ -1007,10 +1018,11 @@ class ClickHouseType(SqlglotType):
 
     @classmethod
     def from_ibis(cls, dtype: dt.DataType) -> sge.DataType:
-        """Convert a sqlglot type to an ibis type."""
         typ = super().from_ibis(dtype)
-        if dtype.nullable and not (dtype.is_map() or dtype.is_array()):
-            # map cannot be nullable in clickhouse
+        # nested types cannot be nullable in clickhouse
+        if dtype.nullable and not (
+            dtype.is_map() or dtype.is_array() or dtype.is_struct()
+        ):
             return sge.DataType(this=typecode.NULLABLE, expressions=[typ])
         else:
             return typ

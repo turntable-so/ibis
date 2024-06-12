@@ -53,11 +53,9 @@ class ExasolCompiler(SQLGlotCompiler):
         ops.DateFromYMD,
         ops.DayOfWeekIndex,
         ops.ElementWiseVectorizedUDF,
-        ops.First,
         ops.IntervalFromInteger,
         ops.IsInf,
         ops.IsNan,
-        ops.Last,
         ops.Levenshtein,
         ops.Median,
         ops.MultiQuantile,
@@ -90,6 +88,8 @@ class ExasolCompiler(SQLGlotCompiler):
         ops.Log10: "log10",
         ops.All: "min",
         ops.Any: "max",
+        ops.First: "first_value",
+        ops.Last: "last_value",
     }
 
     @staticmethod
@@ -102,12 +102,6 @@ class ExasolCompiler(SQLGlotCompiler):
         ):
             return None
         return spec
-
-    def _aggregate(self, funcname: str, *args, where):
-        func = self.f[funcname]
-        if where is not None:
-            args = tuple(self.if_(where, arg, NULL) for arg in args)
-        return func(*args)
 
     @staticmethod
     def _gen_valid_name(name: str) -> str:

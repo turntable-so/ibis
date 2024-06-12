@@ -4,7 +4,7 @@ import datetime
 import functools
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 import pytest
 import sqlglot as sg
@@ -14,6 +14,8 @@ import ibis
 from ibis.formats.pandas import PandasData
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     import ibis.expr.types as ir
 
 
@@ -90,7 +92,11 @@ def tpch_test(test: Callable[..., ir.Table]):
             left = result.loc[:, column]
             right = expected.loc[:, column]
             assert (
-                pytest.approx(left.values.tolist(), nan_ok=True)
+                pytest.approx(
+                    left.values.tolist(),
+                    nan_ok=True,
+                    abs=backend.tpch_absolute_tolerance,
+                )
                 == right.values.tolist()
             )
 

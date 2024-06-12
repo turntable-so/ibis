@@ -6,10 +6,9 @@ import functools
 import importlib.metadata
 import keyword
 import re
-import sys
 import urllib.parse
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import parse_qs, urlparse
 
 import ibis
@@ -1052,23 +1051,6 @@ class BaseBackend(abc.ABC, _FileIOHandler):
     def execute(self, expr: ir.Expr) -> Any:
         """Execute an expression."""
 
-    def add_operation(self, operation: ops.Node) -> Callable:
-        """Add a translation function to the backend for a specific operation.
-
-        Operations are defined in `ibis.expr.operations`, and a translation
-        function receives the translator object and an expression as
-        parameters, and returns a value depending on the backend.
-        """
-        if not hasattr(self, "compiler"):
-            raise RuntimeError("Only SQL-based backends support `add_operation`")
-
-        def decorator(translation_function: Callable) -> None:
-            self.compiler.translator_class.add_operation(
-                operation, translation_function
-            )
-
-        return decorator
-
     @abc.abstractmethod
     def create_table(
         self,
@@ -1296,10 +1278,7 @@ def _get_backend_names(*, exclude: tuple[str] = ()) -> frozenset[str]:
 
     """
 
-    if sys.version_info < (3, 10):
-        entrypoints = importlib.metadata.entry_points()["ibis.backends"]
-    else:
-        entrypoints = importlib.metadata.entry_points(group="ibis.backends")
+    entrypoints = importlib.metadata.entry_points(group="ibis.backends")
     return frozenset(ep.name for ep in entrypoints).difference(exclude)
 
 

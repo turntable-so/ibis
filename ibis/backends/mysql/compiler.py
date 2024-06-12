@@ -107,12 +107,6 @@ class MySQLCompiler(SQLGlotCompiler):
         ops.Log2: "log2",
     }
 
-    def _aggregate(self, funcname: str, *args, where):
-        func = self.f[funcname]
-        if where is not None:
-            args = tuple(self.if_(where, arg, NULL) for arg in args)
-        return func(*args)
-
     @staticmethod
     def _minimize_spec(start, end, spec):
         if (
@@ -282,7 +276,9 @@ class MySQLCompiler(SQLGlotCompiler):
 
     def visit_LRStrip(self, op, *, arg, position):
         return reduce(
-            lambda arg, char: self.f.trim(this=arg, position=position, expression=char),
+            lambda arg, char: self.f.trim(
+                this=arg, position=self.v[position], expression=char
+            ),
             map(
                 partial(self.cast, to=dt.string),
                 map(self.f.unhex, map(self.f.hex, string.whitespace.encode())),
@@ -340,22 +336,28 @@ class MySQLCompiler(SQLGlotCompiler):
 
     def visit_UnwrapJSONString(self, op, *, arg):
         return self.if_(
-            self.f.json_type(arg).eq("STRING"), self.f.json_unquote(arg), NULL
+            self.f.json_type(arg).eq(sge.convert("STRING")),
+            self.f.json_unquote(arg),
+            NULL,
         )
 
     def visit_UnwrapJSONInt64(self, op, *, arg):
         return self.if_(
-            self.f.json_type(arg).eq("INTEGER"), self.cast(arg, op.dtype), NULL
+            self.f.json_type(arg).eq(sge.convert("INTEGER")),
+            self.cast(arg, op.dtype),
+            NULL,
         )
 
     def visit_UnwrapJSONFloat64(self, op, *, arg):
         return self.if_(
-            self.f.json_type(arg).isin("DOUBLE", "INTEGER"),
+            self.f.json_type(arg).isin(sge.convert("DOUBLE"), sge.convert("INTEGER")),
             self.cast(arg, op.dtype),
             NULL,
         )
 
     def visit_UnwrapJSONBoolean(self, op, *, arg):
         return self.if_(
-            self.f.json_type(arg).eq("BOOLEAN"), self.if_(arg.eq("true"), 1, 0), NULL
+            self.f.json_type(arg).eq(sge.convert("BOOLEAN")),
+            self.if_(arg.eq(sge.convert("true")), 1, 0),
+            NULL,
         )
