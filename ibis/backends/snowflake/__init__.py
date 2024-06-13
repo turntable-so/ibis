@@ -256,7 +256,7 @@ $$ {defn["source"]} $$"""
             create_stmt = sge.Create(
                 kind="DATABASE", this="ibis_udfs", exists=True
             ).sql(dialect)
-            if "/" in con.database:
+            if con.database is not None and "/" in con.database:
                 (catalog, db) = con.database.split("/")
                 use_stmt = sge.Use(
                     kind="SCHEMA",
