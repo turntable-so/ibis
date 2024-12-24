@@ -78,13 +78,12 @@ def test_cross_db(tmpdir):
 
     con2.attach(path1, name="test1", read_only=True)
 
-    with pytest.warns(FutureWarning):
-        t1_from_con2 = con2.table("t1", schema="main", database="test1")
+    t1_from_con2 = con2.table("t1", database="test1.main")
     assert t1_from_con2.schema() == t2.schema()
     assert t1_from_con2.execute().equals(t2.execute())
 
-    with pytest.warns(FutureWarning):
-        foo_t1_from_con2 = con2.table("t1", schema="foo", database="test1")
+    foo_t1_from_con2 = con2.table("t1", database="test1.foo")
+
     assert foo_t1_from_con2.schema() == t2.schema()
     assert foo_t1_from_con2.execute().equals(t2.execute())
 
@@ -266,11 +265,11 @@ def test_connect_duckdb(url, tmp_path):
 @pytest.mark.parametrize(
     "out_method, extension", [("to_csv", "csv"), ("to_parquet", "parquet")]
 )
-def test_connect_local_file(out_method, extension, test_employee_data_1, tmp_path):
-    getattr(test_employee_data_1, out_method)(tmp_path / f"out.{extension}")
-    with pytest.warns(FutureWarning, match="v9.1"):
-        # ibis.connect uses con.register
-        con = ibis.connect(tmp_path / f"out.{extension}")
+def test_connect_local_file(out_method, extension, tmp_path):
+    df = pd.DataFrame({"a": [1, 2, 3]})
+    path = tmp_path / f"out.{extension}"
+    getattr(df, out_method)(path)
+    con = ibis.connect(path)
     t = next(iter(con.tables.values()))
     assert not t.head().execute().empty
 
@@ -282,7 +281,7 @@ def test_invalid_connect(tmp_path):
         ibis.connect(url)
 
 
-def test_list_tables_schema_warning_refactor(con):
+def test_list_tables(con):
     assert {
         "astronauts",
         "awards_players",
@@ -293,9 +292,6 @@ def test_list_tables_schema_warning_refactor(con):
     }.issubset(con.list_tables())
 
     icecream_table = ["ice_cream"]
-
-    with pytest.warns(FutureWarning):
-        assert con.list_tables(schema="shops") == icecream_table
 
     assert con.list_tables(database="shops") == icecream_table
     assert con.list_tables(database=("shops",)) == icecream_table
@@ -322,3 +318,127 @@ def test_connect_named_in_memory_db():
 
     default_memory_db = ibis.duckdb.connect()
     assert "ork" not in default_memory_db.list_tables()
+
+
+@pytest.mark.parametrize(
+    "database_file",
+    [
+        "with spaces.ddb",
+        "space catalog.duckdb.db",
+    ],
+)
+def test_create_table_quoting(database_file, tmp_path):
+    conn = ibis.duckdb.connect(tmp_path / database_file)
+    t = conn.create_table("t", {"a": [0, 1, 2]})
+    result = set(conn.execute(t.a))
+    assert result == {0, 1, 2}
+
+
+@pytest.mark.parametrize(
+    ("url", "method_name"),
+    [
+        ("hf://datasets/datasets-examples/doc-formats-csv-1/data.csv", "read_csv"),
+        ("hf://datasets/datasets-examples/doc-formats-jsonl-1/data.jsonl", "read_json"),
+        (
+            "hf://datasets/datasets-examples/doc-formats-parquet-1/data/train-00000-of-00001.parquet",
+            "read_parquet",
+        ),
+    ],
+    ids=["csv", "jsonl", "parquet"],
+)
+@pytest.mark.xfail(
+    LINUX and SANDBOXED,
+    reason="nix on linux is not allowed to access the network and cannot download the httpfs extension",
+    raises=duckdb.Error,
+)
+def test_hugging_face(con, url, method_name):
+    method = getattr(con, method_name)
+    t = method(url)
+    assert t.count().execute() > 0
+
+
+def test_multiple_tables_with_the_same_name(tmp_path):
+    # check within the same database
+    path = tmp_path / "test1.ddb"
+    with duckdb.connect(str(path)) as con:
+        con.execute("CREATE TABLE t (x INT)")
+        con.execute("CREATE SCHEMA s")
+        con.execute("CREATE TABLE s.t (y STRING)")
+
+    con = ibis.duckdb.connect(path)
+    t1 = con.table("t")
+    t2 = con.table("t", database="s")
+    assert t1.schema() == ibis.schema({"x": "int32"})
+    assert t2.schema() == ibis.schema({"y": "string"})
+
+    path = tmp_path / "test2.ddb"
+    with duckdb.connect(str(path)) as c:
+        c.execute("CREATE TABLE t (y DOUBLE[])")
+
+    # attach another catalog and check that too
+    con.attach(path, name="w")
+    t1 = con.table("t")
+    t2 = con.table("t", database="s")
+    assert t1.schema() == ibis.schema({"x": "int32"})
+    assert t2.schema() == ibis.schema({"y": "string"})
+
+    t3 = con.table("t", database="w.main")
+
+    assert t3.schema() == ibis.schema({"y": "array<float64>"})
+
+
+@pytest.mark.parametrize(
+    "input",
+    [
+        {"columns": {"lat": "float64", "lon": "float64", "geom": "geometry"}},
+        {"types": {"geom": "geometry"}},
+    ],
+)
+@pytest.mark.parametrize("all_varchar", [True, False])
+@pytest.mark.xfail(
+    LINUX and SANDBOXED,
+    reason="nix on linux cannot download duckdb extensions or data due to sandboxing",
+    raises=duckdb.IOException,
+)
+@pytest.mark.xdist_group(name="duckdb-extensions")
+def test_read_csv_with_types(tmp_path, input, all_varchar):
+    con = ibis.duckdb.connect()
+    data = b"""\
+lat,lon,geom
+1.0,2.0,POINT (1 2)
+2.0,3.0,POINT (2 3)"""
+    path = tmp_path / "data.csv"
+    path.write_bytes(data)
+    t = con.read_csv(path, all_varchar=all_varchar, **input)
+    assert t.schema()["geom"].is_geospatial()
+
+
+def test_memtable_doesnt_leak(con):
+    name = gen_name("memtable_doesnt_leak")
+    assert name not in con.list_tables()
+    df = con.execute(ibis.memtable({"a": [1, 2, 3]}, name=name))
+    assert name not in con.list_tables()
+    assert len(df) == 3
+
+
+def test_pyarrow_batches_chunk_size(con):  # 10443
+    import numpy as np
+
+    t = ibis.memtable(
+        {
+            "id": np.arange(10_000),
+            "name": np.random.choice(["Alice", "Bob", "Carol", "Dave"], size=10_000),
+            "age": np.random.randint(20, 70, size=10_000),
+        }
+    )
+    batches = con.to_pyarrow_batches(t, chunk_size=4096)
+    assert len(next(batches)) == 4096
+    assert len(next(batches)) == 4096
+
+    batches = con.to_pyarrow_batches(t, chunk_size=800)
+    assert len(next(batches)) == 800
+    assert len(next(batches)) == 800
+
+    batches = con.to_pyarrow_batches(t, chunk_size=-1)
+    with pytest.raises(TypeError):
+        next(batches)

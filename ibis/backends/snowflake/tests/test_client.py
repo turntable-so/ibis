@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections import Counter
 
 import pandas as pd
 import pandas.testing as tm
@@ -96,8 +97,8 @@ def test_repeated_memtable_registration(simple_con, mocker):
     for _ in range(n):
         tm.assert_frame_equal(simple_con.execute(t), expected)
 
-    # assert that we called _register_in_memory_table exactly n times
-    assert spy.call_count == n
+    # assert that we called _register_in_memory_table exactly once
+    spy.assert_called_once()
 
 
 def test_timestamp_tz_column(simple_con):
@@ -105,7 +106,7 @@ def test_timestamp_tz_column(simple_con):
         ibis.util.gen_name("snowflake_timestamp_tz_column"),
         schema=ibis.schema({"ts": "string"}),
         temp=True,
-    ).mutate(ts=lambda t: t.ts.to_timestamp("YYYY-MM-DD HH24-MI-SS"))
+    ).mutate(ts=lambda t: t.ts.as_timestamp("YYYY-MM-DD HH24-MI-SS"))
     expr = t.ts
     assert expr.execute().empty
 
@@ -272,23 +273,56 @@ def test_insert(con):
     con.insert(name, expected, overwrite=True)
     assert t.count().execute() == 3
 
+    name = gen_name("test_insert")
+
+    t = con.create_table(
+        name,
+        schema=ibis.schema(
+            {
+                "ID": "int",
+                "NAME": "string",
+                "SCORE_1": "float",
+                "SCORE_2": "float",
+                "SCORE_3": "float",
+                "AGE": "int",
+            }
+        ),
+        temp=True,
+        overwrite=True,
+    )
+    con.insert(
+        name,
+        obj=[
+            {
+                "ID": 10000,
+                "NAME": "....",
+                "SCORE_1": 0.2,
+                "SCORE_2": 0.5,
+                "SCORE_3": 0.75,
+                "AGE": 1000,
+            }
+        ],
+    )
+    assert t.columns == ("ID", "NAME", "SCORE_1", "SCORE_2", "SCORE_3", "AGE")
+    assert t.count().execute() == 1
+
 
 def test_compile_does_not_make_requests(con, mocker):
     astronauts = con.table("astronauts")
     expr = astronauts.year_of_selection.value_counts()
     spy = mocker.spy(con.con, "cursor")
     assert expr.compile() is not None
-    assert spy.call_count == 0
+    spy.assert_not_called()
 
     t = ibis.memtable({"a": [1, 2, 3]})
     assert con.compile(t) is not None
-    assert spy.call_count == 0
+    spy.assert_not_called()
 
     assert ibis.to_sql(t, dialect="snowflake") is not None
-    assert spy.call_count == 0
+    spy.assert_not_called()
 
     assert ibis.to_sql(expr) is not None
-    assert spy.call_count == 0
+    spy.assert_not_called()
 
 
 # this won't be hit in CI, but folks can test locally
@@ -321,40 +355,23 @@ def test_struct_of_json(con):
     assert all(value == raw for value in result.to_pylist())
 
 
-def test_list_tables_schema_warning_refactor(con):
-    assert {
-        "ASTRONAUTS",
-        "AWARDS_PLAYERS",
-        "BATTING",
-        "DIAMONDS",
-        "FUNCTIONAL_ALLTYPES",
-    }.issubset(con.list_tables())
-
-    like_table = [
+@pytest.mark.parametrize(
+    "database",
+    ["IBIS_TESTING.INFORMATION_SCHEMA", ("IBIS_TESTING", "INFORMATION_SCHEMA")],
+    ids=["dotted-path", "tuple"],
+)
+def test_list_tables_with_database(con, database):
+    like_table = {
         "EVENT_TABLES",
         "EXTERNAL_TABLES",
+        "HYBRID_TABLES",
         "TABLES",
         "TABLE_CONSTRAINTS",
         "TABLE_PRIVILEGES",
         "TABLE_STORAGE_METRICS",
-    ]
-
-    with pytest.warns(FutureWarning):
-        assert (
-            con.list_tables(
-                database="IBIS_TESTING", schema="INFORMATION_SCHEMA", like="TABLE"
-            )
-            == like_table
-        )
-
-    assert (
-        con.list_tables(database="IBIS_TESTING.INFORMATION_SCHEMA", like="TABLE")
-        == like_table
-    )
-    assert (
-        con.list_tables(database=("IBIS_TESTING", "INFORMATION_SCHEMA"), like="TABLE")
-        == like_table
-    )
+    }
+    tables = con.list_tables(database=database, like="TABLE")
+    assert like_table.issubset(tables)
 
 
 def test_timestamp_memtable(con):
@@ -396,3 +413,26 @@ def test_connect_without_snowflake_url():
     )
 
     assert nonurlcon.list_tables()
+
+
+def test_table_unnest_with_empty_strings(con):
+    t = ibis.memtable({"x": [["", ""], [""], [], None]})
+    expected = Counter(["", "", "", None, None])
+    expr = t.unnest(t.x)["x"]
+    result = con.execute(expr)
+    assert Counter(result.values) == expected
+
+
+def test_insert_dict_variants(con):
+    name = gen_name("test_insert_dict_variants")
+
+    t = con.create_table(name, schema=ibis.schema({"a": "int", "b": "str"}), temp=True)
+    assert len(t.execute()) == 0
+
+    data = [{"a": 1, "b": "a"}, {"a": 2, "b": "b"}]
+
+    con.insert(name, data)
+    assert len(t.execute()) == 2
+
+    con.insert(name, ibis.memtable(data))
+    assert len(t.execute()) == 4

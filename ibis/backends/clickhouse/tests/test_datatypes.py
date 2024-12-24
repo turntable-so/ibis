@@ -4,7 +4,6 @@ import hypothesis as h
 import hypothesis.strategies as st
 import pytest
 import sqlglot as sg
-import sqlglot.expressions as sge
 from packaging.version import parse as vparse
 from pytest import param
 
@@ -244,6 +243,7 @@ def test_array_discovery_clickhouse(con):
             ),
             id="nested",
         ),
+        param("Date32", dt.Date(nullable=False), id="date32"),
         param("DateTime", dt.Timestamp(scale=0, nullable=False), id="datetime"),
         param(
             "DateTime('Europe/Budapest')",
@@ -310,16 +310,5 @@ def test_type_roundtrip(ibis_type):
 
 
 def test_arrays_nullable():
-    # if dtype.nullable and not (dtype.is_map() or dtype.is_array()):
     sge_type = ClickHouseType.from_ibis(dt.Array("float"))
-    typecode = sge.DataType.Type
-
-    assert sge_type == sge.DataType(
-        this=typecode.ARRAY,
-        expressions=[
-            sge.DataType(
-                this=typecode.NULLABLE, expressions=[sge.DataType(this=typecode.DOUBLE)]
-            )
-        ],
-        nested=True,
-    )
+    assert sge_type.sql("clickhouse") == "Array(Nullable(Float64))"

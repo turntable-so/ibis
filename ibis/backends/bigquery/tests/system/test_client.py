@@ -3,9 +3,11 @@ from __future__ import annotations
 import collections
 import datetime
 import decimal
+from urllib.parse import urlparse
 
 import pandas as pd
 import pandas.testing as tm
+import pyarrow as pa
 import pytest
 import pytz
 
@@ -31,6 +33,16 @@ def test_column_execute(alltypes, df):
 def test_list_tables(con):
     tables = con.list_tables(like="functional_alltypes")
     assert set(tables) == {"functional_alltypes", "functional_alltypes_parted"}
+
+    pypi_tables = [
+        "external",
+        "native",
+    ]
+
+    assert con.list_tables()
+
+    assert con.list_tables(database="ibis-gbq.pypi") == pypi_tables
+    assert con.list_tables(database=("ibis-gbq", "pypi")) == pypi_tables
 
 
 def test_current_catalog(con):
@@ -114,22 +126,6 @@ def test_different_partition_col_name(monkeypatch, con):
     assert col in parted_alltypes.columns
 
 
-def test_subquery_scalar_params(alltypes):
-    t = alltypes
-    p = ibis.param("timestamp").name("my_param")
-    expr = (
-        t[["float_col", "timestamp_col", "int_col", "string_col"]][
-            lambda t: t.timestamp_col < p
-        ]
-        .group_by("string_col")
-        .aggregate(foo=lambda t: t.float_col.sum())
-        .foo.count()
-        .name("count")
-    )
-    result = expr.compile(params={p: "20140101"})
-    assert "datetime('2014-01-01T00:00:00')" in result
-
-
 def test_repr_struct_of_array_of_struct():
     name = "foo"
     p = ibis.param("struct<x: array<struct<y: array<double>>>>").name(name)
@@ -186,8 +182,9 @@ def test_repr_struct_of_array_of_struct():
 
 
 def test_raw_sql(con):
-    result = con.raw_sql("SELECT 1").result()
-    assert [row.values() for row in result] == [(1,)]
+    result = con.raw_sql("SELECT 1 as a").to_arrow()
+    expected = pa.Table.from_pydict({"a": [1]})
+    assert result.equals(expected)
 
 
 def test_parted_column_rename(parted_alltypes):
@@ -199,7 +196,7 @@ def test_scalar_param_partition_time(parted_alltypes):
     assert "PARTITIONTIME" in parted_alltypes.columns
     assert "PARTITIONTIME" in parted_alltypes.schema()
     param = ibis.param("timestamp('UTC')")
-    expr = parted_alltypes[param > parted_alltypes.PARTITIONTIME]
+    expr = parted_alltypes.filter(param > parted_alltypes.PARTITIONTIME)
     df = expr.execute(params={param: "2017-01-01"})
     assert df.empty
 
@@ -209,14 +206,12 @@ def test_parted_column(con, kind):
     table_name = f"{kind}_column_parted"
     t = con.table(table_name)
     expected_column = f"my_{kind}_parted_col"
-    assert t.columns == [expected_column, "string_col", "int_col"]
+    assert t.columns == (expected_column, "string_col", "int_col")
 
 
-def test_cross_project_query(public, snapshot):
+def test_cross_project_query(public):
     table = public.table("posts_questions")
-    expr = table[table.tags.contains("ibis")][["title", "tags"]]
-    result = expr.compile()
-    snapshot.assert_match(result, "out.sql")
+    expr = table.filter(table.tags.contains("ibis"))[["title", "tags"]]
     n = 5
     df = expr.limit(n).execute()
     assert len(df) == n
@@ -239,17 +234,6 @@ def test_exists_table_different_project(con):
     assert "foobar" not in con.list_tables(database=dataset)
 
 
-def test_multiple_project_queries(con, snapshot):
-    so = con.table(
-        "posts_questions",
-        database=("bigquery-public-data", "stackoverflow"),
-    )
-    trips = con.table("trips", database="nyc-tlc.yellow")
-    join = so.join(trips, so.tags == trips.rate_code)[[so.title]]
-    result = join.compile()
-    snapshot.assert_match(result, "out.sql")
-
-
 def test_multiple_project_queries_execute(con):
     posts_questions = con.table(
         "posts_questions", database="bigquery-public-data.stackoverflow"
@@ -257,17 +241,17 @@ def test_multiple_project_queries_execute(con):
     trips = con.table("trips", database="nyc-tlc.yellow").limit(5)
     predicate = posts_questions.tags == trips.rate_code
     cols = [posts_questions.title]
-    join = posts_questions.left_join(trips, predicate)[cols]
+    join = posts_questions.left_join(trips, predicate).select(cols)
     result = join.execute()
     assert list(result.columns) == ["title"]
     assert len(result) == 5
 
 
-def test_string_to_timestamp(con):
+def test_string_as_timestamp(con):
     timestamp = pd.Timestamp(
         datetime.datetime(year=2017, month=2, day=6), tz=pytz.timezone("UTC")
     )
-    expr = ibis.literal("2017-02-06").to_timestamp("%F")
+    expr = ibis.literal("2017-02-06").as_timestamp("%F")
     result = con.execute(expr)
     assert result == timestamp
 
@@ -275,7 +259,7 @@ def test_string_to_timestamp(con):
         datetime.datetime(year=2017, month=2, day=6, hour=5),
         tz=pytz.timezone("UTC"),
     )
-    expr_tz = ibis.literal("2017-02-06 America/New_York").to_timestamp("%F %Z")
+    expr_tz = ibis.literal("2017-02-06 America/New_York").as_timestamp("%F %Z")
     result_tz = con.execute(expr_tz)
     assert result_tz == timestamp_tz
 
@@ -412,25 +396,96 @@ def test_create_table_with_options(con):
         con.drop_table(name)
 
 
-def test_list_tables_schema_warning_refactor(con):
-    pypi_tables = [
-        "external",
-        "native",
-    ]
-
-    assert con.list_tables()
-
-    # Warn but succeed for schema list
-    with pytest.raises(FutureWarning):
-        assert con.list_tables(schema="pypi") == pypi_tables
-
-    assert con.list_tables(database="ibis-gbq.pypi") == pypi_tables
-    assert con.list_tables(database=("ibis-gbq", "pypi")) == pypi_tables
-
-
 def test_create_temp_table_from_scratch(project_id, dataset_id):
     con = ibis.bigquery.connect(project_id=project_id, dataset_id=dataset_id)
     name = gen_name("bigquery_temp_table")
     df = con.tables.functional_alltypes.limit(1)
     t = con.create_table(name, obj=df, temp=True)
     assert len(t.execute()) == 1
+
+
+def test_create_table_from_scratch_with_spaces(project_id, dataset_id):
+    con = ibis.bigquery.connect(project_id=project_id, dataset_id=dataset_id)
+    name = f"{gen_name('bigquery_temp_table')} with spaces"
+    df = con.tables.functional_alltypes.limit(1)
+    t = con.create_table(name, obj=df)
+    try:
+        assert len(t.execute()) == 1
+    finally:
+        con.drop_table(name)
+
+
+@pytest.mark.parametrize("ret_type", ["pandas", "pyarrow", "pyarrow_batches"])
+def test_table_suffix(ret_type):
+    con = ibis.connect("bigquery://ibis-gbq")
+    t = con.table("gsod*", database="bigquery-public-data.noaa_gsod")
+    expr = t.filter(t._TABLE_SUFFIX == "1929", t.max != 9999.9).head(1)
+    if ret_type == "pandas":
+        result = expr.to_pandas()
+        cols = list(result.columns)
+    elif ret_type == "pyarrow":
+        result = expr.to_pyarrow()
+        cols = result.column_names
+    elif ret_type == "pyarrow_batches":
+        result = pa.Table.from_batches(expr.to_pyarrow_batches())
+        cols = result.column_names
+    assert len(result)
+    assert "_TABLE_PREFIX" not in cols
+
+
+def test_parameters_in_url_connect(mocker):
+    spy = mocker.spy(ibis.bigquery, "_from_url")
+    parsed = urlparse("bigquery://ibis-gbq?location=us-east1")
+    ibis.connect("bigquery://ibis-gbq?location=us-east1")
+    spy.assert_called_once_with(parsed, location="us-east1")
+
+
+def test_complex_column_name(con):
+    expr = ibis.literal(1).name(
+        "StringToTimestamp_StringConcat_date_string_col_' America_New_York'_'%F %Z'"
+    )
+    result = con.to_pandas(expr)
+    assert result == 1
+
+
+def test_geospatial_interactive(con, monkeypatch):
+    pytest.importorskip("geopandas")
+
+    monkeypatch.setattr(ibis.options, "interactive", True)
+    t = con.table("bigquery-public-data.geo_us_boundaries.zip_codes")
+    expr = (
+        t.filter(lambda t: t.zip_code_geom.geometry_type() == "ST_Polygon")
+        .head(1)
+        .zip_code_geom
+    )
+    result = repr(expr)
+    assert "POLYGON" in result
+
+
+def test_geom_from_pyarrow(con, monkeypatch):
+    shp = pytest.importorskip("shapely")
+
+    monkeypatch.setattr(ibis.options, "interactive", True)
+
+    data = pa.Table.from_pydict(
+        {
+            "id": [1, 2],
+            "location": [
+                shp.Point(1, 1).wkb,
+                shp.Point(2, 2).wkb,
+            ],
+        }
+    )
+
+    # Create table in BigQuery
+    name = gen_name("bq_test_geom")
+    schema = ibis.schema({"id": "int64", "location": "geospatial:geography;4326"})
+
+    t = con.create_table(name, data, schema=schema)
+
+    try:
+        assert repr(t)
+        assert len(t.to_pyarrow()) == 2
+        assert len(t.to_pandas()) == 2
+    finally:
+        con.drop_table(name)

@@ -10,6 +10,7 @@ import ibis.expr.operations as ops
 from ibis import util
 from ibis.expr.types.core import _binop
 from ibis.expr.types.generic import Column, Scalar, Value
+from ibis.util import deprecated
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -409,15 +410,6 @@ class StringValue(Value):
         """
         return ops.Capitalize(self).to_expr()
 
-    initcap = capitalize
-
-    @util.deprecated(
-        instead="use the `capitalize` method", as_of="9.0", removed_in="10.0"
-    )
-    def initcap(self) -> StringValue:
-        """Deprecated. Use `capitalize` instead."""
-        return self.capitalize()
-
     def __contains__(self, *_: Any) -> bool:
         raise TypeError("Use string_expr.contains(arg)")
 
@@ -456,7 +448,7 @@ class StringValue(Value):
         self,
         how: Literal["md5", "sha1", "sha256", "sha512"] = "sha256",
     ) -> ir.BinaryValue:
-        """Compute the binary hash value of the input.
+        r"""Compute the binary hash value of the input.
 
         Parameters
         ----------
@@ -467,6 +459,12 @@ class StringValue(Value):
         -------
         BinaryValue
             Binary expression
+
+        Examples
+        --------
+        >>> import ibis
+        >>> str_lit = ibis.literal("hello")
+        >>> result = str_lit.hashbytes("md5")  # b']A@*\xbcK*v\xb9q\x9d\x91\x10\x17\xc5\x92'
         """
         return ops.HashBytes(self, how).to_expr()
 
@@ -493,7 +491,7 @@ class StringValue(Value):
         >>> t = ibis.memtable({"species": ["Adelie", "Chinstrap", "Gentoo"]})
         >>> t.species.hexdigest()
         ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ HexDigest(species)                                           ┃
+        ┃ HexDigest(species)                                               ┃
         ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
         │ string                                                           │
         ├──────────────────────────────────────────────────────────────────┤
@@ -634,8 +632,6 @@ class StringValue(Value):
         └──────────────┘
         """
         return ops.Repeat(self, n).to_expr()
-
-    __mul__ = __rmul__ = repeat
 
     def translate(self, from_str: StringValue, to_str: StringValue) -> StringValue:
         """Replace `from_str` characters in `self` characters in `to_str`.
@@ -870,7 +866,7 @@ class StringValue(Value):
         return cls(strings, sep=self).to_expr()
 
     def startswith(self, start: str | StringValue) -> ir.BooleanValue:
-        """Determine whether `self` starts with `end`.
+        """Determine whether `self` starts with `start`.
 
         Parameters
         ----------
@@ -1023,9 +1019,9 @@ class StringValue(Value):
         why="Different backends support different regular expression syntax."
     )
     def re_search(self, pattern: str | StringValue) -> ir.BooleanValue:
-        """Return whether the values match `pattern`.
+        """Return whether `self` contains the regex `pattern`.
 
-        Returns `True` if the regex matches a string and `False` otherwise.
+        Returns `True` if the regex matches any part of a string and `False` otherwise.
 
         Parameters
         ----------
@@ -1041,7 +1037,7 @@ class StringValue(Value):
         --------
         >>> import ibis
         >>> ibis.options.interactive = True
-        >>> t = ibis.memtable({"s": ["Ibis project", "GitHub"]})
+        >>> t = ibis.memtable({"s": ["Ibis project", "GitHub", "GitHub Actions"]})
         >>> t.s.re_search(".+Hub")
         ┏━━━━━━━━━━━━━━━━━━━━━━━━━┓
         ┃ RegexSearch(s, '.+Hub') ┃
@@ -1049,6 +1045,7 @@ class StringValue(Value):
         │ boolean                 │
         ├─────────────────────────┤
         │ False                   │
+        │ True                    │
         │ True                    │
         └─────────────────────────┘
         """
@@ -1273,7 +1270,7 @@ class StringValue(Value):
         """
         return ops.StringReplace(self, pattern, replacement).to_expr()
 
-    def to_timestamp(self, format_str: str) -> ir.TimestampValue:
+    def as_timestamp(self, format_str: str) -> ir.TimestampValue:
         """Parse a string and return a timestamp.
 
         Parameters
@@ -1291,7 +1288,7 @@ class StringValue(Value):
         >>> import ibis
         >>> ibis.options.interactive = True
         >>> t = ibis.memtable({"ts": ["20170206"]})
-        >>> t.ts.to_timestamp("%Y%m%d")
+        >>> t.ts.as_timestamp("%Y%m%d")
         ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
         ┃ StringToTimestamp(ts, '%Y%m%d') ┃
         ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
@@ -1302,7 +1299,11 @@ class StringValue(Value):
         """
         return ops.StringToTimestamp(self, format_str).to_expr()
 
-    def to_date(self, format_str: str) -> ir.DateValue:
+    @deprecated(as_of="10.0", instead="use as_timestamp() instead")
+    def to_timestamp(self, format_str: str) -> ir.TimestampValue:
+        return self.as_timestamp(format_str=format_str)
+
+    def as_date(self, format_str: str) -> ir.DateValue:
         """Parse a string and return a date.
 
         Parameters
@@ -1320,7 +1321,7 @@ class StringValue(Value):
         >>> import ibis
         >>> ibis.options.interactive = True
         >>> t = ibis.memtable({"ts": ["20170206"]})
-        >>> t.ts.to_date("%Y%m%d")
+        >>> t.ts.as_date("%Y%m%d")
         ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
         ┃ StringToDate(ts, '%Y%m%d') ┃
         ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
@@ -1330,6 +1331,39 @@ class StringValue(Value):
         └────────────────────────────┘
         """
         return ops.StringToDate(self, format_str).to_expr()
+
+    @deprecated(as_of="10.0", instead="use as_date() instead")
+    def to_date(self, format_str: str) -> ir.DateValue:
+        return self.as_date(format_str=format_str)
+
+    def as_time(self, format_str: str) -> ir.TimeValue:
+        """Parse a string and return a time.
+
+        Parameters
+        ----------
+        format_str
+            Format string in `strptime` format
+
+        Returns
+        -------
+        TimeValue
+            Parsed time value
+
+        Examples
+        --------
+        >>> import ibis
+        >>> ibis.options.interactive = True
+        >>> t = ibis.memtable({"ts": ["20:01:02"]})
+        >>> t.ts.as_time("%H:%M:%S")
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ StringToTime(ts, '%H:%M:%S') ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ time                         │
+        ├──────────────────────────────┤
+        │ 20:01:02                     │
+        └──────────────────────────────┘
+        """
+        return ops.StringToTime(self, format_str).to_expr()
 
     def protocol(self):
         """Parse a URL and extract protocol.
@@ -1432,7 +1466,7 @@ class StringValue(Value):
         return ops.ExtractPath(self).to_expr()
 
     def query(self, key: str | StringValue | None = None):
-        """Parse a URL and returns query strring or query string parameter.
+        """Parse a URL and returns query string or query string parameter.
 
         If key is passed, return the value of the query string parameter named.
         If key is absent, return the query string.
@@ -1542,23 +1576,23 @@ class StringValue(Value):
         >>> ibis.options.interactive = True
         >>> t = ibis.memtable({"s": ["abc", None]})
         >>> t.s.concat("xyz", "123")
-        ┏━━━━━━━━━━━━━━━━┓
-        ┃ StringConcat() ┃
-        ┡━━━━━━━━━━━━━━━━┩
-        │ string         │
-        ├────────────────┤
-        │ abcxyz123      │
-        │ NULL           │
-        └────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ StringConcat((s, 'xyz', '123')) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ string                          │
+        ├─────────────────────────────────┤
+        │ abcxyz123                       │
+        │ NULL                            │
+        └─────────────────────────────────┘
         >>> t.s + "xyz"
-        ┏━━━━━━━━━━━━━━━━┓
-        ┃ StringConcat() ┃
-        ┡━━━━━━━━━━━━━━━━┩
-        │ string         │
-        ├────────────────┤
-        │ abcxyz         │
-        │ NULL           │
-        └────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ StringConcat((s, 'xyz')) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ string                   │
+        ├──────────────────────────┤
+        │ abcxyz                   │
+        │ NULL                     │
+        └──────────────────────────┘
         """
         return ops.StringConcat((self, other, *args)).to_expr()
 
@@ -1591,25 +1625,25 @@ class StringValue(Value):
         │ bca    │
         └────────┘
         >>> t.s + "z"
-        ┏━━━━━━━━━━━━━━━━┓
-        ┃ StringConcat() ┃
-        ┡━━━━━━━━━━━━━━━━┩
-        │ string         │
-        ├────────────────┤
-        │ abcz           │
-        │ bacz           │
-        │ bcaz           │
-        └────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ StringConcat((s, 'z')) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ string                 │
+        ├────────────────────────┤
+        │ abcz                   │
+        │ bacz                   │
+        │ bcaz                   │
+        └────────────────────────┘
         >>> t.s + t.s
-        ┏━━━━━━━━━━━━━━━━┓
-        ┃ StringConcat() ┃
-        ┡━━━━━━━━━━━━━━━━┩
-        │ string         │
-        ├────────────────┤
-        │ abcabc         │
-        │ bacbac         │
-        │ bcabca         │
-        └────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ StringConcat((s, s)) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━┩
+        │ string               │
+        ├──────────────────────┤
+        │ abcabc               │
+        │ bacbac               │
+        │ bcabca               │
+        └──────────────────────┘
         """
         return self.concat(other)
 
@@ -1642,15 +1676,15 @@ class StringValue(Value):
         │ bca    │
         └────────┘
         >>> "z" + t.s
-        ┏━━━━━━━━━━━━━━━━┓
-        ┃ StringConcat() ┃
-        ┡━━━━━━━━━━━━━━━━┩
-        │ string         │
-        ├────────────────┤
-        │ zabc           │
-        │ zbac           │
-        │ zbca           │
-        └────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ StringConcat(('z', s)) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ string                 │
+        ├────────────────────────┤
+        │ zabc                   │
+        │ zbac                   │
+        │ zbca                   │
+        └────────────────────────┘
         """
         return ops.StringConcat((other, self)).to_expr()
 

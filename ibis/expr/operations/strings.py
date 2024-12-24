@@ -9,7 +9,7 @@ from public import public
 import ibis.expr.datatypes as dt
 import ibis.expr.rules as rlz
 from ibis.common.annotations import attribute
-from ibis.common.typing import VarTuple  # noqa: TCH001
+from ibis.common.typing import VarTuple  # noqa: TC001
 from ibis.expr.operations.core import Unary, Value
 
 
@@ -66,7 +66,7 @@ class Substring(Value):
     length: Optional[Value[dt.Integer]] = None
 
     dtype = dt.string
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
 
 
 @public
@@ -78,7 +78,7 @@ class StringSlice(Value):
     end: Optional[Value[dt.Integer]] = None
 
     dtype = dt.string
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
 
 
 @public
@@ -88,7 +88,7 @@ class StrRight(Value):
     arg: Value[dt.String]
     nchars: Value[dt.Integer]
 
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
     dtype = dt.string
 
 
@@ -112,7 +112,7 @@ class StringFind(Value):
     start: Optional[Value[dt.Integer]] = None
     end: Optional[Value[dt.Integer]] = None
 
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
     dtype = dt.int64
 
 
@@ -124,7 +124,7 @@ class Translate(Value):
     from_str: Value[dt.String]
     to_str: Value[dt.String]
 
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
     dtype = dt.string
 
 
@@ -136,7 +136,7 @@ class LPad(Value):
     length: Value[dt.Integer]
     pad: Optional[Value[dt.String]] = None
 
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
     dtype = dt.string
 
 
@@ -148,7 +148,7 @@ class RPad(Value):
     length: Value[dt.Integer]
     pad: Optional[Value[dt.String]] = None
 
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
     dtype = dt.string
 
 
@@ -174,7 +174,7 @@ class StringJoin(Value):
 
     @attribute
     def shape(self):
-        return rlz.highest_precedence_shape(self.arg)
+        return rlz.highest_precedence_shape((self.sep, *self.arg))
 
 
 @public
@@ -196,7 +196,7 @@ class StartsWith(Value):
     start: Value[dt.String]
 
     dtype = dt.boolean
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
 
 
 @public
@@ -207,7 +207,7 @@ class EndsWith(Value):
     end: Value[dt.String]
 
     dtype = dt.boolean
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
 
 
 @public
@@ -216,7 +216,7 @@ class FuzzySearch(Value):
     pattern: Value[dt.String]
 
     dtype = dt.boolean
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
 
 
 @public
@@ -252,7 +252,7 @@ class RegexExtract(Value):
     pattern: Value[dt.String]
     index: Value[dt.Integer]
 
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
     dtype = dt.string
 
 
@@ -263,11 +263,8 @@ class RegexSplit(Value):
     arg: Value[dt.String]
     pattern: Value[dt.String]
 
+    shape = rlz.shape_like("args")
     dtype = dt.Array(dt.string)
-
-    @attribute
-    def shape(self):
-        return rlz.highest_precedence_shape((self.arg, self.pattern))
 
 
 @public
@@ -278,7 +275,7 @@ class RegexReplace(Value):
     pattern: Value[dt.String]
     replacement: Value[dt.String]
 
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
     dtype = dt.string
 
 
@@ -290,7 +287,7 @@ class StringReplace(Value):
     pattern: Value[dt.String]
     replacement: Value[dt.String]
 
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
     dtype = dt.string
 
 
@@ -301,7 +298,7 @@ class StringSplit(Value):
     arg: Value[dt.String]
     delimiter: Value[dt.String]
 
-    shape = rlz.shape_like("arg")
+    shape = rlz.shape_like("args")
     dtype = dt.Array(dt.string)
 
 
@@ -316,52 +313,44 @@ class StringConcat(Value):
 
 
 @public
-class ExtractURLField(Value):
-    arg: Value[dt.String]
-
-    shape = rlz.shape_like("arg")
-    dtype = dt.string
-
-
-@public
-class ExtractProtocol(ExtractURLField):
+class ExtractProtocol(StringUnary):
     """Extract the protocol from a URL."""
 
 
 @public
-class ExtractAuthority(ExtractURLField):
+class ExtractAuthority(StringUnary):
     """Extract the authority from a URL."""
 
 
 @public
-class ExtractUserInfo(ExtractURLField):
+class ExtractUserInfo(StringUnary):
     """Extract the user info from a URL."""
 
 
 @public
-class ExtractHost(ExtractURLField):
+class ExtractHost(StringUnary):
     """Extract the host from a URL."""
 
 
 @public
-class ExtractFile(ExtractURLField):
+class ExtractFile(StringUnary):
     """Extract the file from a URL."""
 
 
 @public
-class ExtractPath(ExtractURLField):
+class ExtractPath(StringUnary):
     """Extract the path from a URL."""
 
 
 @public
-class ExtractQuery(ExtractURLField):
+class ExtractQuery(StringUnary):
     """Extract the query from a URL."""
 
     key: Optional[Value[dt.String]] = None
 
 
 @public
-class ExtractFragment(ExtractURLField):
+class ExtractFragment(StringUnary):
     """Extract the fragment from a URL."""
 
 

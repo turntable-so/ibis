@@ -74,12 +74,24 @@ def test_con_source(source, expected):
         user=TRINO_USER,
         host=TRINO_HOST,
         port=TRINO_PORT,
-        password=TRINO_PASS,
+        auth=TRINO_PASS,
         database="hive",
         schema="default",
         source=source,
     )
     assert con.con.source == expected
+
+
+def test_deprecated_password_parameter():
+    with pytest.warns(FutureWarning, match="The `password` parameter is deprecated"):
+        ibis.trino.connect(
+            user=TRINO_USER,
+            host=TRINO_HOST,
+            port=TRINO_PORT,
+            password=TRINO_PASS,
+            database="hive",
+            schema="default",
+        )
 
 
 @pytest.mark.parametrize(
@@ -152,14 +164,14 @@ def test_table_access_database_schema(con):
     t = con.table("region", database=("tpch", "sf1"))
     assert t.count().execute()
 
-    with pytest.raises(exc.IbisError, match='Table not found: tpch."tpch.sf1".region'):
+    with pytest.raises(exc.TableNotFound, match=r".*region"):
         con.table("region", database=("tpch", "tpch.sf1"))
 
     with pytest.raises(exc.IbisError, match="Overspecified table hierarchy provided"):
         con.table("region", database="system.tpch.sf1")
 
 
-def test_list_tables_schema_warning_refactor(con):
+def test_list_tables(con):
     tpch_tables = [
         "customer",
         "lineitem",
@@ -172,14 +184,6 @@ def test_list_tables_schema_warning_refactor(con):
     ]
 
     assert con.list_tables()
-
-    # Error if user mixes tuple inputs and string inputs for database and schema
-    with pytest.raises(FutureWarning):
-        with pytest.raises(exc.IbisInputError):
-            con.list_tables(database=("tuple", "ohstuff"), schema="str")
-
-    with pytest.warns(FutureWarning):
-        assert con.list_tables(database="tpch", schema="sf1") == tpch_tables
 
     assert con.list_tables(database="tpch.sf1") == tpch_tables
     assert con.list_tables(database=("tpch", "sf1")) == tpch_tables

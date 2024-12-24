@@ -6,25 +6,25 @@ from pytest import mark, param
 
 import ibis.common.exceptions as com
 from ibis import _, udf
-from ibis.backends.tests.errors import Py4JJavaError
+from ibis.backends.tests.errors import Py4JJavaError, PySparkPythonException
+from ibis.conftest import IS_SPARK_REMOTE
 
 no_python_udfs = mark.notimpl(
     [
         "bigquery",
         "clickhouse",
-        "dask",
         "druid",
         "exasol",
         "impala",
         "mssql",
         "mysql",
         "oracle",
-        "pandas",
         "trino",
         "risingwave",
+        "databricks",
     ]
 )
-cloudpickle_version_mismatch = mark.broken(
+cloudpickle_version_mismatch = mark.notimpl(
     ["flink"],
     condition=sys.version_info >= (3, 11),
     raises=Py4JJavaError,
@@ -34,7 +34,6 @@ cloudpickle_version_mismatch = mark.broken(
 
 @no_python_udfs
 @cloudpickle_version_mismatch
-@mark.notimpl(["pyspark"])
 @mark.notyet(["datafusion"], raises=NotImplementedError)
 def test_udf(batting):
     @udf.scalar.python
@@ -59,7 +58,6 @@ def test_udf(batting):
 
 @no_python_udfs
 @cloudpickle_version_mismatch
-@mark.notimpl(["pyspark"])
 @mark.notyet(
     ["postgres"], raises=TypeError, reason="postgres only supports map<string, string>"
 )
@@ -89,7 +87,6 @@ def test_map_udf(batting):
 
 @no_python_udfs
 @cloudpickle_version_mismatch
-@mark.notimpl(["pyspark"])
 @mark.notyet(
     ["postgres"], raises=TypeError, reason="postgres only supports map<string, string>"
 )
@@ -156,6 +153,12 @@ def add_one_pyarrow(s: int) -> int:  # s is series, int is the element type
     raises=NotImplementedError,
     reason="postgres only supports Python-native UDFs",
 )
+@mark.notyet(
+    ["pyspark"],
+    condition=IS_SPARK_REMOTE,
+    raises=PySparkPythonException,
+    reason="remote udfs not yet tested due to environment complexities",
+)
 @mark.parametrize(
     "add_one",
     [
@@ -174,10 +177,11 @@ def add_one_pyarrow(s: int) -> int:  # s is series, int is the element type
             add_one_pyarrow,
             marks=[
                 mark.notyet(
-                    ["snowflake", "sqlite", "pyspark", "flink"],
+                    ["snowflake", "sqlite", "flink"],
                     raises=NotImplementedError,
                     reason="backend doesn't support pyarrow UDFs",
-                )
+                ),
+                mark.xfail_version(pyspark=["pyspark<3.5"]),
             ],
         ),
     ],

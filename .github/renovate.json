@@ -8,11 +8,10 @@
     "docker-compose",
     "dockerfile",
     "github-actions",
-    "poetry"
+    "pep621"
   ],
   "automerge": false,
   "labels": ["dependencies"],
-  "nix": { "enabled": true },
   "packageRules": [
     {
       "matchManagers": ["docker-compose", "dockerfile", "github-actions"],
@@ -26,12 +25,12 @@
       "allowedVersions": "/^13\\..+$/"
     },
     {
-      "matchPackagePrefixes": ["clickhouse"],
-      "addLabels": ["clickhouse"]
+      "matchPackagePatterns": ["spark"],
+      "addLabels": ["pyspark"]
     },
     {
-      "matchPackagePatterns": ["dask"],
-      "addLabels": ["dask"]
+      "matchPackagePatterns": ["clickhouse"],
+      "addLabels": ["clickhouse"]
     },
     {
       "matchPackagePatterns": ["datafusion"],
@@ -71,7 +70,7 @@
       "addLabels": ["druid"]
     },
     {
-      "matchPackagePatterns": ["pymysql", "mariadb"],
+      "matchPackagePatterns": ["mysqlclient", "mariadb"],
       "addLabels": ["mysql"]
     },
     {
@@ -81,6 +80,10 @@
     {
       "matchPackagePatterns": ["pyspark"],
       "addLabels": ["pyspark"]
+    },
+    {
+      "matchPackagePatterns": ["risingwave"],
+      "addLabels": ["risingwave"]
     },
     {
       "matchPackagePatterns": ["snowflake-connector-python"],

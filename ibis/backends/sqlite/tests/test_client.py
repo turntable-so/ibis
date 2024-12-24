@@ -71,8 +71,9 @@ def test_builtin_agg_udf(con):
 )
 def test_connect(url, ext, tmp_path):
     path = os.path.abspath(tmp_path / f"test.{ext}")
-    with sqlite3.connect(path):
-        pass
+
+    sqlite3.connect(path).close()
+
     con = ibis.connect(url(path))
     one = ibis.literal(1)
     assert con.execute(one) == 1
@@ -88,3 +89,10 @@ def test_has_operation(con):
     assert con.has_operation(ops.Sample)
     # Handled by visit_* method
     assert con.has_operation(ops.Cast)
+
+
+def test_list_temp_tables_by_default(con):
+    name = ibis.util.gen_name("sqlite_temp_table")
+    con.create_table(name, schema={"a": "int"}, temp=True)
+    assert name in con.list_tables(database="temp")
+    assert name in con.list_tables()

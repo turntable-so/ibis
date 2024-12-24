@@ -14,7 +14,6 @@ from pytest import param
 import ibis
 import ibis.expr.datatypes as dt
 import ibis.expr.types as ir
-from ibis import config
 from ibis import literal as L
 
 pytest.importorskip("psycopg2")
@@ -358,21 +357,14 @@ def test_coalesce(con, expr, expected):
 
 
 @pytest.mark.parametrize(
-    ("expr", "expected"),
+    "expr",
     [
-        param(ibis.coalesce(ibis.null(), ibis.null()), None, id="all_null"),
-        param(
-            ibis.coalesce(
-                ibis.null().cast("int8"),
-                ibis.null().cast("int8"),
-                ibis.null().cast("int8"),
-            ),
-            None,
-            id="all_nulls_with_all_cast",
-        ),
+        ibis.coalesce(*([ibis.null()] * 2)),
+        ibis.coalesce(*([ibis.null().cast("int8")] * 3)),
     ],
+    ids=["all", "all_with_cast"],
 )
-def test_coalesce_all_na(con, expr, expected):
+def test_coalesce_all_na(con, expr):
     assert con.execute(expr) is None
 
 
@@ -384,8 +376,7 @@ def test_coalesce_all_na_double(con):
 def test_numeric_builtins_work(alltypes, df):
     expr = alltypes.double_col.fill_null(0)
     result = expr.execute()
-    expected = df.double_col.fillna(0)
-    expected.name = "Coalesce()"
+    expected = df.double_col.fillna(0).rename(expr.get_name())
     tm.assert_series_equal(result, expected)
 
 
@@ -471,7 +462,7 @@ def test_category_label(alltypes, df):
     bins = [0, 10, 25, 50, 100]
     labels = ["a", "b", "c", "d"]
     bucket = d.bucket(bins)
-    expr = bucket.label(labels)
+    expr = bucket.cases(*enumerate(labels), else_=None)
     result = expr.execute()
 
     with warnings.catch_warnings():
@@ -499,68 +490,68 @@ def test_union_cte(alltypes, distinct, assert_sql):
     ("func", "pandas_func"),
     [
         param(
-            lambda t, cond: t.bool_col.count(),
-            lambda df, cond: df.bool_col.count(),
+            lambda t, _: t.bool_col.count(),
+            lambda df, _: df.bool_col.count(),
             id="count",
         ),
         param(
-            lambda t, cond: t.bool_col.any(),
-            lambda df, cond: df.bool_col.any(),
+            lambda t, _: t.bool_col.any(),
+            lambda df, _: df.bool_col.any(),
             id="any",
         ),
         param(
-            lambda t, cond: t.bool_col.all(),
-            lambda df, cond: df.bool_col.all(),
+            lambda t, _: t.bool_col.all(),
+            lambda df, _: df.bool_col.all(),
             id="all",
         ),
         param(
-            lambda t, cond: t.bool_col.notany(),
-            lambda df, cond: ~df.bool_col.any(),
+            lambda t, _: t.bool_col.notany(),
+            lambda df, _: ~df.bool_col.any(),
             id="notany",
         ),
         param(
-            lambda t, cond: t.bool_col.notall(),
-            lambda df, cond: ~df.bool_col.all(),
+            lambda t, _: t.bool_col.notall(),
+            lambda df, _: ~df.bool_col.all(),
             id="notall",
         ),
         param(
-            lambda t, cond: t.double_col.sum(),
-            lambda df, cond: df.double_col.sum(),
+            lambda t, _: t.double_col.sum(),
+            lambda df, _: df.double_col.sum(),
             id="sum",
         ),
         param(
-            lambda t, cond: t.double_col.mean(),
-            lambda df, cond: df.double_col.mean(),
+            lambda t, _: t.double_col.mean(),
+            lambda df, _: df.double_col.mean(),
             id="mean",
         ),
         param(
-            lambda t, cond: t.double_col.min(),
-            lambda df, cond: df.double_col.min(),
+            lambda t, _: t.double_col.min(),
+            lambda df, _: df.double_col.min(),
             id="min",
         ),
         param(
-            lambda t, cond: t.double_col.max(),
-            lambda df, cond: df.double_col.max(),
+            lambda t, _: t.double_col.max(),
+            lambda df, _: df.double_col.max(),
             id="max",
         ),
         param(
-            lambda t, cond: t.double_col.var(),
-            lambda df, cond: df.double_col.var(),
+            lambda t, _: t.double_col.var(),
+            lambda df, _: df.double_col.var(),
             id="var",
         ),
         param(
-            lambda t, cond: t.double_col.std(),
-            lambda df, cond: df.double_col.std(),
+            lambda t, _: t.double_col.std(),
+            lambda df, _: df.double_col.std(),
             id="std",
         ),
         param(
-            lambda t, cond: t.double_col.var(how="sample"),
-            lambda df, cond: df.double_col.var(ddof=1),
+            lambda t, _: t.double_col.var(how="sample"),
+            lambda df, _: df.double_col.var(ddof=1),
             id="samp_var",
         ),
         param(
-            lambda t, cond: t.double_col.std(how="pop"),
-            lambda df, cond: df.double_col.std(ddof=0),
+            lambda t, _: t.double_col.std(how="pop"),
+            lambda df, _: df.double_col.std(ddof=0),
             id="pop_std",
         ),
         param(
@@ -648,7 +639,7 @@ def test_not_exists(alltypes, df):
     t = alltypes
     t2 = t.view()
 
-    expr = t[~((t.string_col == t2.string_col).any())]
+    expr = t.filter(~((t.string_col == t2.string_col).any()))
     result = expr.execute()
 
     left, right = df, t2.execute()
@@ -657,11 +648,12 @@ def test_not_exists(alltypes, df):
     tm.assert_frame_equal(result, expected, check_index_type=False, check_dtype=False)
 
 
-def test_interactive_repr_shows_error(alltypes):
+def test_interactive_repr_shows_error(alltypes, monkeypatch):
     expr = alltypes.int_col.convert_base(10, 2)
 
-    with config.option_context("interactive", True):
-        result = repr(expr)
+    monkeypatch.setattr(ibis.options, "interactive", True)
+
+    result = repr(expr)
 
     assert "OperationNotDefinedError" in result
     assert "BaseConvert" in result
@@ -856,7 +848,7 @@ def test_window_with_arithmetic(alltypes, df):
 
 def test_anonymous_aggregate(alltypes, df):
     t = alltypes
-    expr = t[t.double_col > t.double_col.mean()]
+    expr = t.filter(t.double_col > t.double_col.mean())
     result = expr.execute()
     expected = df[df.double_col > df.double_col.mean()].reset_index(drop=True)
     tm.assert_frame_equal(result, expected)
@@ -909,7 +901,7 @@ def test_array_collect(array_types):
 
 @pytest.mark.parametrize("index", [0, 1, 3, 4, 11, -1, -3, -4, -11])
 def test_array_index(array_types, index):
-    expr = array_types[array_types.y[index].name("indexed")]
+    expr = array_types.select(array_types.y[index].name("indexed"))
     result = expr.execute()
     expected = pd.DataFrame(
         {
@@ -958,31 +950,6 @@ def test_array_concat(array_types, catop):
 def test_array_concat_mixed_types(array_types):
     with pytest.raises(TypeError):
         array_types.y + array_types.x.cast("array<double>")
-
-
-@pytest.fixture
-def t(con, temp_table):
-    with con.begin() as c:
-        c.execute(f"CREATE TABLE {temp_table} (id SERIAL PRIMARY KEY, name TEXT)")
-    return con.table(temp_table)
-
-
-@pytest.fixture
-def s(con, t, temp_table2):
-    temp_table = t.op().name
-    assert temp_table != temp_table2
-
-    with con.begin() as c:
-        c.execute(
-            f"""
-            CREATE TABLE {temp_table2} (
-              id SERIAL PRIMARY KEY,
-              left_t_id INTEGER REFERENCES {temp_table},
-              cost DOUBLE PRECISION
-            )
-            """
-        )
-    return con.table(temp_table2)
 
 
 @pytest.fixture
@@ -1037,13 +1004,11 @@ def test_analytic_functions(alltypes, assert_sql):
     assert_sql(expr)
 
 
-@pytest.mark.parametrize("opname", ["invert", "neg"])
-def test_not_and_negate_bool(con, opname, df):
-    op = getattr(operator, opname)
+def test_invert_bool(con, df):
     t = con.table("functional_alltypes").limit(10)
-    expr = t.select(op(t.bool_col).name("bool_col"))
+    expr = t.select((~t.bool_col).name("bool_col"))
     result = expr.execute().bool_col
-    expected = op(df.head(10).bool_col)
+    expected = ~df.head(10).bool_col
     tm.assert_series_equal(result, expected)
 
 
@@ -1065,14 +1030,6 @@ def test_negate_non_boolean(con, field, df):
     expr = t.select((-t[field]).name(field))
     result = expr.execute()[field]
     expected = -df.head(10)[field]
-    tm.assert_series_equal(result, expected)
-
-
-def test_negate_boolean(con, df):
-    t = con.table("functional_alltypes").limit(10)
-    expr = t.select((-t.bool_col).name("bool_col"))
-    result = expr.execute().bool_col
-    expected = -df.head(10).bool_col
     tm.assert_series_equal(result, expected)
 
 

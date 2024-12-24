@@ -8,8 +8,8 @@ import glob
 import os
 import re
 from typing import TYPE_CHECKING, Any, Optional
-from urllib.parse import parse_qs, urlparse
 
+import google.api_core.exceptions
 import google.auth.credentials
 import google.cloud.bigquery as bq
 import google.cloud.bigquery_storage_v1 as bqstorage
@@ -19,32 +19,30 @@ import sqlglot.expressions as sge
 from pydata_google_auth import cache
 
 import ibis
+import ibis.backends.sql.compilers as sc
 import ibis.common.exceptions as com
 import ibis.expr.operations as ops
 import ibis.expr.schema as sch
 import ibis.expr.types as ir
 from ibis import util
-from ibis.backends import CanCreateDatabase, CanCreateSchema
+from ibis.backends import CanCreateDatabase
 from ibis.backends.bigquery.client import (
     bigquery_param,
     parse_project_and_dataset,
     rename_partitioned_column,
     schema_from_bigquery_table,
 )
-from ibis.backends.bigquery.compiler import BigQueryCompiler
 from ibis.backends.bigquery.datatypes import BigQuerySchema
-from ibis.backends.bigquery.udf.core import PythonToJavaScriptTranslator
 from ibis.backends.sql import SQLBackend
-from ibis.backends.sql.datatypes import BigQueryType
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Iterable, Mapping
+    from collections.abc import Iterable, Mapping
     from pathlib import Path
+    from urllib.parse import ParseResult
 
     import pandas as pd
     import polars as pl
     import pyarrow as pa
-    from google.cloud.bigquery.table import RowIterator
 
 
 SCOPES = ["https://www.googleapis.com/auth/bigquery"]
@@ -54,7 +52,7 @@ EXTERNAL_DATA_SCOPES = [
     "https://www.googleapis.com/auth/drive",
 ]
 CLIENT_ID = "546535678771-gvffde27nd83kfl6qbrnletqvkdmsese.apps.googleusercontent.com"
-CLIENT_SECRET = "iU5ohAF2qcqrujegE3hQ1cPt"
+CLIENT_SECRET = "iU5ohAF2qcqrujegE3hQ1cPt"  # noqa: S105
 
 
 def _create_user_agent(application_name: str) -> str:
@@ -148,19 +146,23 @@ def _force_quote_table(table: sge.Table) -> sge.Table:
     return table
 
 
-class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
+def _postprocess_arrow(
+    table_or_batch: pa.Table | pa.RecordBatch, names: list[str]
+) -> pa.Table | pa.RecordBatch:
+    """Drop `_TABLE_SUFFIX` if present in the results, then rename columns."""
+    if "_TABLE_SUFFIX" in table_or_batch.column_names:
+        table_or_batch = table_or_batch.drop_columns(["_TABLE_SUFFIX"])
+    return table_or_batch.rename_columns(names)
+
+
+class Backend(SQLBackend, CanCreateDatabase):
     name = "bigquery"
-    compiler = BigQueryCompiler()
-    supports_in_memory_tables = True
+    compiler = sc.bigquery.compiler
     supports_python_udfs = False
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.__session_dataset: bq.DatasetReference | None = None
-        self._query_cache.lookup = lambda name: self.table(
-            name,
-            database=(self._session_dataset.project, self._session_dataset.dataset_id),
-        ).op()
 
     @property
     def _session_dataset(self):
@@ -168,28 +170,25 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
             self.__session_dataset = self._make_session()
         return self.__session_dataset
 
+    def _finalize_memtable(self, name: str) -> None:
+        table_ref = bq.TableReference(self._session_dataset, name)
+        self.client.delete_table(table_ref, not_found_ok=True)
+
     def _register_in_memory_table(self, op: ops.InMemoryTable) -> None:
-        raw_name = op.name
+        table_ref = bq.TableReference(self._session_dataset, op.name)
 
-        project = self._session_dataset.project
-        dataset = self._session_dataset.dataset_id
+        bq_schema = BigQuerySchema.from_ibis(op.schema)
 
-        if raw_name not in self.list_tables(database=(project, dataset)):
-            table_id = sg.table(
-                raw_name, db=dataset, catalog=project, quoted=False
-            ).sql(dialect=self.name)
-
-            bq_schema = BigQuerySchema.from_ibis(op.schema)
-            load_job = self.client.load_table_from_dataframe(
-                op.data.to_frame(),
-                table_id,
-                job_config=bq.LoadJobConfig(
-                    # fail if the table already exists and contains data
-                    write_disposition=bq.WriteDisposition.WRITE_EMPTY,
-                    schema=bq_schema,
-                ),
-            )
-            load_job.result()
+        load_job = self.client.load_table_from_dataframe(
+            op.data.to_frame(),
+            table_ref,
+            job_config=bq.LoadJobConfig(
+                # fail if the table already exists and contains data
+                write_disposition=bq.WriteDisposition.WRITE_EMPTY,
+                schema=bq_schema,
+            ),
+        )
+        load_job.result()
 
     def _read_file(
         self,
@@ -329,12 +328,10 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         )
         return self._read_file(path, table_name=table_name, job_config=job_config)
 
-    def _from_url(self, url: str, **kwargs):
-        result = urlparse(url)
-        params = parse_qs(result.query)
+    def _from_url(self, url: ParseResult, **kwargs):
         return self.connect(
-            project_id=result.netloc or params.get("project_id", [""])[0],
-            dataset_id=result.path[1:] or params.get("dataset_id", [""])[0],
+            project_id=url.netloc or kwargs.get("project_id", [""])[0],
+            dataset_id=url.path[1:] or kwargs.get("dataset_id", [""])[0],
             **kwargs,
         )
 
@@ -380,27 +377,27 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         auth_cache
             Selects the behavior of the credentials cache.
 
-            ``'default'``
+            `'default'``
                 Reads credentials from disk if available, otherwise
                 authenticates and caches credentials to disk.
 
-            ``'reauth'``
+            `'reauth'``
                 Authenticates and caches credentials to disk.
 
-            ``'none'``
+            `'none'``
                 Authenticates and does **not** cache credentials.
 
-            Defaults to ``'default'``.
+            Defaults to `'default'`.
         partition_column
-            Identifier to use instead of default ``_PARTITIONTIME`` partition
-            column. Defaults to ``'PARTITIONTIME'``.
+            Identifier to use instead of default `_PARTITIONTIME` partition
+            column. Defaults to `'PARTITIONTIME'`.
         client
-            A ``Client`` from the ``google.cloud.bigquery`` package. If not
-            set, one is created using the ``project_id`` and ``credentials``.
+            A `Client` from the `google.cloud.bigquery` package. If not
+            set, one is created using the `project_id` and `credentials`.
         storage_client
-            A ``BigQueryReadClient`` from the
-            ``google.cloud.bigquery_storage_v1`` package. If not set, one is
-            created using the ``project_id`` and ``credentials``.
+            A `BigQueryReadClient` from the
+            `google.cloud.bigquery_storage_v1` package. If not set, one is
+            created using the `project_id` and `credentials`.
         location
             Default location for BigQuery objects.
 
@@ -477,11 +474,46 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
 
         self.partition_column = partition_column
 
+    @util.experimental
+    @classmethod
+    def from_connection(
+        cls,
+        client: bq.Client,
+        partition_column: str | None = "PARTITIONTIME",
+        storage_client: bqstorage.BigQueryReadClient | None = None,
+        dataset_id: str = "",
+    ) -> Backend:
+        """Create a BigQuery `Backend` from an existing `Client`.
+
+        Parameters
+        ----------
+        client
+            A `Client` from the `google.cloud.bigquery` package.
+        partition_column
+            Identifier to use instead of default `_PARTITIONTIME` partition
+            column. Defaults to `'PARTITIONTIME'`.
+        storage_client
+            A `BigQueryReadClient` from the `google.cloud.bigquery_storage_v1`
+            package.
+        dataset_id
+            A dataset id that lives inside of the project attached to `client`.
+        """
+        return ibis.bigquery.connect(
+            client=client,
+            partition_column=partition_column,
+            storage_client=storage_client,
+            dataset_id=dataset_id,
+        )
+
     def disconnect(self) -> None:
         self.client.close()
 
     def _parse_project_and_dataset(self, dataset) -> tuple[str, str]:
         if isinstance(dataset, sge.Table):
+            if (sg_cat := dataset.args["catalog"]) is not None:
+                sg_cat.args["quoted"] = False
+            if (sg_db := dataset.args["db"]) is not None:
+                sg_db.args["quoted"] = False
             dataset = dataset.sql(self.dialect)
         if not dataset and not self.dataset:
             raise ValueError("Unable to determine BigQuery dataset.")
@@ -544,21 +576,22 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         self.raw_sql(stmt.sql(self.name))
 
     def table(
-        self, name: str, database: str | None = None, schema: str | None = None
+        self,
+        name: str,
+        database: str | None = None,
     ) -> ir.Table:
-        table_loc = self._warn_and_create_table_loc(database, schema)
+        table_loc = self._to_sqlglot_table(database)
+        table = sg.parse_one(f"`{name}`", into=sge.Table, read=self.name)
 
-        table = sg.parse_one(name, into=sge.Table, read=self.name)
-
-        # Bigquery, unlike other bcakends, had existing support for specifying
+        # Bigquery, unlike other backends, had existing support for specifying
         # table hierarchy in the table name, e.g. con.table("dataset.table_name")
         # so here we have an extra layer of disambiguation to handle.
 
         # Default `catalog` to None unless we've parsed it out of the database/schema kwargs
         # Raise if there are path specifications in both the name and as a kwarg
-        catalog = None if table_loc is None else table_loc.catalog
+        catalog = table_loc.args["catalog"]  # args access will return None, not ''
         if table.catalog:
-            if table_loc is not None and table_loc.catalog:
+            if table_loc.catalog:
                 raise com.IbisInputError(
                     "Cannot specify catalog both in the table name and as an argument"
                 )
@@ -566,39 +599,40 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
                 catalog = table.catalog
 
         # Default `db` to None unless we've parsed it out of the database/schema kwargs
-        db = None if table_loc is None else table_loc.db
+        db = table_loc.args["db"]  # args access will return None, not ''
         if table.db:
-            if table_loc is not None and table_loc.db:
+            if table_loc.db:
                 raise com.IbisInputError(
                     "Cannot specify database both in the table name and as an argument"
                 )
             else:
                 db = table.db
 
-        database = (
-            sg.table(None, db=db, catalog=catalog, quoted=False).sql(dialect=self.name)
-            or None
-        )
+        database = sg.table(None, db=db, catalog=catalog, quoted=False) or None
 
         project, dataset = self._parse_project_and_dataset(database)
 
-        table = sg.parse_one(name, into=sge.Table, read=self.name)
-
-        bq_table = self.client.get_table(
-            bq.TableReference(
-                bq.DatasetReference(project=project, dataset_id=dataset),
-                table.name,
-            )
+        table_ref = bq.TableReference(
+            bq.DatasetReference(project=project, dataset_id=dataset),
+            table.name,
         )
+        bq_table = self._get_table(table_ref)
 
         node = ops.DatabaseTable(
             table.name,
-            schema=schema_from_bigquery_table(bq_table),
+            # https://cloud.google.com/bigquery/docs/querying-wildcard-tables#filtering_selected_tables_using_table_suffix
+            schema=schema_from_bigquery_table(bq_table, wildcard=table.name[-1] == "*"),
             source=self,
             namespace=ops.Namespace(database=dataset, catalog=project),
         )
         table_expr = node.to_expr()
         return rename_partitioned_column(table_expr, bq_table, self.partition_column)
+
+    def _get_table(self, table_ref: bq.TableReference):
+        try:
+            return self.client.get_table(table_ref)
+        except google.api_core.exceptions.NotFound as e:
+            raise com.TableNotFound(str(table_ref)) from e
 
     def _make_session(self) -> tuple[str, str]:
         if (client := getattr(self, "client", None)) is not None:
@@ -622,53 +656,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         )
         return BigQuerySchema.to_ibis(job.schema)
 
-    def _execute(self, stmt, query_parameters=None):
-        job_config = bq.job.QueryJobConfig(query_parameters=query_parameters or [])
-        query = self.client.query(
-            stmt, job_config=job_config, project=self.billing_project
-        )
-        query.result()  # blocks until finished
-        return query
-
-    def _to_sqlglot(
-        self,
-        expr: ir.Expr,
-        limit: str | None = None,
-        params: Mapping[ir.Expr, Any] | None = None,
-        **kwargs,
-    ) -> Any:
-        """Compile an Ibis expression.
-
-        Parameters
-        ----------
-        expr
-            Ibis expression
-        limit
-            For expressions yielding result sets; retrieve at most this number
-            of values/rows. Overrides any limit already set on the expression.
-        params
-            Named unbound parameters
-        kwargs
-            Keyword arguments passed to the compiler
-
-        Returns
-        -------
-        Any
-            The output of compilation. The type of this value depends on the
-            backend.
-
-        """
-        self._define_udf_translation_rules(expr)
-        sql = super()._to_sqlglot(expr, limit=limit, params=params, **kwargs)
-
-        query = sql.transform(
-            _qualify_memtable,
-            dataset=getattr(self._session_dataset, "dataset_id", None),
-            project=getattr(self._session_dataset, "project", None),
-        ).transform(_remove_null_ordering_from_unsupported_window)
-        return query
-
-    def raw_sql(self, query: str, params=None):
+    def raw_sql(self, query: str, params=None, page_size: int | None = None):
         query_parameters = [
             bigquery_param(
                 param.type(),
@@ -683,7 +671,14 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         ]
         with contextlib.suppress(AttributeError):
             query = query.sql(self.dialect)
-        return self._execute(query, query_parameters=query_parameters)
+
+        job_config = bq.job.QueryJobConfig(query_parameters=query_parameters or [])
+        return self.client.query_and_wait(
+            query,
+            job_config=job_config,
+            project=self.billing_project,
+            page_size=page_size,
+        )
 
     @property
     def current_catalog(self) -> str:
@@ -694,21 +689,123 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         return self.dataset
 
     def compile(
-        self, expr: ir.Expr, limit: str | None = None, params=None, **kwargs: Any
+        self,
+        expr: ir.Expr,
+        limit: str | None = None,
+        params=None,
+        pretty: bool = True,
+        **kwargs: Any,
     ):
         """Compile an Ibis expression to a SQL string."""
-        query = self._to_sqlglot(expr, limit=limit, params=params, **kwargs)
-        udf_sources = []
-        for udf_node in expr.op().find(ops.ScalarUDF):
-            compile_func = getattr(
-                self, f"_compile_{udf_node.__input_type__.name.lower()}_udf"
-            )
-            if sql := compile_func(udf_node):
-                udf_sources.append(sql.sql(self.name, pretty=True))
-
-        sql = ";\n".join([*udf_sources, query.sql(dialect=self.name, pretty=True)])
+        session_dataset = self._session_dataset
+        session_dataset_id = getattr(session_dataset, "dataset_id", None)
+        session_project = getattr(session_dataset, "project", None)
+        query = self.compiler.to_sqlglot(
+            expr,
+            limit=limit,
+            params=params,
+            session_dataset_id=session_dataset_id,
+            session_project=session_project,
+            **kwargs,
+        )
+        queries = query if isinstance(query, list) else [query]
+        sql = ";\n".join(query.sql(self.dialect, pretty=pretty) for query in queries)
         self._log(sql)
         return sql
+
+    def insert(
+        self,
+        table_name: str,
+        obj: pd.DataFrame | ir.Table | list | dict,
+        database: str | None = None,
+        overwrite: bool = False,
+    ):
+        """Insert data into a table.
+
+        Parameters
+        ----------
+        table_name
+            The name of the table to which data needs will be inserted
+        obj
+            The source data or expression to insert
+        database
+            Name of the attached database that the table is located in.
+        overwrite
+            If `True` then replace existing contents of table
+
+        """
+        table_loc = self._to_sqlglot_table(database)
+        catalog, db = self._to_catalog_db_tuple(table_loc)
+        if catalog is None:
+            catalog = self.current_catalog
+        if db is None:
+            db = self.current_database
+
+        return super().insert(
+            table_name,
+            obj,
+            database=(catalog, db),
+            overwrite=overwrite,
+        )
+
+    def _to_query(
+        self,
+        table_expr: ir.Table,
+        *,
+        params: Mapping[ir.Scalar, Any] | None = None,
+        limit: int | str | None = None,
+        page_size: int | None = None,
+        **kwargs: Any,
+    ):
+        self._run_pre_execute_hooks(table_expr)
+        sql = self.compile(table_expr, limit=limit, params=params, **kwargs)
+        self._log(sql)
+
+        return self.raw_sql(sql, params=params, page_size=page_size)
+
+    def to_pyarrow(
+        self,
+        expr: ir.Expr,
+        *,
+        params: Mapping[ir.Scalar, Any] | None = None,
+        limit: int | str | None = None,
+        **kwargs: Any,
+    ) -> pa.Table:
+        self._import_pyarrow()
+
+        table_expr = expr.as_table()
+        schema = table_expr.schema() - ibis.schema({"_TABLE_SUFFIX": "string"})
+
+        query = self._to_query(table_expr, params=params, limit=limit, **kwargs)
+        table = query.to_arrow(
+            progress_bar_type=None, bqstorage_client=self.storage_client
+        )
+        table = _postprocess_arrow(table, list(schema.names))
+        return expr.__pyarrow_result__(table, schema=schema)
+
+    def to_pyarrow_batches(
+        self,
+        expr: ir.Expr,
+        *,
+        params: Mapping[ir.Scalar, Any] | None = None,
+        limit: int | str | None = None,
+        chunk_size: int = 1_000_000,
+        **kwargs: Any,
+    ):
+        pa = self._import_pyarrow()
+
+        table_expr = expr.as_table()
+        schema = table_expr.schema() - ibis.schema({"_TABLE_SUFFIX": "string"})
+        colnames = list(schema.names)
+
+        query = self._to_query(
+            table_expr, params=params, limit=limit, page_size=chunk_size, **kwargs
+        )
+        batch_iter = query.to_arrow_iterable(bqstorage_client=self.storage_client)
+        return pa.ipc.RecordBatchReader.from_batches(
+            schema.to_pyarrow(),
+            (_postprocess_arrow(b, colnames) for b in batch_iter),
+        )
 
     def execute(self, expr, params=None, limit="default", **kwargs):
         """Compile and execute the given Ibis expression.
@@ -734,127 +831,18 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
             Output from execution
 
         """
-        self._run_pre_execute_hooks(expr)
-
-        sql = self.compile(expr, limit=limit, params=params, **kwargs)
-        self._log(sql)
-        query = self.raw_sql(sql, params=params, **kwargs)
-
-        result = self.fetch_from_query(query, expr.as_table().schema())
-
-        return expr.__pandas_result__(result)
-
-    def insert(
-        self,
-        table_name: str,
-        obj: pd.DataFrame | ir.Table | list | dict,
-        schema: str | None = None,
-        database: str | None = None,
-        overwrite: bool = False,
-    ):
-        """Insert data into a table.
-
-        Parameters
-        ----------
-        table_name
-            The name of the table to which data needs will be inserted
-        obj
-            The source data or expression to insert
-        schema
-            The name of the schema that the table is located in
-        database
-            Name of the attached database that the table is located in.
-        overwrite
-            If `True` then replace existing contents of table
-
-        """
-        table_loc = self._warn_and_create_table_loc(database, schema)
-        catalog, db = self._to_catalog_db_tuple(table_loc)
-        if catalog is None:
-            catalog = self.current_catalog
-        if db is None:
-            db = self.current_database
-
-        return super().insert(
-            table_name,
-            obj,
-            database=(catalog, db),
-            overwrite=overwrite,
-        )
-
-    def fetch_from_query(self, query, schema):
         from ibis.backends.bigquery.converter import BigQueryPandasData
 
-        arrow_t = self._query_to_arrow(query)
-        df = arrow_t.to_pandas(timestamp_as_object=True)
-        return BigQueryPandasData.convert_table(df, schema)
-
-    def _query_to_arrow(
-        self,
-        query,
-        *,
-        method: (
-            Callable[[RowIterator], pa.Table | Iterable[pa.RecordBatch]] | None
-        ) = None,
-        chunk_size: int | None = None,
-    ):
-        if method is None:
-            method = lambda result: result.to_arrow(
-                progress_bar_type=None,
-                bqstorage_client=self.storage_client,
-            )
-        query_result = query.result(page_size=chunk_size)
-        # workaround potentially not having the ability to create read sessions
-        # in the dataset project
-        orig_project = query_result._project
-        query_result._project = self.billing_project
-        try:
-            arrow_obj = method(query_result)
-        finally:
-            query_result._project = orig_project
-        return arrow_obj
-
-    def to_pyarrow(
-        self,
-        expr: ir.Expr,
-        *,
-        params: Mapping[ir.Scalar, Any] | None = None,
-        limit: int | str | None = None,
-        **kwargs: Any,
-    ) -> pa.Table:
-        self._import_pyarrow()
-        self._register_in_memory_tables(expr)
-        sql = self.compile(expr, limit=limit, params=params, **kwargs)
-        self._log(sql)
-        query = self.raw_sql(sql, params=params, **kwargs)
-        table = self._query_to_arrow(query)
-        return expr.__pyarrow_result__(table)
-
-    def to_pyarrow_batches(
-        self,
-        expr: ir.Expr,
-        *,
-        params: Mapping[ir.Scalar, Any] | None = None,
-        limit: int | str | None = None,
-        chunk_size: int = 1_000_000,
-        **kwargs: Any,
-    ):
-        pa = self._import_pyarrow()
-
-        schema = expr.as_table().schema()
-
-        self._register_in_memory_tables(expr)
-        sql = self.compile(expr, limit=limit, params=params, **kwargs)
-        self._log(sql)
-        query = self.raw_sql(sql, params=params, **kwargs)
-        batch_iter = self._query_to_arrow(
-            query,
-            method=lambda result: result.to_arrow_iterable(
-                bqstorage_client=self.storage_client
-            ),
-            chunk_size=chunk_size,
-        )
-        return pa.ipc.RecordBatchReader.from_batches(schema.to_pyarrow(), batch_iter)
+        table_expr = expr.as_table()
+        schema = table_expr.schema() - ibis.schema({"_TABLE_SUFFIX": "string"})
+        query = self._to_query(table_expr, params=params, limit=limit, **kwargs)
+        df = query.to_arrow(
+            progress_bar_type=None, bqstorage_client=self.storage_client
+        ).to_pandas(timestamp_as_object=True)
+        # Drop _TABLE_SUFFIX if present in the results, then rename columns
+        df = df.drop(columns="_TABLE_SUFFIX", errors="ignore")
+        df.columns = schema.names
+        return expr.__pandas_result__(df, schema=schema, data_mapper=BigQueryPandasData)
 
     def _gen_udf_name(self, name: str, schema: Optional[str]) -> str:
         func = ".".join(filter(None, (schema, name)))
@@ -876,7 +864,14 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
             ),
             name,
         )
-        return schema_from_bigquery_table(self.client.get_table(table_ref))
+
+        table = self._get_table(table_ref)
+
+        return schema_from_bigquery_table(
+            table,
+            # https://cloud.google.com/bigquery/docs/querying-wildcard-tables#filtering_selected_tables_using_table_suffix
+            wildcard=name[-1] == "*",
+        )
 
     def list_databases(
         self, like: str | None = None, catalog: str | None = None
@@ -893,9 +888,19 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         self,
         like: str | None = None,
         database: tuple[str, str] | str | None = None,
-        schema: str | None = None,
     ) -> list[str]:
         """List the tables in the database.
+
+        ::: {.callout-note}
+        ## Ibis does not use the word `schema` to refer to database hierarchy.
+
+        A collection of tables is referred to as a `database`.
+        A collection of `database` is referred to as a `catalog`.
+
+        These terms are mapped onto the corresponding features in each
+        backend (where available), regardless of whether the backend itself
+        uses the same terminology.
+        :::
 
         Parameters
         ----------
@@ -909,22 +914,9 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
 
             To specify a table in a separate BigQuery dataset, you can pass in the
             dataset and project as a string `"dataset.project"`, or as a tuple of
-            strings `("dataset", "project")`.
-
-            ::: {.callout-note}
-            ## Ibis does not use the word `schema` to refer to database hierarchy.
-
-            A collection of tables is referred to as a `database`.
-            A collection of `database` is referred to as a `catalog`.
-
-            These terms are mapped onto the corresponding features in each
-            backend (where available), regardless of whether the backend itself
-            uses the same terminology.
-            :::
-        schema
-            [deprecated] The schema (dataset) inside `database` to perform the list against.
+            strings `(dataset, project)`.
         """
-        table_loc = self._warn_and_create_table_loc(database, schema)
+        table_loc = self._to_sqlglot_table(database)
 
         project, dataset = self._parse_project_and_dataset(table_loc)
         dataset_ref = bq.DatasetReference(project, dataset)
@@ -948,7 +940,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         | pl.LazyFrame
         | None = None,
         *,
-        schema: ibis.Schema | None = None,
+        schema: sch.SchemaLike | None = None,
         database: str | None = None,
         temp: bool = False,
         overwrite: bool = False,
@@ -997,6 +989,8 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         """
         if obj is None and schema is None:
             raise com.IbisError("One of the `schema` or `obj` parameter is required")
+        if schema is not None:
+            schema = ibis.schema(schema)
 
         if isinstance(obj, ir.Table) and schema is not None:
             if not schema.equals(obj.schema()):
@@ -1037,7 +1031,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
             obj = ibis.memtable(obj, schema=schema)
 
         if obj is not None:
-            self._register_in_memory_tables(obj)
+            self._run_pre_execute_hooks(obj)
 
         if temp:
             dataset = self._session_dataset.dataset_id
@@ -1065,22 +1059,12 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
 
         table = _force_quote_table(table)
 
-        column_defs = [
-            sge.ColumnDef(
-                this=sg.to_identifier(name, quoted=self.compiler.quoted),
-                kind=BigQueryType.from_ibis(typ),
-                constraints=(
-                    None
-                    if typ.nullable or typ.is_array()
-                    else [sge.ColumnConstraint(kind=sge.NotNullColumnConstraint())]
-                ),
-            )
-            for name, typ in (schema or {}).items()
-        ]
-
         stmt = sge.Create(
             kind="TABLE",
-            this=sge.Schema(this=table, expressions=column_defs or None),
+            this=sge.Schema(
+                this=table,
+                expressions=schema.to_sqlglot(self.dialect) if schema else None,
+            ),
             replace=overwrite,
             properties=sge.Properties(expressions=properties),
             expression=None if obj is None else self.compile(obj),
@@ -1095,11 +1079,10 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         self,
         name: str,
         *,
-        schema: str | None = None,
         database: tuple[str | str] | str | None = None,
         force: bool = False,
     ) -> None:
-        table_loc = self._warn_and_create_table_loc(database, schema)
+        table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
         stmt = sge.Drop(
             kind="TABLE",
@@ -1117,11 +1100,10 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         name: str,
         obj: ir.Table,
         *,
-        schema: str | None = None,
         database: str | None = None,
         overwrite: bool = False,
     ) -> ir.Table:
-        table_loc = self._warn_and_create_table_loc(database, schema)
+        table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
         stmt = sge.Create(
@@ -1134,7 +1116,7 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
             expression=self.compile(obj),
             replace=overwrite,
         )
-        self._register_in_memory_tables(obj)
+        self._run_pre_execute_hooks(obj)
         self.raw_sql(stmt.sql(self.name))
         return self.table(name, database=(catalog, database))
 
@@ -1142,11 +1124,10 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         self,
         name: str,
         *,
-        schema: str | None = None,
         database: str | None = None,
         force: bool = False,
     ) -> None:
-        table_loc = self._warn_and_create_table_loc(database, schema)
+        table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
         stmt = sge.Drop(
@@ -1160,76 +1141,12 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
         )
         self.raw_sql(stmt.sql(self.name))
 
-    def _load_into_cache(self, name, expr):
-        self.create_table(name, expr, schema=expr.schema(), temp=True)
-
-    def _clean_up_cached_table(self, op):
+    def _drop_cached_table(self, name):
         self.drop_table(
-            op.name,
+            name,
             database=(self._session_dataset.project, self._session_dataset.dataset_id),
+            force=True,
         )
-
-    def _get_udf_source(self, udf_node: ops.ScalarUDF):
-        name = type(udf_node).__name__
-        type_mapper = self.compiler.udf_type_mapper
-
-        body = PythonToJavaScriptTranslator(udf_node.__func__).compile()
-        config = udf_node.__config__
-        libraries = config.get("libraries", [])
-
-        signature = [
-            sge.ColumnDef(
-                this=sg.to_identifier(name, quoted=self.compiler.quoted),
-                kind=type_mapper.from_ibis(param.annotation.pattern.dtype),
-            )
-            for name, param in udf_node.__signature__.parameters.items()
-        ]
-
-        lines = ['"""']
-
-        if config.get("strict", True):
-            lines.append('"use strict";')
-
-        lines += [
-            body,
-            "",
-            f"return {udf_node.__func_name__}({', '.join(udf_node.argnames)});",
-            '"""',
-        ]
-
-        func = sge.Create(
-            kind="FUNCTION",
-            this=sge.UserDefinedFunction(
-                this=sg.to_identifier(name), expressions=signature, wrapped=True
-            ),
-            # not exactly what I had in mind, but it works
-            #
-            # quoting is too simplistic to handle multiline strings
-            expression=sge.Var(this="\n".join(lines)),
-            exists=False,
-            properties=sge.Properties(
-                expressions=[
-                    sge.TemporaryProperty(),
-                    sge.ReturnsProperty(this=type_mapper.from_ibis(udf_node.dtype)),
-                    sge.StabilityProperty(
-                        this="IMMUTABLE" if config.get("determinism") else "VOLATILE"
-                    ),
-                    sge.LanguageProperty(this=sg.to_identifier("js")),
-                ]
-                + [
-                    sge.Property(
-                        this=sg.to_identifier("library"),
-                        value=self.compiler.f.array(*libraries),
-                    )
-                ]
-                * bool(libraries)
-            ),
-        )
-
-        return func
-
-    def _compile_python_udf(self, udf_node: ops.ScalarUDF) -> None:
-        return self._get_udf_source(udf_node)
 
     def _register_udfs(self, expr: ir.Expr) -> None:
         """No op because UDFs made with CREATE TEMPORARY FUNCTION must be followed by a query."""
@@ -1237,32 +1154,6 @@ class Backend(SQLBackend, CanCreateDatabase, CanCreateSchema):
     @contextlib.contextmanager
     def _safe_raw_sql(self, *args, **kwargs):
         yield self.raw_sql(*args, **kwargs)
-
-    # TODO: remove when the schema kwarg is removed
-    def _warn_and_create_table_loc(self, database=None, schema=None):
-        if schema is not None:
-            self._warn_schema()
-        if database is not None and schema is not None:
-            if isinstance(database, str):
-                table_loc = f"{database}.{schema}"
-            elif isinstance(database, tuple):
-                table_loc = database + schema
-        elif schema is not None:
-            table_loc = schema
-        elif database is not None:
-            table_loc = database
-        else:
-            table_loc = None
-
-        table_loc = self._to_sqlglot_table(table_loc)
-
-        if table_loc is not None:
-            if (sg_cat := table_loc.args["catalog"]) is not None:
-                sg_cat.args["quoted"] = False
-            if (sg_db := table_loc.args["db"]) is not None:
-                sg_db.args["quoted"] = False
-
-        return table_loc
 
 
 def compile(expr, params=None, **kwargs):
@@ -1309,20 +1200,20 @@ def connect(
     auth_cache
         Selects the behavior of the credentials cache.
 
-        ``'default'``
+        `'default'``
             Reads credentials from disk if available, otherwise
             authenticates and caches credentials to disk.
 
-        ``'reauth'``
+        `'reauth'``
             Authenticates and caches credentials to disk.
 
-        ``'none'``
+        `'none'``
             Authenticates and does **not** cache credentials.
 
-        Defaults to ``'default'``.
+        Defaults to `'default'`.
     partition_column
-        Identifier to use instead of default ``_PARTITIONTIME`` partition
-        column. Defaults to ``'PARTITIONTIME'``.
+        Identifier to use instead of default `_PARTITIONTIME` partition
+        column. Defaults to `'PARTITIONTIME'`.
 
     Returns
     -------

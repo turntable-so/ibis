@@ -2,14 +2,17 @@ from __future__ import annotations
 
 import abc
 import collections.abc
+import contextlib
 import functools
 import importlib.metadata
 import keyword
 import re
+import sys
 import urllib.parse
+import weakref
+from collections import Counter
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, ClassVar
-from urllib.parse import parse_qs, urlparse
+from typing import TYPE_CHECKING, Any, ClassVar, NamedTuple
 
 import ibis
 import ibis.common.exceptions as exc
@@ -17,10 +20,10 @@ import ibis.config
 import ibis.expr.operations as ops
 import ibis.expr.types as ir
 from ibis import util
-from ibis.common.caching import RefCountedCache
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping, MutableMapping
+    from urllib.parse import ParseResult
 
     import pandas as pd
     import polars as pl
@@ -41,10 +44,9 @@ class TablesAccessor(collections.abc.Mapping):
     >>> con = ibis.sqlite.connect("example.db")
     >>> people = con.tables["people"]  # access via index
     >>> people = con.tables.people  # access via attribute
-
     """
 
-    def __init__(self, backend: BaseBackend):
+    def __init__(self, backend: BaseBackend) -> None:
         self._backend = backend
 
     def __getitem__(self, name) -> ir.Table:
@@ -220,7 +222,7 @@ class _FileIOHandler:
             table = pa.Table.from_batches(reader, schema=arrow_schema)
 
         return expr.__pyarrow_result__(
-            table.rename_columns(table_expr.columns).cast(arrow_schema)
+            table.rename_columns(list(table_expr.columns)).cast(arrow_schema)
         )
 
     @util.experimental
@@ -474,6 +476,43 @@ class _FileIOHandler:
                     writer.write_batch(batch)
 
     @util.experimental
+    def to_parquet_dir(
+        self,
+        expr: ir.Table,
+        directory: str | Path,
+        *,
+        params: Mapping[ir.Scalar, Any] | None = None,
+        **kwargs: Any,
+    ) -> None:
+        """Write the results of executing the given expression to a parquet file in a directory.
+
+        This method is eager and will execute the associated expression
+        immediately.
+
+        Parameters
+        ----------
+        expr
+            The ibis expression to execute and persist to parquet.
+        directory
+            The data source. A string or Path to the directory where the parquet file will be written.
+        params
+            Mapping of scalar parameter expressions to value.
+        **kwargs
+            Additional keyword arguments passed to pyarrow.dataset.write_dataset
+
+        https://arrow.apache.org/docs/python/generated/pyarrow.dataset.write_dataset.html
+
+        """
+        self._import_pyarrow()
+        import pyarrow.dataset as ds
+
+        # by default write_dataset creates the directory
+        with expr.to_pyarrow_batches(params=params) as batch_reader:
+            ds.write_dataset(
+                batch_reader, base_dir=directory, format="parquet", **kwargs
+            )
+
+    @util.experimental
     def to_csv(
         self,
         expr: ir.Table,
@@ -578,11 +617,6 @@ class CanListCatalog(abc.ABC):
 
         """
 
-    @property
-    @abc.abstractmethod
-    def current_catalog(self) -> str:
-        """The current catalog in use."""
-
 
 class CanCreateCatalog(CanListCatalog):
     @abc.abstractmethod
@@ -669,11 +703,6 @@ class CanListDatabase(abc.ABC):
 
         """
 
-    @property
-    @abc.abstractmethod
-    def current_database(self) -> str:
-        """The current database in use."""
-
 
 class CanCreateDatabase(CanListDatabase):
     @abc.abstractmethod
@@ -713,45 +742,74 @@ class CanCreateDatabase(CanListDatabase):
         """
 
 
-# TODO: remove this for 10.0
-class CanListSchema:
-    @util.deprecated(
-        instead="Use `list_databases` instead`", as_of="9.0", removed_in="10.0"
-    )
-    def list_schemas(
-        self, like: str | None = None, database: str | None = None
-    ) -> list[str]:
-        return self.list_databases(like=like, catalog=database)
-
-    @property
-    @util.deprecated(
-        instead="Use `Backend.current_database` instead.",
-        as_of="9.0",
-        removed_in="10.0",
-    )
-    def current_schema(self) -> str:
-        return self.current_database
+class CacheEntry(NamedTuple):
+    orig_op: ops.Relation
+    cached_op_ref: weakref.ref[ops.Relation]
+    finalizer: weakref.finalize
 
 
-class CanCreateSchema(CanListSchema):
-    @util.deprecated(
-        instead="Use `create_database` instead", as_of="9.0", removed_in="10.0"
-    )
-    def create_schema(
-        self, name: str, database: str | None = None, force: bool = False
-    ) -> None:
-        self.create_database(name=name, catalog=database, force=force)
+class CacheHandler:
+    """A mixin for handling `.cache()`/`CachedTable` operations."""
 
-    @util.deprecated(
-        instead="Use `drop_database` instead", as_of="9.0", removed_in="10.0"
-    )
-    def drop_schema(
-        self, name: str, database: str | None = None, force: bool = False
-    ) -> None:
-        self.drop_database(name=name, catalog=database, force=force)
+    def __init__(self):
+        self._cache_name_to_entry = {}
+        self._cache_op_to_entry = {}
+
+    def _cached_table(self, table: ir.Table) -> ir.CachedTable:
+        """Convert a Table to a CachedTable.
+
+        Parameters
+        ----------
+        table
+            Table expression to cache
+
+        Returns
+        -------
+        Table
+            Cached table
+        """
+        entry = self._cache_op_to_entry.get(table.op())
+        if entry is None or (cached_op := entry.cached_op_ref()) is None:
+            cached_op = self._create_cached_table(util.gen_name("cached"), table).op()
+            entry = CacheEntry(
+                table.op(),
+                weakref.ref(cached_op),
+                weakref.finalize(
+                    cached_op, self._finalize_cached_table, cached_op.name
+                ),
+            )
+            self._cache_op_to_entry[table.op()] = entry
+            self._cache_name_to_entry[cached_op.name] = entry
+        return ir.CachedTable(cached_op)
+
+    def _finalize_cached_table(self, name: str) -> None:
+        """Release a cached table given its name.
+
+        This is a no-op if the cached table is already released.
+
+        Parameters
+        ----------
+        name
+            The name of the cached table.
+        """
+        if (entry := self._cache_name_to_entry.pop(name, None)) is not None:
+            self._cache_op_to_entry.pop(entry.orig_op)
+            entry.finalizer.detach()
+            try:
+                self._drop_cached_table(name)
+            except Exception:
+                # suppress exceptions during interpreter shutdown
+                if not sys.is_finalizing():
+                    raise
+
+    def _create_cached_table(self, name: str, expr: ir.Table) -> ir.Table:
+        return self.create_table(name, expr, schema=expr.schema(), temp=True)
+
+    def _drop_cached_table(self, name: str) -> None:
+        self.drop_table(name, force=True)
 
 
-class BaseBackend(abc.ABC, _FileIOHandler):
+class BaseBackend(abc.ABC, _FileIOHandler, CacheHandler):
     """Base backend class.
 
     All Ibis backends must subclass this class and implement all the
@@ -762,19 +820,16 @@ class BaseBackend(abc.ABC, _FileIOHandler):
 
     supports_temporary_tables = False
     supports_python_udfs = False
-    supports_in_memory_tables = True
 
     def __init__(self, *args, **kwargs):
         self._con_args: tuple[Any] = args
         self._con_kwargs: dict[str, Any] = kwargs
-        # expression cache
-        self._query_cache = RefCountedCache(
-            populate=self._load_into_cache,
-            lookup=lambda name: self.table(name).op(),
-            finalize=self._clean_up_cached_table,
-            generate_name=functools.partial(util.gen_name, "cache"),
-            key=lambda expr: expr.op(),
-        )
+        self._can_reconnect: bool = True
+        # mapping of memtable names to their finalizers
+        self._finalizers = {}
+        self._memtables = weakref.WeakSet()
+        self._current_memtables = weakref.WeakValueDictionary()
+        super().__init__()
 
     @property
     @abc.abstractmethod
@@ -858,7 +913,10 @@ class BaseBackend(abc.ABC, _FileIOHandler):
     # TODO(kszucs): should call self.connect(*self._con_args, **self._con_kwargs)
     def reconnect(self) -> None:
         """Reconnect to the database already configured with connect."""
-        self.do_connect(*self._con_args, **self._con_kwargs)
+        if self._can_reconnect:
+            self.do_connect(*self._con_args, **self._con_kwargs)
+        else:
+            raise exc.IbisError("Cannot reconnect to unconfigured {self.name} backend")
 
     def do_connect(self, *args, **kwargs) -> None:
         """Connect to database specified by `args` and `kwargs`."""
@@ -966,7 +1024,7 @@ class BaseBackend(abc.ABC, _FileIOHandler):
 
         """
 
-    @functools.cached_property
+    @property
     def tables(self):
         """An accessor for tables in the database.
 
@@ -1018,19 +1076,65 @@ class BaseBackend(abc.ABC, _FileIOHandler):
         if self.supports_python_udfs:
             raise NotImplementedError(self.name)
 
-    def _register_in_memory_tables(self, expr: ir.Expr):
-        if self.supports_in_memory_tables:
-            raise NotImplementedError(self.name)
+    def _verify_in_memory_tables_are_unique(self, expr: ir.Expr) -> None:
+        memtables = expr.op().find(ops.InMemoryTable)
+        name_counts = Counter(op.name for op in memtables)
+
+        if duplicate_names := sorted(
+            name for name, count in name_counts.items() if count > 1
+        ):
+            raise exc.IbisError(f"Duplicate in-memory table names: {duplicate_names}")
+        return memtables
+
+    def _register_in_memory_tables(self, expr: ir.Expr) -> None:
+        for memtable in self._verify_in_memory_tables_are_unique(expr):
+            name = memtable.name
+
+            # this particular memtable has never been registered
+            if memtable not in self._memtables:
+                # but we have a memtable with the same name
+                if (
+                    current_memtable := self._current_memtables.pop(name, None)
+                ) is not None:
+                    # if we're here this means we overwrite, so do the following:
+                    # 1. remove the old memtable from the set of memtables
+                    # 2. grab the old finalizer and invoke it
+                    self._memtables.remove(current_memtable)
+                    finalizer = self._finalizers.pop(name)
+                    finalizer()
+            else:
+                # if memtable is in the set, then by construction it must be
+                # true that the name of this memtable is in the current
+                # memtables mapping
+                assert name in self._current_memtables
+
+            # if there's no memtable named `name` then register it, setup a
+            # finalizer, and set it as the current memtable with `name`
+            if self._current_memtables.get(name) is None:
+                self._register_in_memory_table(memtable)
+                self._memtables.add(memtable)
+                self._finalizers[name] = weakref.finalize(
+                    memtable, self._finalize_in_memory_table, name
+                )
+                self._current_memtables[name] = memtable
+
+    @abc.abstractmethod
+    def _register_in_memory_table(self, op: ops.InMemoryTable) -> None:
+        """Register an in-memory table associated with `op`."""
+
+    @abc.abstractmethod
+    def _finalize_memtable(self, name: str) -> None:
+        """Clean up a memtable named `name`."""
+
+    def _finalize_in_memory_table(self, name: str) -> None:
+        """Wrap `_finalize_memtable` to suppress exceptions."""
+        with contextlib.suppress(Exception):
+            self._finalize_memtable(name)
 
     def _run_pre_execute_hooks(self, expr: ir.Expr) -> None:
         """Backend-specific hooks to run before an expression is executed."""
-        self._define_udf_translation_rules(expr)
         self._register_udfs(expr)
         self._register_in_memory_tables(expr)
-
-    def _define_udf_translation_rules(self, expr: ir.Expr):
-        if self.supports_python_udfs:
-            raise NotImplementedError(self.name)
 
     def compile(
         self,
@@ -1039,14 +1143,6 @@ class BaseBackend(abc.ABC, _FileIOHandler):
     ) -> Any:
         """Compile an expression."""
         return self.compiler.to_sql(expr, params=params)
-
-    def _to_sqlglot(self, expr: ir.Expr, **kwargs) -> sg.exp.Expression:
-        """Convert an Ibis expression to a sqlglot expression.
-
-        Called by `ibis.to_sql`; gives the backend an opportunity to generate
-        nicer SQL for human consumption.
-        """
-        raise NotImplementedError(f"Backend '{self.name}' backend doesn't support SQL")
 
     def execute(self, expr: ir.Expr) -> Any:
         """Execute an expression."""
@@ -1204,45 +1300,6 @@ class BaseBackend(abc.ABC, _FileIOHandler):
             f"{cls.name} backend has not implemented `has_operation` API"
         )
 
-    def _cached(self, expr: ir.Table):
-        """Cache the provided expression.
-
-        All subsequent operations on the returned expression will be performed on the cached data.
-
-        Parameters
-        ----------
-        expr
-            Table expression to cache
-
-        Returns
-        -------
-        Expr
-            Cached table
-
-        """
-        op = expr.op()
-        if (result := self._query_cache.get(op)) is None:
-            self._query_cache.store(expr)
-            result = self._query_cache[op]
-        return ir.CachedTable(result)
-
-    def _release_cached(self, expr: ir.CachedTable) -> None:
-        """Releases the provided cached expression.
-
-        Parameters
-        ----------
-        expr
-            Cached expression to release
-
-        """
-        del self._query_cache[expr.op()]
-
-    def _load_into_cache(self, name, expr):
-        raise NotImplementedError(self.name)
-
-    def _clean_up_cached_table(self, op):
-        raise NotImplementedError(self.name)
-
     def _transpile_sql(self, query: str, *, dialect: str | None = None) -> str:
         # only transpile if dialect was passed
         if dialect is None:
@@ -1346,52 +1403,49 @@ def connect(resource: Path | str, **kwargs: Any) -> BaseBackend:
     orig_kwargs = kwargs.copy()
     kwargs = dict(urllib.parse.parse_qsl(parsed.query))
 
+    # convert single parameter lists value to single values
+    for name, value in kwargs.items():
+        if len(value) == 1:
+            kwargs[name] = value[0]
+
+    # Merge explicit kwargs with query string, explicit kwargs
+    # taking precedence
+    kwargs.update(orig_kwargs)
+
     if scheme == "file":
         path = parsed.netloc + parsed.path
-        # Merge explicit kwargs with query string, explicit kwargs
-        # taking precedence
-        kwargs.update(orig_kwargs)
         if path.endswith(".duckdb"):
             return ibis.duckdb.connect(path, **kwargs)
         elif path.endswith((".sqlite", ".db")):
             return ibis.sqlite.connect(path, **kwargs)
-        elif path.endswith((".parquet", ".csv", ".csv.gz")):
-            # Load parquet/csv/csv.gz files with duckdb by default
+        elif path.endswith((".csv", ".csv.gz")):
+            # Load csv/csv.gz files with duckdb by default
             con = ibis.duckdb.connect(**kwargs)
-            con.register(path)
+            con.read_csv(path)
+            return con
+        elif path.endswith(".parquet"):
+            # Load parquet files with duckdb by default
+            con = ibis.duckdb.connect(**kwargs)
+            con.read_parquet(path)
             return con
         else:
             raise ValueError(f"Don't know how to connect to {resource!r}")
 
-    if kwargs:
-        # If there are kwargs (either explicit or from the query string),
-        # re-add them to the parsed URL
-        query = urllib.parse.urlencode(kwargs)
-        parsed = parsed._replace(query=query)
-
-    if scheme in ("postgres", "postgresql"):
-        # Treat `postgres://` and `postgresql://` the same
-        scheme = "postgres"
-
-    # Convert all arguments back to a single URL string
-    url = parsed.geturl()
-    if "://" not in url:
-        # urllib may roundtrip `duckdb://` to `duckdb:`. Here we re-add the
-        # missing `//`.
-        url = url.replace(":", "://", 1)
+    # Treat `postgres://` and `postgresql://` the same
+    scheme = scheme.replace("postgresql", "postgres")
 
     try:
         backend = getattr(ibis, scheme)
     except AttributeError:
         raise ValueError(f"Don't know how to connect to {resource!r}") from None
 
-    return backend._from_url(url, **orig_kwargs)
+    return backend._from_url(parsed, **kwargs)
 
 
 class UrlFromPath:
     __slots__ = ()
 
-    def _from_url(self, url: str, **kwargs) -> BaseBackend:
+    def _from_url(self, url: ParseResult, **kwargs: Any) -> BaseBackend:
         """Connect to a backend using a URL `url`.
 
         Parameters
@@ -1407,7 +1461,6 @@ class UrlFromPath:
             A backend instance
 
         """
-        url = urlparse(url)
         netloc = url.netloc
         parts = list(filter(None, (netloc, url.path[bool(netloc) :])))
         database = Path(*parts) if parts and parts != [":memory:"] else ":memory:"
@@ -1418,16 +1471,6 @@ class UrlFromPath:
         elif isinstance(database, Path):
             database = database.absolute()
 
-        query_params = parse_qs(url.query)
-
-        for name, value in query_params.items():
-            if len(value) > 1:
-                kwargs[name] = value
-            elif len(value) == 1:
-                kwargs[name] = value[0]
-            else:
-                raise exc.IbisError(f"Invalid URL parameter: {name}")
-
         self._convert_kwargs(kwargs)
         return self.connect(database=database, **kwargs)
 
@@ -1437,7 +1480,7 @@ class NoUrl:
 
     name: str
 
-    def _from_url(self, url: str, **kwargs) -> BaseBackend:
+    def _from_url(self, url: ParseResult, **kwargs) -> BaseBackend:
         """Connect to the backend with empty url.
 
         Parameters

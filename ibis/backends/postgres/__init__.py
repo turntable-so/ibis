@@ -4,20 +4,16 @@ from __future__ import annotations
 
 import contextlib
 import inspect
-import textwrap
-from functools import partial
-from itertools import repeat, takewhile
 from operator import itemgetter
 from typing import TYPE_CHECKING, Any
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import unquote_plus
 
-import numpy as np
-import pandas as pd
 import sqlglot as sg
 import sqlglot.expressions as sge
 from pandas.api.types import is_float_dtype
 
 import ibis
+import ibis.backends.sql.compilers as sc
 import ibis.common.exceptions as com
 import ibis.common.exceptions as exc
 import ibis.expr.datatypes as dt
@@ -25,32 +21,26 @@ import ibis.expr.operations as ops
 import ibis.expr.schema as sch
 import ibis.expr.types as ir
 from ibis import util
-from ibis.backends import CanCreateDatabase, CanCreateSchema, CanListCatalog
-from ibis.backends.postgres.compiler import PostgresCompiler
+from ibis.backends import CanCreateDatabase, CanListCatalog
 from ibis.backends.sql import SQLBackend
-from ibis.backends.sql.compiler import TRUE, C, ColGen, F
-from ibis.common.exceptions import InvalidDecoratorError
+from ibis.backends.sql.compilers.base import TRUE, C, ColGen
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from urllib.parse import ParseResult
 
     import pandas as pd
     import polars as pl
+    import psycopg2
     import pyarrow as pa
 
 
-def _verify_source_line(func_name: str, line: str):
-    if line.startswith("@"):
-        raise InvalidDecoratorError(func_name, line)
-    return line
-
-
-class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
+class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
     name = "postgres"
-    compiler = PostgresCompiler()
+    compiler = sc.postgres.compiler
     supports_python_udfs = True
 
-    def _from_url(self, url: str, **kwargs):
+    def _from_url(self, url: ParseResult, **kwargs):
         """Connect to a backend using a URL `url`.
 
         Parameters
@@ -66,25 +56,15 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
             A backend instance
 
         """
-        url = urlparse(url)
         database, *schema = url.path[1:].split("/", 1)
-        query_params = parse_qs(url.query)
         connect_args = {
             "user": url.username,
-            "password": url.password or "",
+            "password": unquote_plus(url.password or ""),
             "host": url.hostname,
             "database": database or "",
             "schema": schema[0] if schema else "",
             "port": url.port,
         }
-
-        for name, value in query_params.items():
-            if len(value) > 1:
-                connect_args[name] = value
-            elif len(value) == 1:
-                connect_args[name] = value[0]
-            else:
-                raise com.IbisError(f"Invalid URL parameter: {name}")
 
         kwargs.update(connect_args)
         self._convert_kwargs(kwargs)
@@ -119,59 +99,37 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
                 f"got null typed columns: {null_columns}"
             )
 
-        # only register if we haven't already done so
-        if (name := op.name) not in self.list_tables():
-            quoted = self.compiler.quoted
-            column_defs = [
-                sg.exp.ColumnDef(
-                    this=sg.to_identifier(colname, quoted=quoted),
-                    kind=self.compiler.type_mapper.from_ibis(typ),
-                    constraints=(
-                        None
-                        if typ.nullable
-                        else [
-                            sg.exp.ColumnConstraint(
-                                kind=sg.exp.NotNullColumnConstraint()
-                            )
-                        ]
-                    ),
-                )
-                for colname, typ in schema.items()
-            ]
+        name = op.name
+        quoted = self.compiler.quoted
+        create_stmt = sg.exp.Create(
+            kind="TABLE",
+            this=sg.exp.Schema(
+                this=sg.to_identifier(name, quoted=quoted),
+                expressions=schema.to_sqlglot(self.dialect),
+            ),
+            properties=sg.exp.Properties(expressions=[sge.TemporaryProperty()]),
+        )
+        create_stmt_sql = create_stmt.sql(self.dialect)
 
-            create_stmt = sg.exp.Create(
-                kind="TABLE",
-                this=sg.exp.Schema(
-                    this=sg.to_identifier(name, quoted=quoted), expressions=column_defs
-                ),
-                properties=sg.exp.Properties(expressions=[sge.TemporaryProperty()]),
-            )
-            create_stmt_sql = create_stmt.sql(self.dialect)
+        df = op.data.to_frame()
+        # nan gets compiled into 'NaN'::float which throws errors in non-float columns
+        # In order to hold NaN values, pandas automatically converts integer columns
+        # to float columns if there are NaN values in them. Therefore, we need to convert
+        # them to their original dtypes (that support pd.NA) to figure out which columns
+        # are actually non-float, then fill the NaN values in those columns with None.
+        convert_df = df.convert_dtypes()
+        for col in convert_df.columns:
+            if not is_float_dtype(convert_df[col]):
+                df[col] = df[col].replace(float("nan"), None)
 
-            columns = schema.keys()
-            df = op.data.to_frame()
-            # nan gets compiled into 'NaN'::float which throws errors in non-float columns
-            # In order to hold NaN values, pandas automatically converts integer columns
-            # to float columns if there are NaN values in them. Therefore, we need to convert
-            # them to their original dtypes (that support pd.NA) to figure out which columns
-            # are actually non-float, then fill the NaN values in those columns with None.
-            convert_df = df.convert_dtypes()
-            for col in convert_df.columns:
-                if not is_float_dtype(convert_df[col]):
-                    df[col] = df[col].replace(np.nan, None)
+        data = df.itertuples(index=False)
+        sql = self._build_insert_template(
+            name, schema=schema, columns=True, placeholder="%s"
+        )
 
-            data = df.itertuples(index=False)
-            cols = ", ".join(
-                ident.sql(self.dialect)
-                for ident in map(partial(sg.to_identifier, quoted=quoted), columns)
-            )
-            specs = ", ".join(repeat("%s", len(columns)))
-            table = sg.table(name, quoted=quoted)
-            sql = f"INSERT INTO {table.sql(self.dialect)} ({cols}) VALUES ({specs})"
-
-            with self.begin() as cur:
-                cur.execute(create_stmt_sql)
-                execute_batch(cur, sql, data, 128)
+        with self.begin() as cur:
+            cur.execute(create_stmt_sql)
+            execute_batch(cur, sql, data, 128)
 
     @contextlib.contextmanager
     def begin(self):
@@ -250,34 +208,30 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
         Examples
         --------
         >>> import os
-        >>> import getpass
         >>> import ibis
         >>> host = os.environ.get("IBIS_TEST_POSTGRES_HOST", "localhost")
-        >>> user = os.environ.get("IBIS_TEST_POSTGRES_USER", getpass.getuser())
-        >>> password = os.environ.get("IBIS_TEST_POSTGRES_PASSWORD")
+        >>> user = os.environ.get("IBIS_TEST_POSTGRES_USER", "postgres")
+        >>> password = os.environ.get("IBIS_TEST_POSTGRES_PASSWORD", "postgres")
         >>> database = os.environ.get("IBIS_TEST_POSTGRES_DATABASE", "ibis_testing")
-        >>> con = connect(database=database, host=host, user=user, password=password)
+        >>> con = ibis.postgres.connect(database=database, host=host, user=user, password=password)
         >>> con.list_tables()  # doctest: +ELLIPSIS
         [...]
         >>> t = con.table("functional_alltypes")
         >>> t
-        PostgreSQLTable[table]
-          name: functional_alltypes
-          schema:
-            id : int32
-            bool_col : boolean
-            tinyint_col : int16
-            smallint_col : int16
-            int_col : int32
-            bigint_col : int64
-            float_col : float32
-            double_col : float64
-            date_string_col : string
-            string_col : string
-            timestamp_col : timestamp
-            year : int32
-            month : int32
-
+        DatabaseTable: functional_alltypes
+          id              int32
+          bool_col        boolean
+          tinyint_col     int16
+          smallint_col    int16
+          int_col         int32
+          bigint_col      int64
+          float_col       float32
+          double_col      float64
+          date_string_col string
+          string_col      string
+          timestamp_col   timestamp(6)
+          year            int32
+          month           int32
         """
         import psycopg2
         import psycopg2.extras
@@ -294,13 +248,45 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
             **kwargs,
         )
 
+        self._post_connect()
+
+    @util.experimental
+    @classmethod
+    def from_connection(cls, con: psycopg2.extensions.connection) -> Backend:
+        """Create an Ibis client from an existing connection to a PostgreSQL database.
+
+        Parameters
+        ----------
+        con
+            An existing connection to a PostgreSQL database.
+        """
+        new_backend = cls()
+        new_backend._can_reconnect = False
+        new_backend.con = con
+        new_backend._post_connect()
+        return new_backend
+
+    def _post_connect(self) -> None:
         with self.begin() as cur:
             cur.execute("SET TIMEZONE = UTC")
+
+    @property
+    def _session_temp_db(self) -> str | None:
+        # Postgres doesn't assign the temporary table database until the first
+        # temp table is created in a given session.
+        # Before that temp table is created, this will return `None`
+        # After a temp table is created, it will return `pg_temp_N` where N is
+        # some integer
+        res = self.raw_sql(
+            "select nspname from pg_namespace where oid = pg_my_temp_schema()"
+        ).fetchone()
+        if res is not None:
+            return res[0]
+        return res
 
     def list_tables(
         self,
         like: str | None = None,
-        schema: str | None = None,
         database: tuple[str, str] | str | None = None,
     ) -> list[str]:
         """List the tables in the database.
@@ -320,27 +306,12 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
         ----------
         like
             A pattern to use for listing tables.
-        schema
-            [deprecated] The schema to perform the list against.
         database
             Database to list tables from. Default behavior is to show tables in
             the current database.
         """
-        if schema is not None:
-            self._warn_schema()
 
-        if schema is not None and database is not None:
-            raise ValueError(
-                "Using both the `schema` and `database` kwargs is not supported. "
-                "`schema` is deprecated and will be removed in Ibis 10.0"
-                "\nUse the `database` kwarg with one of the following patterns:"
-                '\ndatabase="database"'
-                '\ndatabase=("catalog", "database")'
-                '\ndatabase="catalog.database"',
-            )
-        elif schema is not None:
-            table_loc = schema
-        elif database is not None:
+        if database is not None:
             table_loc = database
         else:
             table_loc = (self.current_catalog, self.current_database)
@@ -419,13 +390,13 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
 
     @property
     def current_catalog(self) -> str:
-        with self._safe_raw_sql(sg.select(F.current_database())) as cur:
+        with self._safe_raw_sql(sg.select(sg.func("current_database"))) as cur:
             (db,) = cur.fetchone()
         return db
 
     @property
     def current_database(self) -> str:
-        with self._safe_raw_sql(sg.select(F.current_schema())) as cur:
+        with self._safe_raw_sql(sg.select(sg.func("current_schema"))) as cur:
             (schema,) = cur.fetchone()
         return schema
 
@@ -452,7 +423,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
                 on=n.oid.eq(p.pronamespace),
                 join_type="LEFT",
             )
-            .where(sg.and_(*predicates))
+            .where(*predicates)
         )
 
         def split_name_type(arg: str) -> tuple[str, dt.DataType]:
@@ -489,69 +460,6 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase, CanCreateSchema):
         op = ops.udf.scalar.builtin(fake_func, database=database)
         return op
 
-    def _get_udf_source(self, udf_node: ops.ScalarUDF):
-        config = udf_node.__config__
-        func = udf_node.__func__
-        func_name = func.__name__
-
-        lines, _ = inspect.getsourcelines(func)
-        iter_lines = iter(lines)
-
-        function_premable_lines = list(
-            takewhile(lambda line: not line.lstrip().startswith("def "), iter_lines)
-        )
-
-        if len(function_premable_lines) > 1:
-            raise InvalidDecoratorError(
-                name=func_name, lines="".join(function_premable_lines)
-            )
-
-        source = textwrap.dedent(
-            "".join(map(partial(_verify_source_line, func_name), iter_lines))
-        ).strip()
-
-        type_mapper = self.compiler.type_mapper
-        argnames = udf_node.argnames
-        return dict(
-            name=type(udf_node).__name__,
-            ident=self.compiler.__sql_name__(udf_node),
-            signature=", ".join(
-                f"{argname} {type_mapper.to_string(arg.dtype)}"
-                for argname, arg in zip(argnames, udf_node.args)
-            ),
-            return_type=type_mapper.to_string(udf_node.dtype),
-            language=config.get("language", "plpython3u"),
-            source=source,
-            args=", ".join(argnames),
-        )
-
-    def _define_udf_translation_rules(self, expr: ir.Expr) -> None:
-        """No-op, these are defined in the compiler."""
-
-    def _compile_python_udf(self, udf_node: ops.ScalarUDF) -> str:
-        return """\
-CREATE OR REPLACE FUNCTION {ident}({signature})
-RETURNS {return_type}
-LANGUAGE {language}
-AS $$
-{source}
-return {name}({args})
-$$""".format(**self._get_udf_source(udf_node))
-
-    def _register_udfs(self, expr: ir.Expr) -> None:
-        udf_sources = []
-        for udf_node in expr.op().find(ops.ScalarUDF):
-            compile_func = getattr(
-                self, f"_compile_{udf_node.__input_type__.name.lower()}_udf"
-            )
-            if sql := compile_func(udf_node):
-                udf_sources.append(sql)
-        if udf_sources:
-            # define every udf in one execution to avoid the overhead of
-            # database round trips per udf
-            with self._safe_raw_sql(";\n".join(udf_sources)):
-                pass
-
     def get_schema(
         self,
         name: str,
@@ -564,6 +472,16 @@ $$""".format(**self._get_udf_source(udf_node))
         n = ColGen(table="n")
 
         format_type = self.compiler.f["pg_catalog.format_type"]
+
+        # If no database is specified, assume the current database
+        db = database or self.current_database
+
+        dbs = [sge.convert(db)]
+
+        # If a database isn't specified, then include temp tables in the
+        # returned values
+        if database is None and (temp_table_db := self._session_temp_db) is not None:
+            dbs.append(sge.convert(temp_table_db))
 
         type_info = (
             sg.select(
@@ -585,7 +503,7 @@ $$""".format(**self._get_udf_source(udf_node))
             .where(
                 a.attnum > 0,
                 sg.not_(a.attisdropped),
-                n.nspname.eq(sge.convert(database)) if database is not None else TRUE,
+                n.nspname.isin(*dbs),
                 c.relname.eq(sge.convert(name)),
             )
             .order_by(a.attnum)
@@ -597,7 +515,7 @@ $$""".format(**self._get_udf_source(udf_node))
             rows = cur.fetchall()
 
         if not rows:
-            raise com.IbisError(f"Table not found: {name!r}")
+            raise com.TableNotFound(name)
 
         return sch.Schema(
             {
@@ -671,7 +589,7 @@ $$""".format(**self._get_udf_source(udf_node))
         | pl.LazyFrame
         | None = None,
         *,
-        schema: ibis.Schema | None = None,
+        schema: sch.SchemaLike | None = None,
         database: str | None = None,
         temp: bool = False,
         overwrite: bool = False,
@@ -700,6 +618,8 @@ $$""".format(**self._get_udf_source(udf_node))
         """
         if obj is None and schema is None:
             raise ValueError("Either `obj` or `schema` must be specified")
+        if schema is not None:
+            schema = ibis.schema(schema)
 
         properties = []
 
@@ -714,30 +634,22 @@ $$""".format(**self._get_udf_source(udf_node))
 
             self._run_pre_execute_hooks(table)
 
-            query = self._to_sqlglot(table)
+            query = self.compiler.to_sqlglot(table)
         else:
             query = None
-
-        column_defs = [
-            sge.ColumnDef(
-                this=sg.to_identifier(colname, quoted=self.compiler.quoted),
-                kind=self.compiler.type_mapper.from_ibis(typ),
-                constraints=(
-                    None
-                    if typ.nullable
-                    else [sge.ColumnConstraint(kind=sge.NotNullColumnConstraint())]
-                ),
-            )
-            for colname, typ in (schema or table.schema()).items()
-        ]
 
         if overwrite:
             temp_name = util.gen_name(f"{self.name}_table")
         else:
             temp_name = name
 
-        table = sg.table(temp_name, db=database, quoted=self.compiler.quoted)
-        target = sge.Schema(this=table, expressions=column_defs)
+        if not schema:
+            schema = table.schema()
+
+        table_expr = sg.table(temp_name, db=database, quoted=self.compiler.quoted)
+        target = sge.Schema(
+            this=table_expr, expressions=schema.to_sqlglot(self.dialect)
+        )
 
         create_stmt = sge.Create(
             kind="TABLE",
@@ -748,7 +660,9 @@ $$""".format(**self._get_udf_source(udf_node))
         this = sg.table(name, catalog=database, quoted=self.compiler.quoted)
         with self._safe_raw_sql(create_stmt) as cur:
             if query is not None:
-                insert_stmt = sge.Insert(this=table, expression=query).sql(self.dialect)
+                insert_stmt = sge.Insert(this=table_expr, expression=query).sql(
+                    self.dialect
+                )
                 cur.execute(insert_stmt)
 
             if overwrite:
@@ -756,7 +670,7 @@ $$""".format(**self._get_udf_source(udf_node))
                     sge.Drop(kind="TABLE", this=this, exists=True).sql(self.dialect)
                 )
                 cur.execute(
-                    f"ALTER TABLE IF EXISTS {table.sql(self.dialect)} RENAME TO {this.sql(self.dialect)}"
+                    f"ALTER TABLE IF EXISTS {table_expr.sql(self.dialect)} RENAME TO {this.sql(self.dialect)}"
                 )
 
         if schema is None:
@@ -817,17 +731,3 @@ $$""".format(**self._get_udf_source(udf_node))
         else:
             con.commit()
             return cursor
-
-    def _to_sqlglot(
-        self, expr: ir.Expr, limit: str | None = None, params=None, **kwargs: Any
-    ):
-        table_expr = expr.as_table()
-        conversions = {
-            name: table_expr[name].as_ewkb()
-            for name, typ in table_expr.schema().items()
-            if typ.is_geospatial()
-        }
-
-        if conversions:
-            table_expr = table_expr.mutate(**conversions)
-        return super()._to_sqlglot(table_expr, limit=limit, params=params, **kwargs)

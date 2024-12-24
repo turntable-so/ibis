@@ -13,7 +13,7 @@ jobs:
       cancel-in-progress: true
     if: github.event.label.name == 'docs-preview'
     steps:
-      - uses: actions/create-github-app-token@v1.10.1
+      - uses: actions/create-github-app-token@v1.11.1
         id: generate_token
         with:
           app-id: ${{ secrets.DOCS_BOT_APP_ID }}
@@ -26,7 +26,7 @@ jobs:
           github_token: ${{ steps.generate_token.outputs.token }}
 
       - name: install nix
-        uses: cachix/install-nix-action@v27
+        uses: cachix/install-nix-action@v30
         with:
           extra_nix_config: |
             access-tokens = github.com=${{ steps.generate_token.outputs.token }}
@@ -36,7 +36,7 @@ jobs:
         with:
           name: ibis
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          extraPullNames: nix-community,poetry2nix
+          extraPullNames: nix-community
 
       - name: checkout
         uses: actions/checkout@v4
@@ -44,16 +44,46 @@ jobs:
           fetch-depth: 0
           ref: ${{ github.event.pull_request.head.sha }}
 
-      - name: build docs
-        run: nix develop --ignore-environment --keep HOME -c just docs-build-all
-
-      - name: install netlify cli
-        run: npm install -g netlify-cli
-
       - name: generate url alias
         id: get_alias
         run: |
           echo "id=pr-${{ github.event.pull_request.number }}-${{ github.event.pull_request.head.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Get all changed qmd files
+        id: changed-qmd-files
+        uses: tj-actions/changed-files@v45
+        with:
+          # Avoid using single or double quotes for multiline patterns
+          files: |
+            **.qmd
+
+      - name: get preview links
+        env:
+          ALL_CHANGED_FILES: ${{ steps.changed-qmd-files.outputs.all_changed_files }}
+          PREVIEW_URL: "https://${{ steps.get_alias.outputs.id }}--ibis-quarto.netlify.app"
+        run: |
+          {
+            echo 'Docs preview: https://${{ steps.get_alias.outputs.id }}--ibis-quarto.netlify.app'
+            for file in ${ALL_CHANGED_FILES}; do
+              link="${file#docs/}"
+              echo "- [${file}](${PREVIEW_URL}/${link%.qmd})"
+            done
+          } | tee /tmp/comment
+
+      - name: restore cache of the previously rendered notebooks
+        uses: actions/cache/restore@v4
+        with:
+          key: docs-${{ github.event.pull_request.base.sha }}
+          path: docs/**/.jupyter_cache
+
+      - name: run quarto check
+        run: nix develop '.#ibis311' --ignore-environment --keep HOME -c quarto check
+
+      - name: build docs
+        run: nix develop '.#ibis311' --ignore-environment --keep HOME -c just docs-build-all
+
+      - name: install netlify cli
+        run: npm install -g netlify-cli
 
       - name: build and push quarto docs to preview url
         run: netlify deploy --dir=docs/_output --alias="${{ steps.get_alias.outputs.id }}"
@@ -67,5 +97,4 @@ jobs:
         with:
           token: ${{ steps.generate_token.outputs.token }}
           issue-number: ${{ github.event.pull_request.number }}
-          body: |
-            Docs preview: https://${{ steps.get_alias.outputs.id }}--ibis-quarto.netlify.app
+          body-path: /tmp/comment

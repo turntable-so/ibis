@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import shutil
+import tempfile
 from posixpath import join as pjoin
 
 import pytest
@@ -14,7 +15,7 @@ pyspark = pytest.importorskip("pyspark")
 
 
 @pytest.fixture
-def temp_view(con) -> str:
+def temp_view(con):
     name = util.gen_name("view")
     yield name
     con.drop_view(name, force=True)
@@ -42,7 +43,10 @@ def test_drop_non_empty_database(con, alltypes, temp_table_db):
 
 @pytest.fixture
 def temp_base():
-    base = pjoin(f"/tmp/{util.gen_name('pyspark_testing')}", util.gen_name("temp_base"))
+    base = pjoin(
+        f"{tempfile.gettempdir()}/{util.gen_name('pyspark_testing')}",
+        util.gen_name("temp_base"),
+    )
     yield base
     shutil.rmtree(base, ignore_errors=True)
 
@@ -55,10 +59,9 @@ def temp_db(con, temp_base):
 
 
 def test_create_database_with_location(con, temp_db):
-    base = os.path.dirname(temp_db)
     name = os.path.basename(temp_db)
     con.create_database(name, path=temp_db)
-    assert os.path.exists(base)
+    assert name in con.list_databases()
 
 
 def test_drop_table_not_exist(con):
@@ -130,16 +133,16 @@ def test_insert_validate_types(con, alltypes, test_data_db, temp_table):
         database=db,
     )
 
-    to_insert = expr[
+    to_insert = expr.select(
         expr.tinyint_col, expr.smallint_col.name("int_col"), expr.string_col
-    ]
+    )
     con.insert(temp_table, to_insert.limit(10))
 
-    to_insert = expr[
+    to_insert = expr.select(
         expr.tinyint_col,
         expr.smallint_col.cast("int32").name("int_col"),
         expr.string_col,
-    ]
+    )
     con.insert(temp_table, to_insert.limit(10))
 
 
@@ -160,16 +163,6 @@ def created_view(con, alltypes):
 def test_drop_view(con, created_view):
     con.drop_view(created_view)
     assert created_view not in con.list_tables()
-
-
-@pytest.fixture
-def table(con, temp_database):
-    table_name = f"table_{util.guid()}"
-    schema = ibis.schema([("foo", "string"), ("bar", "int64")])
-    yield con.create_table(
-        table_name, database=temp_database, schema=schema, format="parquet"
-    )
-    con.drop_table(table_name, database=temp_database)
 
 
 @pytest.fixture

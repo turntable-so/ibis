@@ -16,7 +16,7 @@ Ibis is the portable Python dataframe library:
 - Lazy dataframe expressions
 - Interactive mode for iterative data exploration
 - [Compose Python dataframe and SQL code](#python--sql-better-together)
-- Use the same dataframe API for [20+ backends](#backends)
+- Use the same dataframe API for [nearly 20 backends](#backends)
 - Iterate locally and deploy remotely by [changing a single line of code](#portability)
 
 See the documentation on ["Why Ibis?"](https://ibis-project.org/why) to learn more.
@@ -29,7 +29,8 @@ You can `pip install` Ibis with a backend and example data:
 pip install 'ibis-framework[duckdb,examples]'
 ```
 
-> [!TIP]
+> 💡 **Tip**
+>
 > See the [installation guide](https://ibis-project.org/install) for more installation options.
 
 Then use Ibis:
@@ -71,7 +72,8 @@ Then use Ibis:
 └───────────┴───────────┴───────┘
 ```
 
-> [!TIP]
+> 💡 **Tip**
+>
 > See the [getting started tutorial](https://ibis-project.org/tutorials/getting_started) for a full introduction to Ibis.
 
 ## Python + SQL: better together
@@ -133,7 +135,7 @@ This allows you to combine the flexibility of Python with the scale and performa
 
 ## Backends
 
-Ibis supports 20+ backends:
+Ibis supports nearly 20 backends:
 
 - [Apache DataFusion](https://ibis-project.org/backends/datafusion/)
 - [Apache Druid](https://ibis-project.org/backends/druid/)
@@ -142,12 +144,10 @@ Ibis supports 20+ backends:
 - [Apache PySpark](https://ibis-project.org/backends/pyspark/)
 - [BigQuery](https://ibis-project.org/backends/bigquery/)
 - [ClickHouse](https://ibis-project.org/backends/clickhouse/)
-- [Dask](https://ibis-project.org/backends/dask/)
 - [DuckDB](https://ibis-project.org/backends/duckdb/)
 - [Exasol](https://ibis-project.org/backends/exasol)
 - [MySQL](https://ibis-project.org/backends/mysql/)
 - [Oracle](https://ibis-project.org/backends/oracle/)
-- [pandas](https://ibis-project.org/backends/pandas/)
 - [Polars](https://ibis-project.org/backends/polars/)
 - [PostgreSQL](https://ibis-project.org/backends/postgresql/)
 - [RisingWave](https://ibis-project.org/backends/risingwave/)
@@ -165,7 +165,7 @@ Ibis broadly supports two types of backend:
 1. SQL-generating backends
 2. DataFrame-generating backends
 
-![Ibis backend types](docs/images/backends.png)
+![Ibis backend types](./docs/images/backends.png)
 
 ## Portability
 
@@ -202,7 +202,8 @@ You can also read from common file formats like CSV or Apache Parquet:
 
 This allows you to iterate locally and deploy remotely by changing a single line of code.
 
-> [!TIP]
+> 💡 **Tip**
+>
 > Check out [the blog on backend agnostic arrays](https://ibis-project.org/posts/backend-agnostic-arrays/) for one example using the same code across DuckDB and BigQuery.
 
 ## Community and contributing
@@ -216,3 +217,7 @@ Ibis is an open source project and welcomes contributions from anyone in the com
 Join our community by interacting on GitHub or chatting with us on [Zulip](https://ibis-project.zulipchat.com/).
 
 For more information visit https://ibis-project.org/.
+
+## Governance
+
+The Ibis project is an [independently governed](https://github.com/ibis-project/governance/blob/main/governance.md) open source community project to build and maintain the portable Python dataframe library. Ibis has contributors across a range of data companies and institutions.

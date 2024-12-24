@@ -5,7 +5,6 @@ from typing import TYPE_CHECKING, Any
 
 from public import public
 
-import ibis
 import ibis.expr.operations as ops
 from ibis import util
 from ibis.common.deferred import Deferred
@@ -13,6 +12,7 @@ from ibis.common.egraph import DisjointSet
 from ibis.common.exceptions import (
     ExpressionError,
     IbisInputError,
+    IbisTypeError,
     InputTypeError,
     IntegrityError,
 )
@@ -157,7 +157,11 @@ def prepare_predicates(
         The comparison operation to construct if the input is a pair of
         expression-like objects
     """
-    reverse = {ops.Field(chain, k): v for k, v in chain.values.items()}
+    reverse = {
+        ops.Field(chain, k): v
+        for k, v in chain.values.items()
+        if isinstance(v, ops.Field)
+    }
     deref_right = DerefMap.from_targets(right)
     deref_left = DerefMap.from_targets(chain.tables, extra=reverse)
     deref_both = DerefMap.from_targets([*chain.tables, right], extra=reverse)
@@ -222,21 +226,15 @@ class Join(Table):
     def join(
         self,
         right,
-        predicates: Any,
+        predicates: Any = (),
         how: JoinKind = "inner",
         *,
         lname: str = "",
         rname: str = "{name}_right",
     ):
-        import pandas as pd
-        import pyarrow as pa
-
-        # TODO(kszucs): factor out to a helper function
-        if isinstance(right, (pd.DataFrame, pa.Table)):
-            right = ibis.memtable(right)
-        elif not isinstance(right, Table):
-            raise TypeError(
-                f"right operand must be a Table, got {type(right).__name__}"
+        if not isinstance(right, Table):
+            raise IbisTypeError(
+                f"Right side of join must be an Ibis table, got {type(right)}."
             )
 
         if how == "left_semi":
@@ -252,7 +250,7 @@ class Join(Table):
         # bind and dereference the predicates
         preds = prepare_predicates(chain, right, predicates)
         preds = flatten_predicates(preds)
-        if not preds and how != "cross":
+        if not preds and how not in {"cross", "positional"}:
             # if there are no predicates, default to every row matching unless
             # the join is a cross join, because a cross join already has this
             # behavior
@@ -369,9 +367,9 @@ class Join(Table):
         rname: str = "{name}_right",
     ):
         left = self.join(right, how="cross", predicates=(), lname=lname, rname=rname)
-        for right in rest:
+        for table in rest:
             left = left.join(
-                right, how="cross", predicates=(), lname=lname, rname=rname
+                table, how="cross", predicates=(), lname=lname, rname=rname
             )
         return left
 

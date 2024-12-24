@@ -8,19 +8,20 @@ import sys
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
 
-import numpy as np
-import pandas as pd
-import pandas.testing as tm
 import pytest
 from filelock import FileLock
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Iterator, Mapping
+    from collections.abc import Iterable, Iterator
 
     import ibis.expr.types as ir
 
 
 PYTHON_SHORT_VERSION = f"{sys.version_info.major}{sys.version_info.minor}"
+
+np = pytest.importorskip("numpy")
+pd = pytest.importorskip("pandas")
+tm = pytest.importorskip("pandas.testing")
 
 
 class BackendTest(abc.ABC):
@@ -51,14 +52,16 @@ class BackendTest(abc.ABC):
     "Whether special handling is needed for running a multi-process pytest run."
     supports_tpch: bool = False
     "Child class defines a `load_tpch` method that loads the required TPC-H tables into a connection."
+    supports_tpcds: bool = False
+    "Child class defines a `load_tpcds` method that loads the required TPC-DS tables into a connection."
     force_sort = False
     "Sort results before comparing against reference computation."
     rounding_method: Literal["away_from_zero", "half_to_even"] = "away_from_zero"
     "Name of round method to use for rounding test comparisons."
     driver_supports_multiple_statements: bool = False
     "Whether the driver supports executing multiple statements in a single call."
-    tpch_absolute_tolerance: float | None = None
-    "Absolute tolerance for floating point comparisons with pytest.approx in TPC-H correctness tests."
+    tpc_absolute_tolerance: float | None = None
+    "Absolute tolerance for floating point comparisons with pytest.approx in TPC correctness tests."
 
     @property
     @abc.abstractmethod
@@ -111,7 +114,7 @@ class BackendTest(abc.ABC):
     def connect(*, tmpdir, worker_id, **kw: Any):
         """Return a connection with data loaded from `data_dir`."""
 
-    def _transform_tpch_sql(self, parsed):
+    def _transform_tpc_sql(self, parsed, *, suite, leaves):
         return parsed
 
     def _load_data(self, **_: Any) -> None:
@@ -130,11 +133,21 @@ class BackendTest(abc.ABC):
 
         if self.supports_tpch:
             self.load_tpch()
+        if self.supports_tpcds:
+            self.load_tpcds()
 
     def stateful_load(self, fn, **kw):
         if not fn.exists():
             self.stateless_load(**kw)
             fn.touch()
+
+    def load_tpch(self) -> None:
+        """Load TPC-H data."""
+        self._load_tpc(suite="h", scale_factor="0.17")
+
+    def load_tpcds(self) -> None:
+        """Load TPC-DS data."""
+        self._load_tpc(suite="ds", scale_factor="0.45")
 
     @classmethod
     def load_data(
@@ -294,45 +307,24 @@ class BackendTest(abc.ABC):
     def api(self):
         return self.connection
 
-    def make_context(self, params: Mapping[ir.Value, Any] | None = None):
-        return self.api.compiler.make_context(params=params)
+    def _tpc_table(self, name: str, benchmark: Literal["h", "ds"]):
+        if not getattr(self, f"supports_tpc{benchmark}"):
+            pytest.skip(
+                f"{self.name()} backend does not support testing TPC-{benchmark.upper()}"
+            )
+        return self.connection.table(name, database=f"tpc{benchmark}")
 
-    @property
-    def customer(self):
-        return self._tpch_table("customer")
+    def h(self, name: str) -> ir.Table:
+        return self._tpc_table(name, "h")
 
-    @property
-    def lineitem(self):
-        return self._tpch_table("lineitem")
+    def ds(self, name: str) -> ir.Table:
+        return self._tpc_table(name, "ds")
 
-    @property
-    def nation(self):
-        return self._tpch_table("nation")
-
-    @property
-    def orders(self):
-        return self._tpch_table("orders")
-
-    @property
-    def part(self):
-        return self._tpch_table("part")
-
-    @property
-    def partsupp(self):
-        return self._tpch_table("partsupp")
-
-    @property
-    def region(self):
-        return self._tpch_table("region")
-
-    @property
-    def supplier(self):
-        return self._tpch_table("supplier")
-
-    def _tpch_table(self, name: str):
-        if not self.supports_tpch:
-            pytest.skip(f"{self.name()} backend does not support testing TPC-H")
-        return self.connection.table(name)
+    def list_tpc_tables(self, suite: Literal["h", "ds"]) -> frozenset[str]:
+        return frozenset(
+            path.with_suffix("").name
+            for path in self.data_dir.joinpath(f"tpc{suite}").rglob("*.parquet")
+        )
 
 
 class ServiceBackendTest(BackendTest):

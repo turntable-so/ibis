@@ -26,7 +26,7 @@ WITH "t5" AS (
           SELECT
             "t0"."field_of_study",
             UNNEST(
-              [
+              CAST([
                 {'years': '1970-71', 'degrees': "t0"."1970-71"},
                 {'years': '1975-76', 'degrees': "t0"."1975-76"},
                 {'years': '1980-81', 'degrees': "t0"."1980-81"},
@@ -45,7 +45,7 @@ WITH "t5" AS (
                 {'years': '2017-18', 'degrees': "t0"."2017-18"},
                 {'years': '2018-19', 'degrees': "t0"."2018-19"},
                 {'years': '2019-20', 'degrees': "t0"."2019-20"}
-              ]
+              ] AS STRUCT("years" TEXT, "degrees" BIGINT)[])
             ) AS "__pivoted__"
           FROM "humanities" AS "t0"
         ) AS "t1"
@@ -60,25 +60,21 @@ SELECT
 FROM (
   SELECT
     *
-  FROM (
-    SELECT
-      *
-    FROM "t5" AS "t6"
-    ORDER BY
-      "t6"."diff" DESC
-    LIMIT 10
-  ) AS "t9"
-  UNION ALL
+  FROM "t5" AS "t6"
+  ORDER BY
+    "t6"."diff" DESC
+  LIMIT 10
+) AS "t9"
+UNION ALL
+SELECT
+  *
+FROM (
   SELECT
     *
-  FROM (
-    SELECT
-      *
-    FROM "t5" AS "t6"
-    WHERE
-      "t6"."diff" < CAST(0 AS TINYINT)
-    ORDER BY
-      "t6"."diff" ASC
-    LIMIT 10
-  ) AS "t10"
-) AS "t11"
+  FROM "t5" AS "t6"
+  WHERE
+    "t6"."diff" < 0
+  ORDER BY
+    "t6"."diff" ASC
+  LIMIT 10
+) AS "t10"

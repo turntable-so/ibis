@@ -7,7 +7,7 @@ from public import public
 import ibis.expr.datatypes as dt
 import ibis.expr.rules as rlz
 from ibis.common.annotations import ValidationError, attribute
-from ibis.common.typing import VarTuple  # noqa: TCH001
+from ibis.common.typing import VarTuple  # noqa: TC001
 from ibis.expr.operations.core import Value
 
 
@@ -47,6 +47,13 @@ class StructColumn(Value):
                 f"values ({len(values)})"
             )
         super().__init__(names=names, values=values)
+
+    @property
+    def name(self) -> str:
+        pairs = ", ".join(
+            f"{name!r}: {op.name}" for name, op in zip(self.names, self.values)
+        )
+        return f"{self.__class__.__name__}({{{pairs}}})"
 
     @attribute
     def dtype(self) -> dt.DataType:

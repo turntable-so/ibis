@@ -15,7 +15,7 @@ ci:
     - statix
     - taplo
 default_stages:
-  - commit
+  - pre-commit
 repos:
   - repo: https://github.com/rhysd/actionlint
     rev: v1.7.1
@@ -61,7 +61,7 @@ repos:
     rev: v4.6.0
     hooks:
       - id: check-added-large-files
-        args: ["--maxkb=710"]
+        args: ["--maxkb=800"]
       - id: check-case-conflict
       - id: check-executables-have-shebangs
       - id: check-merge-conflict
@@ -105,6 +105,7 @@ repos:
         name: shellcheck
         language: system
         entry: shellcheck
+        args: ["--shell", "bash"]
         types_or:
           - sh
           - shell

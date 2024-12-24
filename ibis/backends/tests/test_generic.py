@@ -4,10 +4,9 @@ import contextlib
 import datetime
 import decimal
 from collections import Counter
-from operator import invert, methodcaller, neg
+from itertools import permutations
+from operator import invert, methodcaller
 
-import numpy as np
-import pandas as pd
 import pytest
 import toolz
 from pytest import param
@@ -17,7 +16,6 @@ import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 import ibis.selectors as s
 from ibis import _
-from ibis.backends.conftest import is_newer_than, is_older_than
 from ibis.backends.tests.errors import (
     ClickHouseDatabaseError,
     ExaQueryError,
@@ -25,8 +23,10 @@ from ibis.backends.tests.errors import (
     ImpalaHiveServer2Error,
     MySQLProgrammingError,
     OracleDatabaseError,
+    PolarsInvalidOperationError,
     PolarsSchemaError,
     PsycoPg2InternalError,
+    PsycoPg2SyntaxError,
     Py4JJavaError,
     PyDruidProgrammingError,
     PyODBCDataError,
@@ -35,6 +35,10 @@ from ibis.backends.tests.errors import (
     TrinoUserError,
 )
 from ibis.common.annotations import ValidationError
+
+np = pytest.importorskip("numpy")
+pd = pytest.importorskip("pandas")
+tm = pytest.importorskip("pandas.testing")
 
 NULL_BACKEND_TYPES = {
     "bigquery": "NULL",
@@ -47,6 +51,7 @@ NULL_BACKEND_TYPES = {
     "trino": "unknown",
     "postgres": "null",
     "risingwave": "null",
+    "databricks": "void",
 }
 
 
@@ -63,7 +68,7 @@ def test_null_literal(con, backend):
     assert pd.isna(con.execute(expr.cast(str).upper()))
 
 
-@pytest.mark.broken(
+@pytest.mark.notimpl(
     "mssql",
     reason="https://github.com/ibis-project/ibis/issues/9109",
     raises=AssertionError,
@@ -72,7 +77,7 @@ def test_null_literal_typed(con, backend):
     expr = ibis.null(bool)
     assert expr.type() == dt.boolean
     assert pd.isna(con.execute(expr))
-    assert pd.isna(con.execute(expr.negate()))
+    assert pd.isna(con.execute(~expr))
     assert pd.isna(con.execute(expr.cast(str).upper()))
 
 
@@ -87,6 +92,7 @@ BOOLEAN_BACKEND_TYPE = {
     "postgres": "boolean",
     "risingwave": "boolean",
     "flink": "BOOLEAN NOT NULL",
+    "databricks": "boolean",
 }
 
 
@@ -170,7 +176,7 @@ def test_isna(backend, alltypes, col, value, filt):
     table = alltypes.select(**{col: value})
     df = table.execute()
 
-    result = table[filt(table[col])].execute().reset_index(drop=True)
+    result = table.filter(filt(table[col])).execute().reset_index(drop=True)
     expected = df[df[col].isna()].reset_index(drop=True)
 
     backend.assert_frame_equal(result, expected)
@@ -201,6 +207,7 @@ def test_isna(backend, alltypes, col, value, filt):
                         "oracle",
                         "exasol",
                         "pyspark",
+                        "databricks",
                     ],
                     reason="NaN != NULL for these backends",
                 ),
@@ -243,15 +250,14 @@ def test_coalesce(con, expr, expected):
         assert result == pytest.approx(expected)
 
 
-# TODO(dask) - identicalTo - #2553
-@pytest.mark.notimpl(["clickhouse", "dask", "druid", "exasol"])
+@pytest.mark.notimpl(["clickhouse", "druid", "exasol"])
 def test_identical_to(backend, alltypes, sorted_df):
     sorted_alltypes = alltypes.order_by("id")
     df = sorted_df
     dt = df[["tinyint_col", "double_col"]]
 
     ident = sorted_alltypes.tinyint_col.identical_to(sorted_alltypes.double_col)
-    expr = sorted_alltypes["id", ident.name("tmp")].order_by("id")
+    expr = sorted_alltypes.select("id", ident.name("tmp")).order_by("id")
     result = expr.execute().tmp
 
     expected = (dt.tinyint_col.isnull() & dt.double_col.isnull()) | (
@@ -276,9 +282,9 @@ def test_identical_to(backend, alltypes, sorted_df):
 @pytest.mark.notimpl(["druid"])
 def test_isin(backend, alltypes, sorted_df, column, elements):
     sorted_alltypes = alltypes.order_by("id")
-    expr = sorted_alltypes[
+    expr = sorted_alltypes.select(
         "id", sorted_alltypes[column].isin(elements).name("tmp")
-    ].order_by("id")
+    ).order_by("id")
     result = expr.execute().tmp
 
     expected = sorted_df[column].isin(elements)
@@ -300,9 +306,9 @@ def test_isin(backend, alltypes, sorted_df, column, elements):
 @pytest.mark.notimpl(["druid"])
 def test_notin(backend, alltypes, sorted_df, column, elements):
     sorted_alltypes = alltypes.order_by("id")
-    expr = sorted_alltypes[
+    expr = sorted_alltypes.select(
         "id", sorted_alltypes[column].notin(elements).name("tmp")
-    ].order_by("id")
+    ).order_by("id")
     result = expr.execute().tmp
 
     expected = ~sorted_df[column].isin(elements)
@@ -335,44 +341,36 @@ def test_notin(backend, alltypes, sorted_df, column, elements):
 @pytest.mark.notimpl(["druid"])
 def test_filter(backend, alltypes, sorted_df, predicate_fn, expected_fn):
     sorted_alltypes = alltypes.order_by("id")
-    table = sorted_alltypes[predicate_fn(sorted_alltypes)].order_by("id")
+    table = sorted_alltypes.filter(predicate_fn(sorted_alltypes)).order_by("id")
     result = table.execute()
     expected = sorted_df[expected_fn(sorted_df)]
 
     backend.assert_frame_equal(result, expected)
 
 
-@pytest.mark.notimpl(
-    [
-        "bigquery",
-        "clickhouse",
-        "datafusion",
-        "duckdb",
-        "impala",
-        "mysql",
-        "postgres",
-        "risingwave",
-        "sqlite",
-        "snowflake",
-        "polars",
-        "mssql",
-        "trino",
-        "druid",
-        "oracle",
-        "exasol",
-        "pandas",
-        "pyspark",
-        "dask",
-    ]
+@pytest.mark.notyet(
+    ["exasol"],
+    raises=ExaQueryError,
+    reason="sqlglot `eliminate_qualify` transform produces underscores in aliases, which is not allowed by exasol",
 )
-@pytest.mark.never(
+@pytest.mark.notimpl(
+    ["druid"],
+    raises=PyDruidProgrammingError,
+    reason="requires enabling window functions",
+)
+@pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
+@pytest.mark.notyet(
+    ["oracle"],
+    raises=OracleDatabaseError,
+    reason="sqlglot `eliminate_qualify` transform produces underscores in aliases, which is not allowed by oracle",
+)
+@pytest.mark.notyet(
     ["flink"],
     reason="Flink engine does not support generic window clause with no order by",
 )
 # TODO(kszucs): this is not supported at the expression level
 def test_filter_with_window_op(backend, alltypes, sorted_df):
-    sorted_alltypes = alltypes.order_by("id")
-    table = sorted_alltypes
+    table = alltypes
     window = ibis.window(group_by=table.id)
     table = table.filter(lambda t: t["id"].mean().over(window) > 3).order_by("id")
     result = table.execute()
@@ -388,12 +386,11 @@ def test_case_where(backend, alltypes, df):
     table = alltypes
     table = table.mutate(
         new_col=(
-            ibis.case()
-            .when(table["int_col"] == 1, 20)
-            .when(table["int_col"] == 0, 10)
-            .else_(0)
-            .end()
-            .cast("int64")
+            ibis.cases(
+                (table["int_col"] == 1, 20),
+                (table["int_col"] == 0, 10),
+                else_=0,
+            ).cast("int64")
         )
     )
 
@@ -426,13 +423,11 @@ def test_select_filter_mutate(backend, alltypes, df):
 
     # Prepare the float_col so that filter must execute
     # before the cast to get the correct result.
-    t = t.mutate(
-        float_col=ibis.case().when(t["bool_col"], t["float_col"]).else_(np.nan).end()
-    )
+    t = t.mutate(float_col=ibis.cases((t["bool_col"], t["float_col"]), else_=np.nan))
 
     # Actual test
-    t = t[t.columns]
-    t = t[~t["float_col"].isnan()]
+    t = t.select(t.columns)
+    t = t.filter(~t["float_col"].isnan())
     t = t.mutate(float_col=t["float_col"].cast("float64"))
     result = t.execute()
 
@@ -560,19 +555,11 @@ def test_drop_null_table(backend, alltypes, how, subset):
         param("id", {"by": "id"}),
         param(_.id, {"by": "id"}),
         param(lambda _: _.id, {"by": "id"}),
-        param(
-            ibis.desc("id"),
-            {"by": "id", "ascending": False},
-        ),
-        param(
-            ["id", "int_col"],
-            {"by": ["id", "int_col"]},
-            marks=pytest.mark.xfail_version(dask=["dask<2024.2.0"]),
-        ),
+        param(ibis.desc("id"), {"by": "id", "ascending": False}),
+        param(["id", "int_col"], {"by": ["id", "int_col"]}),
         param(
             ["id", ibis.desc("int_col")],
             {"by": ["id", "int_col"], "ascending": [True, False]},
-            marks=pytest.mark.xfail_version(dask=["dask<2024.2.0"]),
         ),
     ],
 )
@@ -583,11 +570,10 @@ def test_order_by(backend, alltypes, df, key, df_kwargs):
     backend.assert_frame_equal(result, expected)
 
 
-@pytest.mark.notimpl(["dask", "pandas", "polars", "mssql", "druid"])
 @pytest.mark.notimpl(
-    ["risingwave"],
-    raises=PsycoPg2InternalError,
-    reason="function random() does not exist",
+    ["polars", "druid", "risingwave"],
+    raises=com.OperationNotDefinedError,
+    reason="random not supported",
 )
 def test_order_by_random(alltypes):
     expr = alltypes.filter(_.id < 100).order_by(ibis.random()).limit(5)
@@ -599,6 +585,135 @@ def test_order_by_random(alltypes):
     assert not r1.equals(r2)
 
 
+@pytest.mark.notimpl(["druid"])
+@pytest.mark.parametrize(
+    "op, expected",
+    [
+        param("desc", {"a": [1, 2, 3], "b": ["foo", "baz", None]}),
+        param("asc", {"a": [2, 1, 3], "b": ["baz", "foo", None]}),
+    ],
+    ids=["desc", "asc"],
+)
+def test_order_by_nulls_default(con, op, expected):
+    # default nulls_first is False
+    t = ibis.memtable([{"a": 1, "b": "foo"}, {"a": 2, "b": "baz"}, {"a": 3, "b": None}])
+    expr = t.order_by(getattr(t["b"], op)())
+    result = con.execute(expr).reset_index(drop=True)
+    expected = pd.DataFrame(expected)
+
+    tm.assert_frame_equal(
+        result.replace({np.nan: None}), expected.replace({np.nan: None})
+    )
+
+
+@pytest.mark.notimpl(["druid"])
+@pytest.mark.parametrize(
+    "op, nulls_first, expected",
+    [
+        param("desc", True, {"a": [3, 1, 2], "b": [None, "foo", "baz"]}),
+        param("asc", True, {"a": [3, 2, 1], "b": [None, "baz", "foo"]}),
+    ],
+    ids=["desc", "asc"],
+)
+def test_order_by_nulls(con, op, nulls_first, expected):
+    t = ibis.memtable([{"a": 1, "b": "foo"}, {"a": 2, "b": "baz"}, {"a": 3, "b": None}])
+    expr = t.order_by(getattr(t["b"], op)(nulls_first=nulls_first))
+    result = con.execute(expr).reset_index(drop=True)
+    expected = pd.DataFrame(expected)
+
+    tm.assert_frame_equal(
+        result.replace({np.nan: None}), expected.replace({np.nan: None})
+    )
+
+
+@pytest.mark.notimpl(["druid"])
+@pytest.mark.never(
+    ["mysql"],
+    raises=AssertionError,
+    reason="someone decided a long time ago that 'A' = 'a' is true in these systems",
+)
+@pytest.mark.parametrize(
+    "op1, nf1, op2, nf2, expected",
+    [
+        param(
+            "asc",
+            False,
+            "desc",
+            False,
+            {
+                "col1": [1, 1, 1, 2, 3, 3, None],
+                "col2": ["c", "a", None, "B", "a", "D", "a"],
+            },
+            id="asc-desc-ff",
+        ),
+        param(
+            "asc",
+            True,
+            "desc",
+            True,
+            {
+                "col1": [None, 1, 1, 1, 2, 3, 3],
+                "col2": ["a", None, "c", "a", "B", "a", "D"],
+            },
+            id="asc-desc-tt",
+        ),
+        param(
+            "asc",
+            True,
+            "desc",
+            False,
+            {
+                "col1": [None, 1, 1, 1, 2, 3, 3],
+                "col2": ["a", "c", "a", None, "B", "a", "D"],
+            },
+            id="asc-desc-tf",
+        ),
+        param(
+            "asc",
+            True,
+            "asc",
+            True,
+            {
+                "col1": [None, 1, 1, 1, 2, 3, 3],
+                "col2": ["a", None, "a", "c", "B", "D", "a"],
+            },
+            id="asc-asc-tt",
+        ),
+        param(
+            "asc",
+            True,
+            "asc",
+            False,
+            {
+                "col1": [None, 1, 1, 1, 2, 3, 3],
+                "col2": ["a", "a", "c", None, "B", "D", "a"],
+            },
+            id="asc-asc-tf",
+        ),
+    ],
+)
+def test_order_by_two_cols_nulls(con, op1, nf1, nf2, op2, expected):
+    t = ibis.memtable(
+        {
+            # this is here because pandas converts None to nan, but of course
+            # only for numeric types, because that's totally reasonable
+            "col1": pd.Series([1, 3, 2, 1, 3, 1, None], dtype="object"),
+            "col2": ["a", "a", "B", "c", "D", None, "a"],
+        }
+    )
+    expr = t.order_by(
+        getattr(t["col1"], op1)(nulls_first=nf1),
+        getattr(t["col2"], op2)(nulls_first=nf2),
+    )
+
+    result = con.execute(expr).reset_index(drop=True)
+    expected = pd.DataFrame(expected)
+
+    tm.assert_frame_equal(
+        result.replace({np.nan: None}), expected.replace({np.nan: None})
+    )
+
+
 @pytest.mark.notyet(
     ["druid"],
     raises=PyDruidProgrammingError,
@@ -607,8 +722,8 @@ def test_order_by_random(alltypes):
 def test_table_info(alltypes):
     expr = alltypes.info()
     df = expr.execute()
-    assert alltypes.columns == list(df.name)
-    assert expr.columns == [
+    assert alltypes.columns == tuple(df.name)
+    assert expr.columns == (
         "name",
         "type",
         "nullable",
@@ -616,8 +731,8 @@ def test_table_info(alltypes):
         "non_nulls",
         "null_frac",
         "pos",
-    ]
-    assert expr.columns == list(df.columns)
+    )
+    assert expr.columns == tuple(df.columns)
 
 
 @pytest.mark.notyet(
@@ -638,31 +753,11 @@ def test_table_info_large(con):
 
 
 @pytest.mark.notimpl(
-    [
-        "datafusion",
-        "bigquery",
-        "impala",
-        "mysql",
-        "mssql",
-        "trino",
-        "flink",
-    ],
+    ["datafusion", "bigquery", "impala", "mysql", "mssql", "trino", "flink"],
     raises=com.OperationNotDefinedError,
     reason="quantile and mode is not supported",
 )
-@pytest.mark.notimpl(
-    [
-        "exasol",
-        "druid",
-    ],
-    raises=com.OperationNotDefinedError,
-    reason="Mode and StandardDev is not supported",
-)
-@pytest.mark.notimpl(
-    ["polars"],
-    raises=PolarsSchemaError,
-    reason="cannot extend/append Float64 with Float32",
-)
+@pytest.mark.notimpl(["druid"], raises=com.OperationNotDefinedError)
 @pytest.mark.notyet(
     ["druid"],
     raises=PyDruidProgrammingError,
@@ -701,30 +796,30 @@ def test_table_info_large(con):
                     reason="quantile is not supported",
                 ),
                 pytest.mark.notimpl(
+                    ["databricks"],
+                    raises=AssertionError,
+                    reason="timestamp column is discarded",
+                ),
+                pytest.mark.notimpl(
                     [
                         "clickhouse",
-                        "pyspark",
-                        "clickhouse",
-                        "risingwave",
+                        "exasol",
                         "impala",
+                        "pyspark",
+                        "risingwave",
                     ],
                     raises=com.OperationNotDefinedError,
                     reason="mode is not supported",
-                ),
-                pytest.mark.notimpl(
-                    ["dask"],
-                    raises=ValueError,
-                    reason="Unable to concatenate DataFrame with unknown division specifying axis=1",
                 ),
                 pytest.mark.notimpl(
                     ["oracle"],
                     raises=(OracleDatabaseError, com.OperationNotDefinedError),
                     reason="Mode is not supported and ORA-02000: missing AS keyword",
                 ),
-                pytest.mark.broken(
-                    ["pandas"],
-                    condition=is_newer_than("pandas", "2.1.0"),
-                    reason="FutureWarning: concat empty or all-NA entries is deprecated",
+                pytest.mark.notyet(
+                    ["polars"],
+                    raises=PolarsSchemaError,
+                    reason="type Float32 is incompatible with expected type Float64",
                 ),
             ],
             id="all_cols",
@@ -757,41 +852,27 @@ def test_table_info_large(con):
                     raises=OracleDatabaseError,
                     reason="Mode is not supported and ORA-02000: missing AS keyword",
                 ),
+                pytest.mark.notimpl(
+                    ["polars"],
+                    raises=PolarsSchemaError,
+                    reason="type Float32 is incompatible with expected type Float64",
+                ),
             ],
             id="numeric_col",
         ),
         param(
             s.of_type("string"),
-            [
-                "name",
-                "pos",
-                "type",
-                "count",
-                "nulls",
-                "unique",
-                "mode",
-            ],
+            ["name", "pos", "type", "count", "nulls", "unique", "mode"],
             marks=[
                 pytest.mark.notimpl(
-                    [
-                        "clickhouse",
-                        "pyspark",
-                        "clickhouse",
-                        "risingwave",
-                        "impala",
-                    ],
+                    ["clickhouse", "exasol", "impala", "pyspark", "risingwave"],
                     raises=com.OperationNotDefinedError,
                     reason="mode is not supported",
                 ),
                 pytest.mark.notimpl(
                     ["oracle"],
-                    raises=com.OperationNotDefinedError,
-                    reason="Mode is not supported and ORA-02000: missing AS keyword",
-                ),
-                pytest.mark.notimpl(
-                    ["dask"],
-                    raises=ValueError,
-                    reason="Unable to concatenate DataFrame with unknown division specifying axis=1",
+                    raises=OracleDatabaseError,
+                    reason="ORA-02000: missing AS keyword",
                 ),
             ],
             id="string_col",
@@ -808,36 +889,18 @@ def test_table_describe(alltypes, selector, expected_columns):
 
 
 @pytest.mark.notimpl(
-    [
-        "datafusion",
-        "bigquery",
-        "impala",
-        "mysql",
-        "mssql",
-        "trino",
-        "flink",
-        "sqlite",
-    ],
+    ["datafusion", "bigquery", "impala", "mysql", "mssql", "trino", "flink", "sqlite"],
     raises=com.OperationNotDefinedError,
     reason="quantile is not supported",
 )
-@pytest.mark.notimpl(
-    [
-        "exasol",
-        "druid",
-    ],
-    raises=com.OperationNotDefinedError,
-    reason="StandardDev is not supported",
-)
+@pytest.mark.notimpl(["druid"], raises=com.OperationNotDefinedError)
 @pytest.mark.notyet(
     ["druid"],
     raises=PyDruidProgrammingError,
     reason="Druid only supports trivial unions",
 )
 @pytest.mark.notyet(
-    ["oracle"],
-    raises=OracleDatabaseError,
-    reason="Mode is not supported and ORA-02000: missing AS keyword",
+    ["oracle"], raises=OracleDatabaseError, reason="ORA-02000: missing AS keyword"
 )
 def test_table_describe_large(con):
     num_cols = 129
@@ -866,13 +929,12 @@ def test_table_describe_large(con):
     ],
 )
 def test_isin_notin(backend, alltypes, df, ibis_op, pandas_op):
-    expr = alltypes[ibis_op]
+    expr = alltypes.filter(ibis_op)
     expected = df.loc[pandas_op(df)].sort_values(["id"]).reset_index(drop=True)
     result = expr.execute().sort_values(["id"]).reset_index(drop=True)
     backend.assert_frame_equal(result, expected)
 
 
-@pytest.mark.notimpl(["druid"])
 @pytest.mark.parametrize(
     ("ibis_op", "pandas_op"),
     [
@@ -890,18 +952,16 @@ def test_isin_notin(backend, alltypes, df, ibis_op, pandas_op):
             _.string_col.notin(_.string_col),
             lambda df: ~df.string_col.isin(df.string_col),
             id="notin_col",
-            marks=[pytest.mark.notimpl(["datafusion"])],
         ),
         param(
             (_.bigint_col + 1).notin(_.string_col.length() + 1),
             lambda df: ~(df.bigint_col.add(1)).isin(df.string_col.str.len().add(1)),
             id="notin_expr",
-            marks=[pytest.mark.notimpl(["datafusion"])],
         ),
     ],
 )
 def test_isin_notin_column_expr(backend, alltypes, df, ibis_op, pandas_op):
-    expr = alltypes[ibis_op].order_by("id")
+    expr = alltypes.filter(ibis_op).order_by("id")
     expected = df[pandas_op(df)].sort_values(["id"]).reset_index(drop=True)
     result = expr.execute()
     backend.assert_frame_equal(result, expected)
@@ -914,15 +974,13 @@ def test_isin_notin_column_expr(backend, alltypes, df, ibis_op, pandas_op):
         param(False, False, toolz.identity, id="false_noop"),
         param(True, False, invert, id="true_invert"),
         param(False, True, invert, id="false_invert"),
-        param(True, False, neg, id="true_negate"),
-        param(False, True, neg, id="false_negate"),
     ],
 )
 def test_logical_negation_literal(con, expr, expected, op):
     assert con.execute(op(ibis.literal(expr)).name("tmp")) == expected
 
 
-@pytest.mark.parametrize("op", [toolz.identity, invert, neg])
+@pytest.mark.parametrize("op", [toolz.identity, invert])
 def test_logical_negation_column(backend, alltypes, df, op):
     result = op(alltypes["bool_col"]).name("tmp").execute()
     expected = op(df["bool_col"])
@@ -942,42 +1000,6 @@ def test_zero_ifnull_column(backend, alltypes, df):
     expr = alltypes.int_col.nullif(1).fill_null(0).name("tmp")
     result = expr.execute().astype("int32")
     expected = df.int_col.replace(1, 0).rename("tmp").astype("int32")
-    backend.assert_series_equal(result, expected)
-
-
-def test_ifelse_select(backend, alltypes, df):
-    table = alltypes
-    table = table.select(
-        [
-            "int_col",
-            (
-                ibis.ifelse(table["int_col"] == 0, 42, -1)
-                .cast("int64")
-                .name("where_col")
-            ),
-        ]
-    )
-
-    result = table.execute()
-
-    expected = df.loc[:, ["int_col"]].copy()
-
-    expected["where_col"] = -1
-    expected.loc[expected["int_col"] == 0, "where_col"] = 42
-
-    backend.assert_frame_equal(result, expected)
-
-
-def test_ifelse_column(backend, alltypes, df):
-    expr = ibis.ifelse(alltypes["int_col"] == 0, 42, -1).cast("int64").name("where_col")
-    result = expr.execute()
-
-    expected = pd.Series(
-        np.where(df.int_col == 0, 42, -1),
-        name="where_col",
-        dtype="int64",
-    )
-
     backend.assert_series_equal(result, expected)
 
 
@@ -1013,7 +1035,6 @@ def test_between(backend, alltypes, df):
     backend.assert_series_equal(result, expected)
 
 
-@pytest.mark.notimpl(["druid"])
 def test_interactive(alltypes, monkeypatch):
     monkeypatch.setattr(ibis.options, "interactive", True)
 
@@ -1026,20 +1047,15 @@ def test_interactive(alltypes, monkeypatch):
     repr(expr)
 
 
-def test_correlated_subquery(alltypes):
-    expr = alltypes[_.double_col > _.view().double_col]
-    assert expr.compile() is not None
-
-
 @pytest.mark.notimpl(["polars", "pyspark"])
-@pytest.mark.broken(
+@pytest.mark.notimpl(
     ["risingwave"],
     raises=AssertionError,
     reason='DataFrame.iloc[:, 0] (column name="playerID") are different',
 )
 def test_uncorrelated_subquery(backend, batting, batting_df):
-    subset_batting = batting[batting.yearID <= 2000]
-    expr = batting[_.yearID == subset_batting.yearID.max()]["playerID", "yearID"]
+    subset_batting = batting.filter(batting.yearID <= 2000)
+    expr = batting.filter(_.yearID == subset_batting.yearID.max())["playerID", "yearID"]
     result = expr.execute()
 
     expected = batting_df[batting_df.yearID == 2000][["playerID", "yearID"]]
@@ -1053,18 +1069,13 @@ def test_int_column(alltypes):
     assert result.dtype == np.int8
 
 
-@pytest.mark.notimpl(["druid", "oracle"])
-@pytest.mark.never(
-    ["bigquery", "sqlite", "snowflake"], reason="backend only implements int64"
-)
 def test_int_scalar(alltypes):
     expr = alltypes.int_col.min()
-    result = expr.execute()
-    assert expr.type() == dt.int32
-    assert result.dtype == np.int32
+    assert expr.type().is_integer()
+    assert isinstance(expr.execute(), int)
 
 
-@pytest.mark.notimpl(["dask", "datafusion", "pandas", "polars", "druid"])
+@pytest.mark.notimpl(["polars", "druid"])
 @pytest.mark.notyet(
     ["clickhouse"], reason="https://github.com/ClickHouse/ClickHouse/issues/6697"
 )
@@ -1072,27 +1083,16 @@ def test_int_scalar(alltypes):
 def test_exists(batting, awards_players, method_name):
     years = [1980, 1981]
     batting_years = [1871, *years]
-    batting = batting[batting.yearID.isin(batting_years)]
-    awards_players = awards_players[awards_players.yearID.isin(years)]
+    batting = batting.filter(batting.yearID.isin(batting_years))
+    awards_players = awards_players.filter(awards_players.yearID.isin(years))
     method = methodcaller(method_name)
-    expr = batting[method(batting.yearID == awards_players.yearID)]
+    expr = batting.filter(method(batting.yearID == awards_players.yearID))
     result = expr.execute()
     assert not result.empty
 
 
 @pytest.mark.notimpl(
-    [
-        "dask",
-        "datafusion",
-        "mssql",
-        "mysql",
-        "pandas",
-        "pyspark",
-        "polars",
-        "druid",
-        "oracle",
-        "exasol",
-    ],
+    ["datafusion", "mssql", "mysql", "pyspark", "polars", "druid", "oracle", "exasol"],
     raises=com.OperationNotDefinedError,
 )
 def test_typeof(con):
@@ -1103,17 +1103,16 @@ def test_typeof(con):
     assert result is not None
 
 
-@pytest.mark.broken(["polars"], reason="incorrect answer")
+@pytest.mark.notimpl(["polars"], reason="incorrect answer")
 @pytest.mark.notyet(["impala"], reason="can't find table in subquery")
 @pytest.mark.notimpl(["datafusion", "druid"])
-@pytest.mark.notimpl(["pyspark"], condition=is_older_than("pyspark", "3.5.0"))
+@pytest.mark.xfail_version(pyspark=["pyspark<3.5"])
 @pytest.mark.notyet(["exasol"], raises=ExaQueryError, reason="not supported by exasol")
-@pytest.mark.broken(
+@pytest.mark.notyet(
     ["risingwave"],
     raises=PsycoPg2InternalError,
     reason="https://github.com/risingwavelabs/risingwave/issues/1343",
 )
-@pytest.mark.xfail_version(dask=["dask<2024.2.0"])
 @pytest.mark.notyet(
     ["mssql"],
     raises=PyODBCProgrammingError,
@@ -1137,11 +1136,7 @@ def test_isin_uncorrelated(
     backend.assert_series_equal(result, expected)
 
 
-@pytest.mark.broken(["polars"], reason="incorrect answer")
-@pytest.mark.notimpl(["druid"])
-@pytest.mark.xfail_version(
-    dask=["dask<2024.2.0"], reason="not supported by the backend"
-)
+@pytest.mark.notimpl(["polars"], reason="incorrect answer")
 def test_isin_uncorrelated_filter(
     backend, batting, awards_players, batting_df, awards_players_df
 ):
@@ -1227,6 +1222,27 @@ def test_memtable_construct_from_pyarrow(backend, con, monkeypatch):
     )
 
 
+@pytest.mark.notimpl(
+    ["flink"], raises=TypeError, reason="doesn't support pyarrow objects yet"
+)
+def test_memtable_construct_from_pyarrow_c_stream(con):
+    pa = pytest.importorskip("pyarrow")
+
+    class Opaque:
+        def __init__(self, table):
+            self._table = table
+
+        def __arrow_c_stream__(self, *args, **kwargs):
+            return self._table.__arrow_c_stream__(*args, **kwargs)
+
+    table = pa.table({"a": list("abc"), "b": [1, 2, 3]})
+
+    t = ibis.memtable(Opaque(table))
+
+    res = con.to_pyarrow(t.order_by("a"))
+    assert res.equals(table)
+
+
 @pytest.mark.parametrize("lazy", [False, True])
 def test_memtable_construct_from_polars(backend, con, lazy):
     pl = pytest.importorskip("polars")
@@ -1278,35 +1294,37 @@ def test_memtable_column_naming_mismatch(con, monkeypatch, df, columns):
         ibis.memtable(df, columns=columns)
 
 
-@pytest.mark.notimpl(
-    ["dask", "pandas", "polars"], raises=NotImplementedError, reason="not a SQL backend"
+@pytest.mark.notyet(
+    ["mssql", "mysql", "exasol", "impala"], reason="various syntax errors reported"
 )
-def test_many_subqueries(con, snapshot):
-    def query(t, group_cols):
-        t2 = t.mutate(key=ibis.row_number().over(ibis.window(order_by=group_cols)))
-        return t2.inner_join(t2[["key"]], "key")
+@pytest.mark.notyet(
+    ["snowflake"],
+    reason="unable to handle the varbinary geometry column",
+    raises=SnowflakeProgrammingError,
+)
+def test_memtable_from_geopandas_dataframe(con, data_dir):
+    gpd = pytest.importorskip("geopandas")
+    gdf = gpd.read_file(data_dir / "geojson" / "zones.geojson")[:5]
 
-    t = ibis.table(dict(street="str"), name="data")
-
-    t2 = query(t, group_cols=["street"])
-    t3 = query(t2, group_cols=["street"])
-
-    snapshot.assert_match(str(ibis.to_sql(t3, dialect=con.name)), "out.sql")
+    # Read in memtable
+    t = ibis.memtable(gdf)
+    # Execute a few rows to force ingestion
+    con.to_pandas(t.limit(2).select("geometry"))
 
 
 @pytest.mark.notimpl(["oracle", "exasol"], raises=com.OperationNotDefinedError)
 @pytest.mark.notimpl(["druid"], raises=AssertionError)
 @pytest.mark.notyet(
-    ["datafusion", "impala", "mssql", "mysql", "sqlite"],
+    ["impala", "mssql", "mysql", "sqlite"],
     reason="backend doesn't support arrays and we don't implement pivot_longer with unions yet",
     raises=com.OperationNotDefinedError,
 )
-@pytest.mark.broken(
+@pytest.mark.notimpl(
     ["trino"],
     reason="invalid code generated for unnesting a struct",
     raises=TrinoUserError,
 )
-@pytest.mark.broken(
+@pytest.mark.notimpl(
     ["flink"],
     reason="invalid code generated for unnesting a struct",
     raises=Py4JJavaError,
@@ -1314,7 +1332,7 @@ def test_many_subqueries(con, snapshot):
 def test_pivot_longer(backend):
     diamonds = backend.diamonds
     df = diamonds.execute()
-    res = diamonds.pivot_longer(s.c("x", "y", "z"), names_to="pos", values_to="xyz")
+    res = diamonds.pivot_longer(s.cols("x", "y", "z"), names_to="pos", values_to="xyz")
     assert res.schema().names == (
         "carat",
         "cut",
@@ -1344,9 +1362,6 @@ def test_pivot_longer(backend):
     assert len(res.execute()) == len(expected)
 
 
-@pytest.mark.xfail_version(
-    datafusion=["datafusion==38.0.1"], reason="internal error about MEDIAN(G) naming"
-)
 def test_pivot_wider(backend):
     diamonds = backend.diamonds
     expr = (
@@ -1361,6 +1376,62 @@ def test_pivot_wider(backend):
         diamonds[["cut"]].distinct().cut.execute()
     )
     assert len(df) == diamonds.color.nunique().execute()
+
+
+def test_select_distinct_order_by(backend, alltypes, df):
+    res = alltypes.select("int_col").distinct().order_by("int_col").to_pandas()
+    sol = df[["int_col"]].drop_duplicates().sort_values("int_col")
+    backend.assert_frame_equal(res, sol)
+
+
+def test_select_distinct_order_by_alias(backend, con):
+    df = pd.DataFrame({"x": [1, 2, 3, 3], "y": [10, 9, 8, 8]})
+    expr = ibis.memtable(df).select(y="x", x="y").distinct().order_by("x", "y")
+    sol = (
+        df.drop_duplicates()
+        .rename(columns={"x": "y", "y": "x"})
+        .sort_values(["x", "y"])
+    )
+    res = con.to_pandas(expr)
+    backend.assert_frame_equal(res, sol)
+
+
+def test_select_distinct_order_by_expr(backend, alltypes, df):
+    res = alltypes.select("int_col").distinct().order_by(-_.int_col).to_pandas()
+    sol = df[["int_col"]].drop_duplicates().sort_values("int_col", ascending=False)
+    backend.assert_frame_equal(res, sol)
+
+
+@pytest.mark.notimpl(
+    ["polars"], reason="We don't fuse these ops yet for non-SQL backends", strict=False
+)
+@pytest.mark.parametrize(
+    "ops",
+    [
+        param(ops, id="-".join(ops))
+        for ops in permutations(("select", "distinct", "filter", "order_by"))
+        if ops.index("select") < ops.index("distinct")
+    ],
+)
+def test_select_distinct_filter_order_by_commute(backend, alltypes, df, ops):
+    """For simple versions of these ops, the order in which they're called
+    doesn't matter, they're all handled in a commutative way."""
+    expr = alltypes.select("int_col", "float_col", b=alltypes.id % 33)
+    for op in ops:
+        if op == "select":
+            expr = expr.select("int_col", "b")
+        elif op == "distinct":
+            expr = expr.distinct()
+        elif op == "filter":
+            expr = expr.filter(expr.int_col > 5)
+        elif op == "order_by":
+            expr = expr.order_by(-expr.int_col, expr.b)
+
+    sol = df.assign(b=df.id % 33)[["int_col", "b"]]
+    sol = sol[sol.int_col > 5].drop_duplicates()
+    sol = sol.set_index([-sol.int_col, sol.b]).sort_index().reset_index(drop=True)
+    res = expr.to_pandas()
+    backend.assert_frame_equal(res, sol)
 
 
 @pytest.mark.parametrize(
@@ -1404,12 +1475,8 @@ def test_pivot_wider(backend):
 )
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=PsycoPg2InternalError,
-    reason="function last(double precision) does not exist, do you mean left or least",
-)
-@pytest.mark.notyet(
-    ["datafusion"],
-    reason="datafusion 38.0.1 has a bug in FILTER handling that causes this test to fail",
+    raises=com.UnsupportedOperationError,
+    reason="first/last requires an order_by",
 )
 def test_distinct_on_keep(backend, on, keep):
     from ibis import _
@@ -1469,12 +1536,8 @@ def test_distinct_on_keep(backend, on, keep):
 )
 @pytest.mark.notimpl(
     ["risingwave"],
-    raises=PsycoPg2InternalError,
-    reason="function first(double precision) does not exist",
-)
-@pytest.mark.notyet(
-    ["datafusion"],
-    reason="datafusion 38.0.1 has a bug in FILTER handling that causes this test to fail",
+    raises=com.UnsupportedOperationError,
+    reason="first/last requires an order_by",
 )
 def test_distinct_on_keep_is_none(backend, on):
     from ibis import _
@@ -1494,7 +1557,7 @@ def test_distinct_on_keep_is_none(backend, on):
     assert len(result) == len(expected)
 
 
-@pytest.mark.notimpl(["dask", "pandas", "risingwave", "flink", "exasol"])
+@pytest.mark.notimpl(["risingwave", "flink", "exasol"])
 @pytest.mark.notyet(
     [
         "sqlite",
@@ -1505,7 +1568,40 @@ def test_distinct_on_keep_is_none(backend, on):
     ]
 )
 @pytest.mark.parametrize(
-    "dtype", ["smallint", "int", "bigint", "float", "double", "string"]
+    "dtype",
+    [
+        param(
+            "smallint",
+            marks=pytest.mark.notyet(
+                ["bigquery"], reason="only supports bytes and strings"
+            ),
+        ),
+        param(
+            "int",
+            marks=pytest.mark.notyet(
+                ["bigquery"], reason="only supports bytes and strings"
+            ),
+        ),
+        param(
+            "bigint",
+            marks=pytest.mark.notyet(
+                ["bigquery"], reason="only supports bytes and strings"
+            ),
+        ),
+        param(
+            "float",
+            marks=pytest.mark.notyet(
+                ["bigquery"], reason="only supports bytes and strings"
+            ),
+        ),
+        param(
+            "double",
+            marks=pytest.mark.notyet(
+                ["bigquery"], reason="only supports bytes and strings"
+            ),
+        ),
+        "string",
+    ],
 )
 def test_hash(backend, alltypes, dtype):
     # check that multiple executions return the same result
@@ -1520,19 +1616,18 @@ def test_hash(backend, alltypes, dtype):
 @pytest.mark.notimpl(["trino", "oracle", "exasol", "snowflake"])
 @pytest.mark.notyet(
     [
-        "dask",
         "datafusion",
         "druid",
         "duckdb",
         "flink",
         "impala",
         "mysql",
-        "pandas",
         "polars",
         "postgres",
         "pyspark",
         "risingwave",
         "sqlite",
+        "databricks",
     ]
 )
 def test_hashbytes(backend, alltypes):
@@ -1553,13 +1648,11 @@ def test_hashbytes(backend, alltypes):
     [
         "bigquery",
         "clickhouse",
-        "dask",
         "datafusion",
         "flink",
         "impala",
         "mysql",
         "oracle",
-        "pandas",
         "polars",
         "postgres",
         "risingwave",
@@ -1588,7 +1681,58 @@ def test_hexdigest(backend, alltypes):
     backend.assert_series_equal(h1, h2)
 
 
-@pytest.mark.notimpl(["pandas", "dask", "oracle", "sqlite"])
+@pytest.mark.parametrize(
+    ("from_type", "to_type", "from_val", "expected"),
+    [
+        param("int", "float", 0, 0.0, id="int_to_float"),
+        param("float", "int", 0.0, 0, id="float_to_int"),
+        param("string", "int", "0", 0, id="string_to_int"),
+        param("string", "float", "0", 0.0, id="string_to_float"),
+        param(
+            "array<int>",
+            "array<string>",
+            [0, 1, 2],
+            ["0", "1", "2"],
+            marks=[
+                pytest.mark.notimpl(["druid"], raises=PyDruidProgrammingError),
+                pytest.mark.notimpl(["oracle"], raises=OracleDatabaseError),
+                pytest.mark.notyet(["bigquery"], raises=GoogleBadRequest),
+                pytest.mark.notimpl(["snowflake"], raises=AssertionError),
+                pytest.mark.never(
+                    ["exasol", "impala", "mssql", "mysql", "sqlite"],
+                    reason="backend doesn't support arrays",
+                ),
+            ],
+            id="array",
+        ),
+        param(
+            "struct<a: int, b: string>",
+            "struct<a: string, b: int>",
+            {"a": 0, "b": "1"},
+            {"a": "0", "b": 1},
+            marks=[
+                pytest.mark.notimpl(["flink"], raises=Py4JJavaError),
+                pytest.mark.notimpl(["druid"], raises=PyDruidProgrammingError),
+                pytest.mark.notimpl(["oracle"], raises=OracleDatabaseError),
+                pytest.mark.notimpl(["postgres"], raises=PsycoPg2SyntaxError),
+                pytest.mark.notimpl(["risingwave"], raises=PsycoPg2InternalError),
+                pytest.mark.notimpl(["snowflake"], raises=AssertionError),
+                pytest.mark.never(
+                    ["datafusion", "exasol", "impala", "mssql", "mysql", "sqlite"],
+                    reason="backend doesn't support structs",
+                ),
+            ],
+            id="struct",
+        ),
+    ],
+)
+def test_cast(con, from_type, to_type, from_val, expected):
+    expr = ibis.literal(from_val, type=from_type).cast(to_type)
+    result = con.execute(expr)
+    assert result == expected
+
+
+@pytest.mark.notimpl(["oracle", "sqlite"])
 @pytest.mark.parametrize(
     ("from_val", "to_type", "expected"),
     [
@@ -1606,16 +1750,16 @@ def test_hexdigest(backend, alltypes):
                 pytest.mark.notyet(["snowflake"], raises=SnowflakeProgrammingError),
                 pytest.mark.notyet(["trino"], raises=TrinoUserError),
                 pytest.mark.notyet(["exasol"], raises=ExaQueryError),
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["druid"], reason="casts to 1672531200000 (millisecond)"
                 ),
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["polars"], reason="casts to 1672531200000000000 (nanoseconds)"
                 ),
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["datafusion"], reason="casts to 1672531200000000 (microseconds)"
                 ),
-                pytest.mark.broken(["mysql"], reason="returns 20230101000000"),
+                pytest.mark.notimpl(["mysql"], reason="returns 20230101000000"),
                 pytest.mark.notyet(["mssql"], raises=PyODBCDataError),
             ],
         ),
@@ -1630,13 +1774,11 @@ def test_try_cast(con, from_val, to_type, expected):
 
 @pytest.mark.notimpl(
     [
-        "dask",
         "datafusion",
         "druid",
         "exasol",
         "mysql",
         "oracle",
-        "pandas",
         "postgres",
         "risingwave",
         "sqlite",
@@ -1651,13 +1793,14 @@ def test_try_cast(con, from_val, to_type, expected):
             "int",
             marks=[
                 pytest.mark.never(
-                    ["clickhouse", "pyspark", "flink"], reason="casts to 1672531200"
+                    ["clickhouse", "pyspark", "flink", "databricks"],
+                    reason="casts to 1672531200",
                 ),
                 pytest.mark.notyet(["bigquery"], raises=GoogleBadRequest),
                 pytest.mark.notyet(["snowflake"], raises=SnowflakeProgrammingError),
                 pytest.mark.notyet(["trino"], raises=TrinoUserError),
                 pytest.mark.notyet(["mssql"], raises=PyODBCDataError),
-                pytest.mark.broken(["polars"], reason="casts to 1672531200000000000"),
+                pytest.mark.notimpl(["polars"], reason="casts to 1672531200000000000"),
             ],
         ),
     ],
@@ -1669,8 +1812,6 @@ def test_try_cast_null(con, from_val, to_type):
 
 @pytest.mark.notimpl(
     [
-        "pandas",
-        "dask",
         "datafusion",
         "druid",
         "mysql",
@@ -1696,8 +1837,6 @@ def test_try_cast_table(backend, con):
 
 @pytest.mark.notimpl(
     [
-        "pandas",
-        "dask",
         "datafusion",
         "mysql",
         "oracle",
@@ -1718,7 +1857,7 @@ def test_try_cast_table(backend, con):
             pd.isna,
             marks=[
                 pytest.mark.notyet(
-                    ["clickhouse", "polars", "flink", "pyspark"],
+                    ["clickhouse", "polars", "flink", "pyspark", "databricks"],
                     reason="casts this to to a number",
                 ),
                 pytest.mark.notyet(["bigquery"], raises=GoogleBadRequest),
@@ -1944,7 +2083,10 @@ def test_static_table_slice(backend, slc, expected_count_fn):
     reason="impala doesn't support dynamic limit/offset",
     raises=ImpalaHiveServer2Error,
 )
-@pytest.mark.notyet(["pyspark"], reason="pyspark doesn't support dynamic limit/offset")
+@pytest.mark.notyet(
+    ["pyspark", "databricks"],
+    reason="pyspark and databricks don't support dynamic limit/offset",
+)
 @pytest.mark.notyet(["flink"], reason="flink doesn't support dynamic limit/offset")
 def test_dynamic_table_slice(backend, slc, expected_count_fn):
     t = backend.functional_alltypes
@@ -1994,7 +2136,10 @@ def test_dynamic_table_slice(backend, slc, expected_count_fn):
     reason="impala doesn't support dynamic limit/offset",
     raises=ImpalaHiveServer2Error,
 )
-@pytest.mark.notyet(["pyspark"], reason="pyspark doesn't support dynamic limit/offset")
+@pytest.mark.notyet(
+    ["pyspark", "databricks"],
+    reason="pyspark and databricks don't support dynamic limit/offset",
+)
 @pytest.mark.notyet(["flink"], reason="flink doesn't support dynamic limit/offset")
 @pytest.mark.notyet(
     ["mssql"],
@@ -2024,45 +2169,23 @@ def test_dynamic_table_slice_with_computed_offset(backend):
     backend.assert_frame_equal(result, expected)
 
 
-@pytest.mark.notimpl(["druid", "polars"])
-@pytest.mark.notimpl(
-    ["risingwave"],
-    raises=PsycoPg2InternalError,
-    reason="function random() does not exist",
-)
-@pytest.mark.parametrize(
-    "method",
-    [
-        "row",
-        param(
-            "block",
-            marks=[
-                pytest.mark.notimpl(
-                    ["snowflake"],
-                    raises=SnowflakeProgrammingError,
-                    reason="SAMPLE clause on views only supports row wise sampling without seed.",
-                )
-            ],
-        ),
-    ],
-)
-def test_sample(backend, method):
-    t = backend.functional_alltypes.filter(_.int_col >= 2)
+@pytest.mark.notimpl(["druid", "risingwave"], raises=com.OperationNotDefinedError)
+@pytest.mark.parametrize("method", ["row", "block"])
+@pytest.mark.parametrize("subquery", [True, False], ids=["subquery", "table"])
+@pytest.mark.xfail_version(pyspark=["sqlglot==25.17.0"])
+def test_sample(backend, method, alltypes, subquery):
+    if subquery:
+        alltypes = alltypes.filter(_.int_col >= 2)
 
-    total_rows = t.count().execute()
-    empty = t.limit(1).execute().iloc[:0]
+    total_rows = alltypes.count().execute()
+    empty = alltypes.limit(1).execute().iloc[:0]
 
-    df = t.sample(0.1, method=method).execute()
+    df = alltypes.sample(0.1, method=method).execute()
     assert len(df) <= total_rows
     backend.assert_frame_equal(empty, df.iloc[:0])
 
 
-@pytest.mark.notimpl(["druid", "polars"])
-@pytest.mark.notimpl(
-    ["risingwave"],
-    raises=PsycoPg2InternalError,
-    reason="function random() does not exist",
-)
+@pytest.mark.notimpl(["druid", "risingwave"], raises=com.OperationNotDefinedError)
 def test_sample_memtable(con, backend):
     df = pd.DataFrame({"x": [1, 2, 3, 4]})
     res = con.execute(ibis.memtable(df).sample(0.5))
@@ -2082,12 +2205,12 @@ def test_sample_memtable(con, backend):
         "mysql",
         "oracle",
         "polars",
-        "postgres",
         "risingwave",
         "sqlite",
         "trino",
         "exasol",
         "pyspark",
+        "databricks",
     ]
 )
 def test_sample_with_seed(backend):
@@ -2098,31 +2221,11 @@ def test_sample_with_seed(backend):
     backend.assert_frame_equal(df1, df2)
 
 
-def test_substitute(backend):
-    val = "400"
-    t = backend.functional_alltypes
-    expr = (
-        t.string_col.nullif("1")
-        .substitute({None: val})
-        .name("subs")
-        .value_counts()
-        .filter(lambda t: t.subs == val)
-    )
-    assert expr["subs_count"].execute()[0] == t.count().execute() // 10
-
-
-@pytest.mark.notimpl(
-    ["dask", "pandas", "polars"], raises=NotImplementedError, reason="not a SQL backend"
-)
 def test_simple_memtable_construct(con):
     t = ibis.memtable({"a": [1, 2]})
     expr = t.a
     expected = [1.0, 2.0]
     assert sorted(con.to_pandas(expr).tolist()) == expected
-    # we can't generically check for specific sql, even with a snapshot,
-    # because memtables have a unique name per table per process, so smoke test
-    # it
-    assert str(ibis.to_sql(expr, dialect=con.name)).startswith("SELECT")
 
 
 def test_select_mutate_with_dict(backend):
@@ -2144,7 +2247,7 @@ def test_select_scalar(alltypes):
     assert (res.y == 1).all()
 
 
-@pytest.mark.broken(["mssql"], reason="incorrect syntax")
+@pytest.mark.notimpl(["mssql"], reason="incorrect syntax")
 def test_isnull_equality(con, backend, monkeypatch):
     monkeypatch.setattr(ibis.options, "default_backend", con)
     t = ibis.memtable({"x": ["a", "b", None], "y": ["c", None, None], "z": [1, 2, 3]})
@@ -2156,7 +2259,7 @@ def test_isnull_equality(con, backend, monkeypatch):
     backend.assert_frame_equal(result, expected)
 
 
-@pytest.mark.broken(
+@pytest.mark.never(
     ["druid"],
     raises=PyDruidProgrammingError,
     reason="Query could not be planned. SQL query requires ordering a table by time column",
@@ -2173,19 +2276,11 @@ def test_subsequent_overlapping_order_by(con, backend, alltypes, df):
     backend.assert_frame_equal(result, expected)
 
 
-@pytest.mark.broken(
+@pytest.mark.never(
     ["druid"],
     raises=PyDruidProgrammingError,
     reason=(
         "Query could not be planned. SQL query requires ordering a table by time column"
-    ),
-)
-@pytest.mark.broken(
-    ["dask"],
-    raises=(AssertionError, NotImplementedError),
-    reason=(
-        "dask doesn't support deterministic .sort_values(); "
-        "for older dask versions sorting by multiple columns is not supported"
     ),
 )
 def test_select_sort_sort(backend, alltypes, df):
@@ -2208,21 +2303,12 @@ def test_select_sort_sort(backend, alltypes, df):
     backend.assert_frame_equal(result, expected)
 
 
-@pytest.mark.broken(
+@pytest.mark.never(
     ["druid"],
     raises=PyDruidProgrammingError,
     reason=(
         "Query could not be planned. SQL query requires ordering a table by time column"
     ),
-)
-@pytest.mark.broken(
-    ["dask"],
-    raises=(AssertionError, NotImplementedError),
-    reason=(
-        "dask doesn't support deterministic .sort_values(); "
-        "for older dask versions sorting by multiple columns is not supported"
-    ),
-    strict=False,
 )
 def test_select_sort_sort_deferred(backend, alltypes, df):
     t = alltypes
@@ -2260,9 +2346,6 @@ def test_select_sort_sort_deferred(backend, alltypes, df):
 
 
 @pytest.mark.notimpl(
-    ["pandas", "dask"], raises=IndexError, reason="NaN isn't treated as NULL"
-)
-@pytest.mark.notimpl(
     ["druid"],
     raises=AttributeError,
     reason="inserting three rows into druid is difficult",
@@ -2280,11 +2363,6 @@ def test_topk_counts_null(con):
     raises=AssertionError,
     reason="ClickHouse returns False for x.isin([None])",
 )
-@pytest.mark.notimpl(
-    ["pandas", "dask"],
-    raises=AssertionError,
-    reason="null isin semantics are not implemented for pandas or dask",
-)
 @pytest.mark.never(
     "mssql",
     raises=AssertionError,
@@ -2297,10 +2375,6 @@ def test_null_isin_null_is_null(con):
 
 
 def test_value_counts_on_tables(backend, df):
-    if backend.name() == "dask":
-        pytest.skip(reason="flaky errors about sorting on multi-partition dataframes")
-    from ibis import selectors as s
-
     t = backend.functional_alltypes
     expr = t[["bigint_col", "int_col"]].value_counts().order_by(s.all())
     result = expr.execute()
@@ -2312,3 +2386,107 @@ def test_value_counts_on_tables(backend, df):
     )
     expected = expected.sort_values(expected.columns.tolist()).reset_index(drop=True)
     backend.assert_frame_equal(result, expected, check_dtype=False)
+
+
+def test_union_generates_predictable_aliases(con):
+    t = ibis.memtable(
+        data=[{"island": "Torgerson", "body_mass_g": 3750, "sex": "male"}]
+    )
+    sub1 = t.inner_join(t.view(), "island").mutate(island_right=lambda t: t.island)
+    sub2 = t.inner_join(t.view(), "sex").mutate(sex_right=lambda t: t.sex)
+    expr = ibis.union(sub1, sub2)
+    df = con.execute(expr)
+    assert len(df) == 2
+
+
+@pytest.mark.parametrize(
+    "id_cols", [s.none(), [], s.cols()], ids=["none", "empty", "cols"]
+)
+def test_pivot_wider_empty_id_columns(con, backend, id_cols, monkeypatch):
+    monkeypatch.setattr(ibis.options, "default_backend", con)
+    data = pd.DataFrame(
+        {
+            "id": range(10),
+            "actual": [0, 1, 1, 0, 0, 1, 0, 0, 0, 1],
+            "prediction": [1, 0, 0, 1, 0, 0, 0, 0, 0, 1],
+        }
+    )
+    t = ibis.memtable(data)
+    expr = t.mutate(
+        outcome=ibis.cases(
+            ((_.actual == 0) & (_.prediction == 0), "TN"),
+            ((_.actual == 0) & (_.prediction == 1), "FP"),
+            ((_.actual == 1) & (_.prediction == 0), "FN"),
+            ((_.actual == 1) & (_.prediction == 1), "TP"),
+        )
+    )
+    expr = expr.pivot_wider(
+        id_cols=id_cols,
+        names_from="outcome",
+        values_from="outcome",
+        values_agg=_.count(),
+        names_sort=True,
+    )
+    result = expr.to_pandas()
+    expected = pd.DataFrame({"FN": [3], "FP": [2], "TN": [4], "TP": [1]})
+    backend.assert_frame_equal(result, expected)
+
+
+@pytest.mark.notyet(
+    ["mysql", "risingwave", "impala", "mssql", "druid", "exasol", "oracle", "flink"],
+    raises=com.OperationNotDefinedError,
+    reason="backend doesn't support Arbitrary agg",
+)
+def test_simple_pivot_wider(con, backend, monkeypatch):
+    monkeypatch.setattr(ibis.options, "default_backend", con)
+    data = pd.DataFrame({"outcome": ["yes", "no"], "counted": [3, 4]})
+    t = ibis.memtable(data)
+    expr = t.pivot_wider(names_from="outcome", values_from="counted", names_sort=True)
+    result = expr.to_pandas()
+    expected = pd.DataFrame({"no": [4], "yes": [3]})
+    backend.assert_frame_equal(result, expected)
+
+
+def test_named_literal(con, backend):
+    lit = ibis.literal(1, type="int64").name("one")
+    expr = lit.as_table()
+    result = con.to_pandas(expr)
+    expected = pd.DataFrame({"one": [1]})
+    backend.assert_frame_equal(result, expected)
+
+
+@pytest.mark.notyet(
+    ["polars"],
+    raises=PolarsInvalidOperationError,
+    reason="n_unique isn't supported on decimal columns",
+)
+@pytest.mark.notyet(
+    ["clickhouse"],
+    raises=ClickHouseDatabaseError,
+    reason="doesn't allow casting Float64 to Decimal(38, 2)",
+)
+@pytest.mark.notimpl(
+    ["oracle"], raises=OracleDatabaseError, reason="incorrect code generated"
+)
+@pytest.mark.notimpl(
+    ["datafusion", "flink", "impala", "mysql", "mssql", "sqlite", "trino"],
+    raises=com.OperationNotDefinedError,
+    reason="quantile not implemented",
+)
+@pytest.mark.notimpl(
+    ["druid"],
+    raises=com.OperationNotDefinedError,
+    reason="standard deviation not implemented",
+)
+@pytest.mark.notyet(
+    ["bigquery"],
+    raises=com.UnsupportedBackendType,
+    reason="BigQuery only supports two decimal types: (38, 9) and (76, 38)",
+)
+def test_table_describe_with_multiple_decimal_columns(con):
+    t = ibis.memtable({"a": [1, 2, 3], "b": [4, 5, 6]}).cast(
+        {"a": "decimal(21, 2)", "b": "decimal(20, 2)"}
+    )
+    expr = t.describe()
+    result = con.to_pyarrow(expr)
+    assert len(result) == 2

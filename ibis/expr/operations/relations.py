@@ -24,7 +24,7 @@ from ibis.common.typing import Coercible, VarTuple
 from ibis.expr.operations.core import Alias, Column, Node, Scalar, Value
 from ibis.expr.operations.sortkeys import SortKey
 from ibis.expr.schema import Schema
-from ibis.formats import TableProxy  # noqa: TCH001
+from ibis.formats import TableProxy  # noqa: TC001
 
 T = TypeVar("T")
 
@@ -145,6 +145,28 @@ class Simple(Relation):
 
 
 @public
+class DropColumns(Relation):
+    """Drop columns from a relation."""
+
+    parent: Relation
+    columns_to_drop: frozenset[str]
+
+    @attribute
+    def schema(self):
+        schema = self.parent.schema.fields.copy()
+        for column in self.columns_to_drop:
+            del schema[column]
+        return Schema(schema)
+
+    @attribute
+    def values(self):
+        fields = self.parent.fields.copy()
+        for column in self.columns_to_drop:
+            del fields[column]
+        return fields
+
+
+@public
 class Reference(Relation):
     _uid_counter = itertools.count()
     parent: Relation
@@ -163,6 +185,8 @@ class Reference(Relation):
 # TODO(kszucs): remove in favor of View
 @public
 class SelfReference(Reference):
+    """A self-referential relation."""
+
     values = FrozenOrderedDict()
 
 
@@ -184,6 +208,7 @@ JoinKind = Literal[
     "any_inner",
     "any_left",
     "cross",
+    "positional",
 ]
 
 
@@ -248,13 +273,16 @@ class Filter(Simple):
     predicates: VarTuple[Value[dt.Boolean]]
 
     def __init__(self, parent, predicates):
-        from ibis.expr.rewrites import ReductionLike
+        from ibis.expr.rewrites import ReductionLike, p
 
         for pred in predicates:
-            if pred.find(ReductionLike, filter=Value):
+            # bare reductions that are not window functions are not allowed
+            if pred.find(ReductionLike, filter=Value) and not pred.find(
+                p.WindowFunction, filter=Value
+            ):
                 raise IntegrityError(
                     f"Cannot add {pred!r} to filter, it is a reduction which "
-                    "must be converted to a scalar subquery first"
+                    "must be converted to a scalar subquery or window function first"
                 )
             if pred.relations and parent not in pred.relations:
                 raise IntegrityError(
@@ -278,7 +306,7 @@ class Aggregate(Relation):
     """Aggregate a table by a set of group by columns and metrics."""
 
     parent: Relation
-    groups: FrozenOrderedDict[str, Unaliased[Column]]
+    groups: FrozenOrderedDict[str, Unaliased[Value]]
     metrics: FrozenOrderedDict[str, Unaliased[Scalar]]
 
     def __init__(self, parent, groups, metrics):
@@ -431,7 +459,7 @@ class SQLStringView(Relation):
 class DummyTable(Relation):
     """A table constructed from literal values."""
 
-    values: FrozenOrderedDict[str, Value]
+    values: FrozenOrderedDict[str, Annotated[Value, ~InstanceOf(Alias)]]
 
     @attribute
     def schema(self):
@@ -465,6 +493,31 @@ class Sample(Simple):
 @public
 class Distinct(Simple):
     """Compute the distinct rows of a table."""
+
+
+@public
+class TableUnnest(Relation):
+    """Cross join unnest operation."""
+
+    parent: Relation
+    column: Value[dt.Array]
+    column_name: str
+    offset: typing.Union[str, None]
+    keep_empty: bool
+
+    @attribute
+    def values(self):
+        return self.parent.fields
+
+    @attribute
+    def schema(self):
+        base = self.parent.schema.fields.copy()
+        base[self.column_name] = self.column.dtype.value_type
+
+        if self.offset is not None:
+            base[self.offset] = dt.int64
+
+        return Schema(base)
 
 
 # TODO(kszucs): support t.select(*t) syntax by implementing Table.__iter__()

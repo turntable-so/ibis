@@ -8,7 +8,7 @@ import ibis.expr.datatypes as dt
 import ibis.expr.rules as rlz
 from ibis.common.annotations import ValidationError, attribute
 from ibis.common.exceptions import IbisTypeError
-from ibis.common.typing import VarTuple  # noqa: TCH001
+from ibis.common.typing import VarTuple  # noqa: TC001
 from ibis.expr.operations.core import Binary, Unary, Value
 
 
@@ -66,8 +66,8 @@ class Comparison(Binary):
         """
         if not rlz.comparable(left, right):
             raise IbisTypeError(
-                f"Arguments {rlz._arg_type_error_format(left)} and "
-                f"{rlz._arg_type_error_format(right)} are not comparable"
+                f"Arguments {rlz.arg_type_error_format(left)} and "
+                f"{rlz.arg_type_error_format(right)} are not comparable"
             )
         super().__init__(left=left, right=right)
 
@@ -121,13 +121,13 @@ class Between(Value):
     def __init__(self, arg, lower_bound, upper_bound):
         if not rlz.comparable(arg, lower_bound):
             raise ValidationError(
-                f"Arguments {rlz._arg_type_error_format(arg)} and "
-                f"{rlz._arg_type_error_format(lower_bound)} are not comparable"
+                f"Arguments {rlz.arg_type_error_format(arg)} and "
+                f"{rlz.arg_type_error_format(lower_bound)} are not comparable"
             )
         if not rlz.comparable(arg, upper_bound):
             raise ValidationError(
-                f"Arguments {rlz._arg_type_error_format(arg)} and "
-                f"{rlz._arg_type_error_format(upper_bound)} are not comparable"
+                f"Arguments {rlz.arg_type_error_format(arg)} and "
+                f"{rlz.arg_type_error_format(upper_bound)} are not comparable"
             )
         super().__init__(arg=arg, lower_bound=lower_bound, upper_bound=upper_bound)
 
@@ -154,7 +154,7 @@ class IfElse(Value):
     Equivalent to
 
     ```python
-    bool_expr.case().when(True, true_expr).else_(false_or_null_expr)
+    bool_expr.cases((True, true_expr), else_=false_or_null_expr)
     ```
 
     Many backends implement this as a built-in function.

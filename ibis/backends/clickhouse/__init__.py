@@ -3,10 +3,11 @@ from __future__ import annotations
 import ast
 import contextlib
 import glob
+import re
 from contextlib import closing
 from functools import partial
 from typing import TYPE_CHECKING, Any, Literal
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import unquote_plus
 
 import clickhouse_connect as cc
 import pyarrow as pa
@@ -14,9 +15,11 @@ import pyarrow_hotfix  # noqa: F401
 import sqlglot as sg
 import sqlglot.expressions as sge
 import toolz
+from clickhouse_connect.driver.exceptions import DatabaseError
 from clickhouse_connect.driver.external import ExternalData
 
 import ibis
+import ibis.backends.sql.compilers as sc
 import ibis.common.exceptions as com
 import ibis.config
 import ibis.expr.operations as ops
@@ -24,14 +27,14 @@ import ibis.expr.schema as sch
 import ibis.expr.types as ir
 from ibis import util
 from ibis.backends import BaseBackend, CanCreateDatabase
-from ibis.backends.clickhouse.compiler import ClickHouseCompiler
 from ibis.backends.clickhouse.converter import ClickHousePandasData
 from ibis.backends.sql import SQLBackend
-from ibis.backends.sql.compiler import C
+from ibis.backends.sql.compilers.base import C
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Iterator, Mapping
     from pathlib import Path
+    from urllib.parse import ParseResult
 
     import pandas as pd
     import polars as pl
@@ -43,7 +46,7 @@ def _to_memtable(v):
 
 class Backend(SQLBackend, CanCreateDatabase):
     name = "clickhouse"
-    compiler = ClickHouseCompiler()
+    compiler = sc.clickhouse.compiler
 
     # ClickHouse itself does, but the client driver does not
     supports_temporary_tables = False
@@ -60,7 +63,13 @@ class Backend(SQLBackend, CanCreateDatabase):
 
         bool_type: Literal["Bool", "UInt8", "Int8"] = "Bool"
 
-    def _from_url(self, url: str, **kwargs) -> BaseBackend:
+    def _register_in_memory_table(self, op: ops.InMemoryTable) -> None:
+        """No-op."""
+
+    def _finalize_memtable(self, name: str) -> None:
+        """No-op."""
+
+    def _from_url(self, url: ParseResult, **kwargs) -> BaseBackend:
         """Connect to a backend using a URL `url`.
 
         Parameters
@@ -76,24 +85,16 @@ class Backend(SQLBackend, CanCreateDatabase):
             A backend instance
 
         """
-        url = urlparse(url)
         database = url.path[1:]
-        query_params = parse_qs(url.query)
 
         connect_args = {
             "user": url.username,
-            "password": url.password or "",
+            "password": unquote_plus(url.password or ""),
             "host": url.hostname,
             "database": database or "",
+            "port": url.port,
+            **kwargs,
         }
-
-        for name, value in query_params.items():
-            if len(value) > 1:
-                connect_args[name] = value
-            elif len(value) == 1:
-                connect_args[name] = value[0]
-            else:
-                raise com.IbisError(f"Invalid URL parameter: {name}")
 
         kwargs.update(connect_args)
         self._convert_kwargs(kwargs)
@@ -150,8 +151,7 @@ class Backend(SQLBackend, CanCreateDatabase):
         >>> import ibis
         >>> client = ibis.clickhouse.connect()
         >>> client
-        <ibis.clickhouse.client.ClickhouseClient object at 0x...>
-
+        <ibis.backends.clickhouse.Backend object at 0x...>
         """
         if settings is None:
             settings = {}
@@ -169,6 +169,21 @@ class Backend(SQLBackend, CanCreateDatabase):
             settings=settings,
             **kwargs,
         )
+
+    @util.experimental
+    @classmethod
+    def from_connection(cls, con: cc.driver.Client) -> Backend:
+        """Create an Ibis client from an existing ClickHouse Connect Client instance.
+
+        Parameters
+        ----------
+        con
+            An existing ClickHouse Connect Client instance.
+        """
+        new_backend = cls()
+        new_backend._can_reconnect = False
+        new_backend.con = con
+        return new_backend
 
     @property
     def version(self) -> str:
@@ -256,7 +271,9 @@ class Backend(SQLBackend, CanCreateDatabase):
     def _collect_in_memory_tables(
         self, expr: ir.Table | None, external_tables: Mapping | None = None
     ):
-        memtables = {op.name: op for op in expr.op().find(ops.InMemoryTable)}
+        memtables = {
+            op.name: op for op in self._verify_in_memory_tables_are_unique(expr)
+        }
         externals = toolz.valmap(_to_memtable, external_tables or {})
         return toolz.merge(memtables, externals)
 
@@ -300,7 +317,7 @@ class Backend(SQLBackend, CanCreateDatabase):
         params: Mapping[ir.Scalar, Any] | None = None,
         external_tables: Mapping[str, Any] | None = None,
         chunk_size: int = 1_000_000,
-        **_: Any,
+        **kwargs: Any,
     ) -> pa.ipc.RecordBatchReader:
         """Execute expression and return an iterator of pyarrow record batches.
 
@@ -320,6 +337,8 @@ class Backend(SQLBackend, CanCreateDatabase):
             External data
         chunk_size
             Maximum number of row to return in a single chunk
+        kwargs
+            Extra arguments passed directly to clickhouse-connect
 
         Returns
         -------
@@ -349,14 +368,17 @@ class Backend(SQLBackend, CanCreateDatabase):
         external_tables = self._collect_in_memory_tables(expr, external_tables)
         external_data = self._normalize_external_tables(external_tables)
 
-        def batcher(sql: str, *, schema: pa.Schema) -> Iterator[pa.RecordBatch]:
-            settings = {}
+        settings = kwargs.pop("settings", {})
 
-            # readonly != 1 means that the server setting is writable
-            if self.con.server_settings["max_block_size"].readonly != 1:
-                settings["max_block_size"] = chunk_size
+        # readonly != 1 means that the server setting is writable
+        if self.con.server_settings["max_block_size"].readonly != 1:
+            settings["max_block_size"] = chunk_size
+
+        def batcher(
+            sql: str, *, schema: pa.Schema, settings, **kwargs
+        ) -> Iterator[pa.RecordBatch]:
             with self.con.query_column_block_stream(
-                sql, external_data=external_data, settings=settings
+                sql, external_data=external_data, settings=settings, **kwargs
             ) as blocks:
                 yield from map(
                     partial(pa.RecordBatch.from_arrays, schema=schema), blocks
@@ -365,13 +387,14 @@ class Backend(SQLBackend, CanCreateDatabase):
         self._log(sql)
         schema = table.schema().to_pyarrow()
         return pa.ipc.RecordBatchReader.from_batches(
-            schema, batcher(sql, schema=schema)
+            schema, batcher(sql, schema=schema, settings=settings, **kwargs)
         )
 
     def execute(
         self,
         expr: ir.Expr,
         limit: str | None = "default",
+        params: Mapping[ir.Scalar, Any] | None = None,
         external_tables: Mapping[str, pd.DataFrame] | None = None,
         **kwargs: Any,
     ) -> Any:
@@ -379,7 +402,7 @@ class Backend(SQLBackend, CanCreateDatabase):
         import pandas as pd
 
         table = expr.as_table()
-        sql = self.compile(table, limit=limit, **kwargs)
+        sql = self.compile(table, params=params, limit=limit)
 
         schema = table.schema()
         self._log(sql)
@@ -387,7 +410,11 @@ class Backend(SQLBackend, CanCreateDatabase):
         external_tables = self._collect_in_memory_tables(expr, external_tables)
         external_data = self._normalize_external_tables(external_tables)
         df = self.con.query_df(
-            sql, external_data=external_data, use_na_values=False, use_none=True
+            sql,
+            external_data=external_data,
+            use_na_values=False,
+            use_none=True,
+            **kwargs,
         )
 
         if df.empty:
@@ -406,6 +433,7 @@ class Backend(SQLBackend, CanCreateDatabase):
         obj: pd.DataFrame | ir.Table,
         settings: Mapping[str, Any] | None = None,
         overwrite: bool = False,
+        database: str | None = None,
         **kwargs: Any,
     ):
         import pandas as pd
@@ -415,18 +443,18 @@ class Backend(SQLBackend, CanCreateDatabase):
             self.truncate_table(name)
 
         if isinstance(obj, pa.Table):
-            return self.con.insert_arrow(name, obj, settings=settings, **kwargs)
-        elif isinstance(obj, pd.DataFrame):
             return self.con.insert_arrow(
-                name, pa.Table.from_pandas(obj), settings=settings, **kwargs
+                name, obj, database=database, settings=settings, **kwargs
             )
+        elif isinstance(obj, pd.DataFrame):
+            return self.con.insert_df(name, obj, settings=settings, **kwargs)
         elif not isinstance(obj, ir.Table):
             obj = ibis.memtable(obj)
 
-        query = self._build_insert_query(target=name, source=obj)
+        query = self._build_insert_from_table(target=name, source=obj, db=database)
         external_tables = self._collect_in_memory_tables(obj, {})
         external_data = self._normalize_external_tables(external_tables)
-        return self.con.command(query.sql(self.name), external_data=external_data)
+        return self.con.command(query.sql(self.dialect), external_data=external_data)
 
     def raw_sql(
         self,
@@ -489,12 +517,17 @@ class Backend(SQLBackend, CanCreateDatabase):
 
         """
         if catalog is not None:
-            raise com.UnsupportedBackendFeatureError(
-                "`catalog` namespaces are not supported by clickhouse"
+            raise com.UnsupportedOperationError(
+                "`catalog` namespaces are not supported by ClickHouse"
             )
         query = sge.Describe(this=sg.table(table_name, db=database))
-        with self._safe_raw_sql(query) as results:
-            names, types, *_ = results.result_columns
+        try:
+            with self._safe_raw_sql(query) as results:
+                names, types, *_ = results.result_columns
+        except DatabaseError as e:
+            if re.search(r"\bUNKNOWN_TABLE\b", str(e)):
+                raise com.TableNotFound(table_name) from e
+
         return sch.Schema(
             dict(zip(names, map(self.compiler.type_mapper.from_string, types)))
         )
@@ -593,7 +626,7 @@ class Backend(SQLBackend, CanCreateDatabase):
         | pl.LazyFrame
         | None = None,
         *,
-        schema: ibis.Schema | None = None,
+        schema: sch.SchemaLike | None = None,
         database: str | None = None,
         temp: bool = False,
         overwrite: bool = False,
@@ -648,22 +681,15 @@ class Backend(SQLBackend, CanCreateDatabase):
 
         if obj is None and schema is None:
             raise com.IbisError("The `schema` or `obj` parameter is required")
+        if schema is not None:
+            schema = ibis.schema(schema)
 
         if obj is not None and not isinstance(obj, ir.Expr):
             obj = ibis.memtable(obj, schema=schema)
 
-        if schema is None:
-            schema = obj.schema()
-
         this = sge.Schema(
-            this=sg.table(name, db=database),
-            expressions=[
-                sge.ColumnDef(
-                    this=sg.to_identifier(name, quoted=self.compiler.quoted),
-                    kind=self.compiler.type_mapper.from_ibis(typ),
-                )
-                for name, typ in schema.items()
-            ],
+            this=sg.table(name, db=database, quoted=self.compiler.quoted),
+            expressions=(schema or obj.schema()).to_sqlglot(self.dialect),
         )
         properties = [
             # the engine cannot be quoted, since clickhouse won't allow e.g.,
@@ -724,7 +750,7 @@ class Backend(SQLBackend, CanCreateDatabase):
         expression = None
 
         if obj is not None:
-            expression = self._to_sqlglot(obj)
+            expression = self.compiler.to_sqlglot(obj)
             external_tables.update(self._collect_in_memory_tables(obj))
 
         code = sge.Create(
@@ -751,7 +777,7 @@ class Backend(SQLBackend, CanCreateDatabase):
         database: str | None = None,
         overwrite: bool = False,
     ) -> ir.Table:
-        expression = self._to_sqlglot(obj)
+        expression = self.compiler.to_sqlglot(obj)
         src = sge.Create(
             this=sg.table(name, db=database),
             kind="VIEW",

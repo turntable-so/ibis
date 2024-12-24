@@ -1,0 +1,33 @@
+# Cursed Knowledge
+
+Cursed knowledge the Ibis developers have acquired via battling with many, many
+execution engines.
+
+## Oracle
+
+* Oracle's `LTRIM` and `RTRIM` functions accept a _set_ of whitespace (or other)
+  characters to remove from the left-, and right-hand-side sides of the input
+  string, but the `TRIM` function only accepts a single character to remove.
+
+## Impala
+
+* Impala's `LTRIM` and `RTRIM` functions accept a _set_ of whitespace (or other)
+  characters to remove from the left-, and right-hand-side sides of the input
+  string, but the `TRIM` function only removes _spaces_.
+
+## ClickHouse
+
+* [ClickHouse's random number generating
+  functions](https://clickhouse.com/docs/en/sql-reference/functions/random-functions)
+  are considered in [common subexpression
+  elimination](https://en.wikipedia.org/wiki/Common_subexpression_elimination),
+  so to get two unique random numbers, users must defeat that optimization.
+  This is done by passing **any** argument to those functions. It's left as an
+  exercise for the reader to figure out how to generate two unique inputs.
+
+## Postgres
+
+* Postgres doesn't have unsigned integer datatypes, except that it does.  It's
+  called [`OID`](https://www.postgresql.org/docs/current/datatype-oid.html) for
+  "Object ID" and it's a 4-byte unsigned int, mostly only used in certain
+  internal tables.

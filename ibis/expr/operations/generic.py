@@ -13,12 +13,12 @@ import ibis.expr.datashape as ds
 import ibis.expr.datatypes as dt
 import ibis.expr.rules as rlz
 from ibis.common.annotations import attribute
-from ibis.common.deferred import Deferred  # noqa: TCH001
+from ibis.common.deferred import Deferred
 from ibis.common.grounds import Singleton
-from ibis.common.patterns import InstanceOf, Length  # noqa: TCH001
-from ibis.common.typing import VarTuple  # noqa: TCH001
+from ibis.common.patterns import InstanceOf, Length
+from ibis.common.typing import VarTuple  # noqa: TC001
 from ibis.expr.operations.core import Scalar, Unary, Value
-from ibis.expr.operations.relations import Relation  # noqa: TCH001
+from ibis.expr.operations.relations import Relation  # noqa: TC001
 
 
 @public
@@ -289,15 +289,24 @@ class SimpleCase(Value):
     """Simple case statement."""
 
     base: Value
-    cases: VarTuple[Value]
-    results: VarTuple[Value]
+    cases: Annotated[VarTuple[Value], Length(at_least=1)]
+    results: Annotated[VarTuple[Value], Length(at_least=1)]
     default: Value
 
-    shape = rlz.shape_like("base")
-
-    def __init__(self, cases, results, **kwargs):
+    def __init__(self, base, cases, results, default):
         assert len(cases) == len(results)
-        super().__init__(cases=cases, results=results, **kwargs)
+        for case in cases:
+            if not rlz.comparable(base, case):
+                raise TypeError(
+                    f"Base expression {rlz.arg_type_error_format(base)} and "
+                    f"case {rlz.arg_type_error_format(case)} are not comparable"
+                )
+        super().__init__(base=base, cases=cases, results=results, default=default)
+
+    @attribute
+    def shape(self):
+        exprs = [self.base, *self.cases, *self.results, self.default]
+        return rlz.highest_precedence_shape(exprs)
 
     @attribute
     def dtype(self):
@@ -309,20 +318,17 @@ class SimpleCase(Value):
 class SearchedCase(Value):
     """Searched case statement."""
 
-    cases: VarTuple[Value[dt.Boolean]]
-    results: VarTuple[Value]
+    cases: Annotated[VarTuple[Value[dt.Boolean]], Length(at_least=1)]
+    results: Annotated[VarTuple[Value], Length(at_least=1)]
     default: Value
 
     def __init__(self, cases, results, default):
         assert len(cases) == len(results)
-        if default.dtype.is_null():
-            default = Cast(default, rlz.highest_precedence_dtype(results))
         super().__init__(cases=cases, results=results, default=default)
 
     @attribute
     def shape(self):
-        # TODO(kszucs): can be removed after making Sequence iterable
-        return rlz.highest_precedence_shape(self.cases)
+        return rlz.highest_precedence_shape((*self.cases, *self.results, self.default))
 
     @attribute
     def dtype(self):

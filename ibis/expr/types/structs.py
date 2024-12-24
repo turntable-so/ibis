@@ -7,6 +7,7 @@ from typing import TYPE_CHECKING
 from public import public
 
 import ibis.expr.operations as ops
+from ibis import util
 from ibis.common.deferred import deferrable
 from ibis.common.exceptions import IbisError
 from ibis.expr.types.generic import Column, Scalar, Value, literal
@@ -67,15 +68,15 @@ def struct(
 
     >>> t = ibis.memtable({"a": [1, 2, 3]})
     >>> ibis.struct([("a", t.a), ("b", "foo")])
-    ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-    ┃ StructColumn()              ┃
-    ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-    │ struct<a: int64, b: string> │
-    ├─────────────────────────────┤
-    │ {'a': 1, 'b': 'foo'}        │
-    │ {'a': 2, 'b': 'foo'}        │
-    │ {'a': 3, 'b': 'foo'}        │
-    └─────────────────────────────┘
+    ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃ StructColumn({'a': a, 'b': 'foo'}) ┃
+    ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+    │ struct<a: int64, b: string>        │
+    ├────────────────────────────────────┤
+    │ {'a': 1, 'b': 'foo'}               │
+    │ {'a': 2, 'b': 'foo'}               │
+    │ {'a': 3, 'b': 'foo'}               │
+    └────────────────────────────────────┘
     """
     import ibis.expr.operations as ops
 
@@ -340,8 +341,9 @@ class StructValue(Value):
 
         return table.to_expr().select([self[name] for name in self.names])
 
+    @util.deprecated(as_of="10.0", instead="use lift or unpack instead")
     def destructure(self) -> list[ir.Value]:
-        """Destructure a ``StructValue`` into the corresponding struct fields.
+        """Destructure a `StructValue` into the corresponding struct fields.
 
         When assigned, a destruct value will be destructured and assigned to
         multiple columns.

@@ -193,7 +193,7 @@ def evaluate_annotations(
     for k, v in annots.items():
         if isinstance(v, str):
             try:
-                v = eval(v, globalns, localns)
+                v = eval(v, globalns, localns)  # noqa: S307
             except NameError:
                 if not best_effort:
                     raise
@@ -245,8 +245,8 @@ class CoercionError(Exception): ...
 class Coercible(Abstract):
     """Protocol for defining coercible types.
 
-    Coercible types define a special ``__coerce__`` method that accepts an object
-    with an instance of the type. Used in conjunction with the ``coerced_to``
+    Coercible types define a special `__coerce__` method that accepts an object
+    with an instance of the type. Used in conjunction with the `coerced_to``
     pattern to coerce arguments to a specific type.
     """
 

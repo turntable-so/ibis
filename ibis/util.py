@@ -10,6 +10,7 @@ import importlib.metadata
 import itertools
 import operator
 import os
+import re
 import sys
 import textwrap
 import types
@@ -31,6 +32,7 @@ if TYPE_CHECKING:
     import ibis.expr.types as ir
 
 T = TypeVar("T", covariant=True)
+S = TypeVar("S", bound=T, covariant=True)
 U = TypeVar("U", covariant=True)
 K = TypeVar("K")
 V = TypeVar("V")
@@ -150,7 +152,7 @@ def is_function(v: Any) -> bool:
 
 
 def log(msg: str) -> None:
-    """Log `msg` using ``options.verbose_log`` if set, otherwise ``print``."""
+    """Log `msg` using `options.verbose_log` if set, otherwise `print`."""
     from ibis.config import options
 
     if options.verbose:
@@ -171,7 +173,7 @@ def approx_equal(a: Real, b: Real, eps: Real):
 def safe_index(elements: Sequence[int], value: int) -> int:
     """Find the location of `value` in `elements`.
 
-    Return -1 if `value` is not found instead of raising ``ValueError``.
+    Return -1 if `value` is not found instead of raising `ValueError`.
 
     Parameters
     ----------
@@ -499,9 +501,7 @@ def normalize_filename(source: str | Path) -> str:
         source = source.removeprefix(f"{prefix}://")
 
     def _absolufy_paths(name):
-        if not name.startswith(
-            ("http", "s3", "az", "abfs", "abfss", "adl", "gs", "gcs", "azure")
-        ):
+        if re.search(r"^(?:.+)://", name) is None:
             return os.path.abspath(name)
         return name
 
@@ -640,7 +640,7 @@ class Namespace:
 class PseudoHashable(Coercible, Generic[V]):
     """A wrapper that provides a best effort precomputed hash."""
 
-    __slots__ = ("obj", "hash")
+    __slots__ = ("hash", "obj")
     obj: V
 
     def __init__(self, obj: V):
@@ -678,3 +678,72 @@ class PseudoHashable(Coercible, Generic[V]):
             return self.obj != other.obj
         else:
             return NotImplemented
+
+
+def chunks(n: int, *, chunk_size: int) -> Iterator[tuple[int, int]]:
+    """Return an iterator of chunk start and end indices.
+
+    Parameters
+    ----------
+    n
+        The total number of elements.
+    chunk_size
+        The size of each chunk.
+
+    Returns
+    -------
+    int
+        THE start and end indices of each chunk.
+
+    Examples
+    --------
+    >>> list(chunks(10, chunk_size=3))
+    [(0, 3), (3, 6), (6, 9), (9, 10)]
+    >>> list(chunks(10, chunk_size=4))
+    [(0, 4), (4, 8), (8, 10)]
+    """
+    return ((start, min(start + chunk_size, n)) for start in range(0, n, chunk_size))
+
+
+def get_subclasses(obj: type[T]) -> Iterator[type[S]]:
+    """Recursively compute all subclasses of `obj`.
+
+    ::: {.callout-note}
+    ## The resulting iterator does **not** include the input type object.
+    :::
+
+    Parameters
+    ----------
+    obj
+        Any type object
+
+    Examples
+    --------
+    >>> class Base: ...
+    >>> class Subclass1(Base): ...
+    >>> class Subclass2(Base): ...
+    >>> class TransitiveSubclass(Subclass2): ...
+
+    Everything inherits `Base` (directly or transitively)
+
+    >>> list(get_subclasses(Base))
+    [<class 'ibis.util.Subclass1'>, <class 'ibis.util.Subclass2'>, <class 'ibis.util.TransitiveSubclass'>]
+
+    Nothing inherits from `Subclass1`
+
+    >>> list(get_subclasses(Subclass1))
+    []
+
+    Only `TransitiveSubclass` inherits from `Subclass2`
+
+    >>> list(get_subclasses(Subclass2))
+    [<class 'ibis.util.TransitiveSubclass'>]
+
+    Nothing inherits from `TransitiveSubclass`
+
+    >>> list(get_subclasses(TransitiveSubclass))
+    []
+    """
+    for child_class in obj.__subclasses__():
+        yield child_class
+        yield from get_subclasses(child_class)

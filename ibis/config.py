@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import contextlib
-from collections.abc import Callable  # noqa: TCH003
+from collections.abc import Callable  # noqa: TC003
 from typing import Annotated, Any, Optional
 
 from public import public
@@ -26,21 +25,6 @@ class Config(Annotable):
         for field in prefix:
             conf = getattr(conf, field)
         setattr(conf, key, value)
-
-    @contextlib.contextmanager
-    def _with_temporary(self, options):
-        try:
-            old = {}
-            for key, value in options.items():
-                old[key] = self.get(key)
-                self.set(key, value)
-            yield
-        finally:
-            for key, value in old.items():
-                self.set(key, value)
-
-    def __call__(self, options):
-        return self._with_temporary(options)
 
 
 class SQL(Config):
@@ -148,8 +132,6 @@ class Options(Config):
         SQL-related options.
     clickhouse : Config | None
         Clickhouse specific options.
-    dask : Config | None
-        Dask specific options.
     impala : Config | None
         Impala specific options.
     pandas : Config | None
@@ -167,7 +149,6 @@ class Options(Config):
     default_backend: Optional[Any] = None
     sql: SQL = SQL()
     clickhouse: Optional[Config] = None
-    dask: Optional[Config] = None
     impala: Optional[Config] = None
     pandas: Optional[Config] = None
     pyspark: Optional[Config] = None
@@ -208,11 +189,6 @@ For more information on available backends, visit https://ibis-project.org/insta
 
 
 options = Options()
-
-
-@public
-def option_context(key, new_value):
-    return options({key: new_value})
 
 
 public(options=options)

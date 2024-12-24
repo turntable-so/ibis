@@ -7,14 +7,14 @@ from collections import defaultdict
 import toolz
 
 import ibis.expr.operations as ops
-from ibis.common.collections import FrozenDict  # noqa: TCH001
+from ibis.common.collections import FrozenDict  # noqa: TC001
 from ibis.common.deferred import Item, _, deferred, var
 from ibis.common.exceptions import ExpressionError, IbisInputError
 from ibis.common.graph import Node as Traversable
 from ibis.common.graph import traverse
 from ibis.common.grounds import Concrete
 from ibis.common.patterns import Check, pattern, replace
-from ibis.common.typing import VarTuple  # noqa: TCH001
+from ibis.common.typing import VarTuple  # noqa: TC001
 from ibis.util import Namespace, promote_list
 
 p = Namespace(pattern, module=ops)
@@ -223,7 +223,7 @@ def lower_stringslice(_, **kwargs):
 
 
 @replace(p.Analytic)
-def project_wrap_analytic(_, rel):
+def wrap_analytic(_, **__):
     # Wrap analytic functions in a window function
     return ops.WindowFunction(_)
 
@@ -250,7 +250,7 @@ def rewrite_project_input(value, relation):
     # or scalar subqueries depending on whether they are originating from the
     # relation
     return value.replace(
-        project_wrap_analytic | project_wrap_reduction,
+        wrap_analytic | project_wrap_reduction,
         filter=p.Value & ~p.WindowFunction,
         context={"rel": relation},
     )
@@ -272,7 +272,9 @@ def filter_wrap_reduction(_):
 
 
 def rewrite_filter_input(value):
-    return value.replace(filter_wrap_reduction, filter=p.Value & ~p.WindowFunction)
+    return value.replace(
+        wrap_analytic | filter_wrap_reduction, filter=p.Value & ~p.WindowFunction
+    )
 
 
 @replace(p.Analytic | p.Reduction)
@@ -309,9 +311,12 @@ def window_merge_frames(_, window):
 
     order_keys = {}
     for sort_key in window.orderings + _.order_by:
-        order_keys[sort_key.expr] = sort_key.ascending
-    order_by = (ops.SortKey(k, v) for k, v in order_keys.items())
+        order_keys[sort_key.expr] = sort_key.ascending, sort_key.nulls_first
 
+    order_by = (
+        ops.SortKey(expr, ascending=ascending, nulls_first=nulls_first)
+        for expr, (ascending, nulls_first) in order_keys.items()
+    )
     return _.copy(start=start, end=end, group_by=group_by, order_by=order_by)
 
 

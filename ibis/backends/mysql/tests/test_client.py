@@ -12,6 +12,13 @@ from pytest import param
 import ibis
 import ibis.expr.datatypes as dt
 from ibis import udf
+from ibis.backends.mysql.tests.conftest import (
+    IBIS_TEST_MYSQL_DB,
+    MYSQL_HOST,
+    MYSQL_PASS,
+    MYSQL_USER,
+)
+from ibis.backends.tests.errors import MySQLOperationalError
 from ibis.util import gen_name
 
 MYSQL_TYPES = [
@@ -20,8 +27,8 @@ MYSQL_TYPES = [
     param("boolean", dt.int8, id="boolean"),
     param("smallint", dt.int16, id="smallint"),
     param("int2", dt.int16, id="int2"),
-    # ("mediumint", dt.int32), => https://github.com/tobymao/sqlglot/issues/2109
-    # ("int3", dt.int32), => https://github.com/tobymao/sqlglot/issues/2109
+    param("mediumint", dt.int32, id="mediumint"),
+    param("int3", dt.int32, id="int3"),
     param("int", dt.int32, id="int"),
     param("int4", dt.int32, id="int4"),
     param("integer", dt.int32, id="integer"),
@@ -50,7 +57,6 @@ MYSQL_TYPES = [
     param("bit(17)", dt.int32, id="bit_17"),
     param("bit(33)", dt.int64, id="bit_33"),
     # mariadb doesn't have a distinct json type
-    param("json", dt.string, id="json"),
     param("enum('small', 'medium', 'large')", dt.string, id="enum"),
     param("set('a', 'b', 'c', 'd')", dt.Array(dt.string), id="set"),
     param("mediumblob", dt.binary, id="mediumblob"),
@@ -86,8 +92,9 @@ def test_get_schema_from_query(con, mysql_type, expected_type):
 @pytest.mark.parametrize(
     ("mysql_type", "get_schema_expected_type", "table_expected_type"),
     [
-        param("inet6", dt.string, dt.inet, id="inet"),
-        param("uuid", dt.string, dt.uuid, id="uuid"),
+        param("json", dt.binary, dt.string, id="json"),
+        param("inet6", dt.binary, dt.inet, id="inet"),
+        param("uuid", dt.binary, dt.uuid, id="uuid"),
     ],
 )
 def test_get_schema_from_query_special_cases(
@@ -219,7 +226,7 @@ def test_builtin_agg_udf(con):
     assert result == expected
 
 
-def test_list_tables_schema_warning_refactor(con):
+def test_list_tables(con):
     mysql_tables = {
         "column_stats",
         "columns_priv",
@@ -229,8 +236,12 @@ def test_list_tables_schema_warning_refactor(con):
     }
     assert con.list_tables()
 
-    with pytest.warns(FutureWarning):
-        assert mysql_tables.issubset(con.list_tables(schema="mysql"))
-
     assert mysql_tables.issubset(con.list_tables(database="mysql"))
     assert mysql_tables.issubset(con.list_tables(database=("mysql",)))
+
+
+def test_invalid_port():
+    port = 4000
+    url = f"mysql://{MYSQL_USER}:{MYSQL_PASS}@{MYSQL_HOST}:{port}/{IBIS_TEST_MYSQL_DB}"
+    with pytest.raises(MySQLOperationalError):
+        ibis.connect(url)

@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import operator
 
-import pandas as pd
-import pandas.testing as tm
 import pytest
 
 import ibis
 from ibis.backends.tests.errors import DuckDBInvalidInputException
+
+pd = pytest.importorskip("pandas")
+tm = pytest.importorskip("pandas.testing")
 
 
 @pytest.fixture(scope="module")
@@ -97,6 +98,7 @@ def time_keyed_right(time_keyed_df2):
         "sqlite",
         "risingwave",
         "flink",
+        "databricks",
     ]
 )
 def test_asof_join(con, time_left, time_right, time_df1, time_df2, direction, op):
@@ -111,7 +113,8 @@ def test_asof_join(con, time_left, time_right, time_df1, time_df2, direction, op
     result = result.sort_values(["group", "time"]).reset_index(drop=True)
     expected = expected.sort_values(["group", "time"]).reset_index(drop=True)
 
-    tm.assert_frame_equal(result[expected.columns], expected)
+    # duckdb returns datetime64[us], pandas defaults to use datetime64[ns]
+    tm.assert_frame_equal(result[expected.columns], expected, check_dtype=False)
     with pytest.raises(AssertionError):
         tm.assert_series_equal(result["time"], result["time_right"])
 
@@ -119,29 +122,30 @@ def test_asof_join(con, time_left, time_right, time_df1, time_df2, direction, op
 @pytest.mark.parametrize(
     ("direction", "op"), [("backward", operator.ge), ("forward", operator.le)]
 )
-@pytest.mark.broken(
+@pytest.mark.notimpl(
     ["clickhouse"], raises=AssertionError, reason="`time` is truncated to seconds"
 )
 @pytest.mark.notyet(
     [
-        "datafusion",
-        "trino",
-        "postgres",
-        "mysql",
-        "pyspark",
-        "druid",
-        "impala",
         "bigquery",
+        "databricks",
+        "datafusion",
+        "druid",
         "exasol",
-        "oracle",
-        "mssql",
-        "sqlite",
-        "risingwave",
         "flink",
+        "impala",
+        "mssql",
+        "mysql",
+        "oracle",
+        "postgres",
+        "pyspark",
+        "risingwave",
+        "sqlite",
+        "trino",
     ]
 )
 @pytest.mark.xfail_version(
-    duckdb=["duckdb>=0.10.2"], raises=DuckDBInvalidInputException
+    duckdb=["duckdb>=0.10.2,<1.1.1"], raises=DuckDBInvalidInputException
 )
 def test_keyed_asof_join_with_tolerance(
     con,
@@ -170,8 +174,11 @@ def test_keyed_asof_join_with_tolerance(
     result = result.sort_values(["key", "time"]).reset_index(drop=True)
     expected = expected.sort_values(["key", "time"]).reset_index(drop=True)
 
-    tm.assert_frame_equal(result[expected.columns], expected)
-    with pytest.raises(AssertionError):
-        tm.assert_series_equal(result["time"], result["time_right"])
-    with pytest.raises(AssertionError):
-        tm.assert_series_equal(result["key"], result["key_right"])
+    tm.assert_frame_equal(
+        # drop `time` from comparison to avoid issues with different time resolution
+        result[expected.columns].drop(["time"], axis=1),
+        expected.drop(["time"], axis=1),
+    )
+
+    # check that time is equal in value, if not dtype
+    tm.assert_series_equal(result["time"], expected["time"], check_dtype=False)

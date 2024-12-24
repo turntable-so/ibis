@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import Counter
 from collections.abc import Iterable, Iterator, Mapping
 from typing import TYPE_CHECKING, Any, Union
 
@@ -14,6 +15,9 @@ from ibis.util import indent
 
 if TYPE_CHECKING:
     from typing import TypeAlias
+
+    import sqlglot as sg
+    import sqlglot.expressions as sge
 
 
 class Schema(Concrete, Coercible, MapSet):
@@ -61,6 +65,10 @@ class Schema(Concrete, Coercible, MapSet):
     @attribute
     def types(self):
         return tuple(self.values())
+
+    @attribute
+    def geospatial(self) -> tuple[str, ...]:
+        return tuple(name for name, typ in self.fields.items() if typ.is_geospatial())
 
     @attribute
     def _name_locs(self) -> dict[str, int]:
@@ -120,18 +128,19 @@ class Schema(Concrete, Coercible, MapSet):
         }
 
         """
+
         pairs = list(values)
-        if len(pairs) == 0:
+        if not pairs:
             return cls({})
 
         names, types = zip(*pairs)
 
         # validate unique field names
-        name_locs = {v: i for i, v in enumerate(names)}
-        if len(name_locs) < len(names):
-            duplicate_names = list(names)
-            for v in name_locs:
-                duplicate_names.remove(v)
+        name_counts = Counter(names)
+        [(_, most_common_count)] = name_counts.most_common(1)
+
+        if most_common_count > 1:
+            duplicate_names = [name for name, count in name_counts.items() if count > 1]
             raise IntegrityError(f"Duplicate column name(s): {duplicate_names}")
 
         # construct the schema
@@ -183,6 +192,9 @@ class Schema(Concrete, Coercible, MapSet):
 
         return PyArrowSchema.from_ibis(self)
 
+    def __arrow_c_schema__(self):
+        return self.to_pyarrow().__arrow_c_schema__()
+
     def to_polars(self):
         """Return the equivalent polars schema."""
         from ibis.formats.polars import PolarsSchema
@@ -216,6 +228,74 @@ class Schema(Concrete, Coercible, MapSet):
 
         """
         return self.names[i]
+
+    def to_sqlglot(self, dialect: str | sg.Dialect) -> list[sge.ColumnDef]:
+        """Convert the schema to a list of SQL column definitions.
+
+        Parameters
+        ----------
+        dialect
+            The SQL dialect to use.
+
+        Returns
+        -------
+        list[sqlglot.expressions.ColumnDef]
+            A list of SQL column definitions.
+
+        Examples
+        --------
+        >>> import ibis
+        >>> sch = ibis.schema({"a": "int", "b": "!string"})
+        >>> sch
+        ibis.Schema {
+          a  int64
+          b  !string
+        }
+        >>> columns = sch.to_sqlglot(dialect="duckdb")
+        >>> columns
+        [ColumnDef(
+          this=Identifier(this=a, quoted=True),
+          kind=DataType(this=Type.BIGINT)), ColumnDef(
+          this=Identifier(this=b, quoted=True),
+          kind=DataType(this=Type.VARCHAR),
+          constraints=[
+            ColumnConstraint(
+              kind=NotNullColumnConstraint())])]
+
+        One use case for this method is to embed its output into a SQLGlot
+        `CREATE TABLE` expression.
+
+        >>> import sqlglot as sg
+        >>> import sqlglot.expressions as sge
+        >>> table = sg.table("t", quoted=True)
+        >>> ct = sge.Create(
+        ...     kind="TABLE",
+        ...     this=sge.Schema(
+        ...         this=table,
+        ...         expressions=columns,
+        ...     ),
+        ... )
+        >>> ct.sql(dialect="duckdb")
+        'CREATE TABLE "t" ("a" BIGINT, "b" TEXT NOT NULL)'
+        """
+        import sqlglot as sg
+        import sqlglot.expressions as sge
+
+        from ibis.backends.sql.datatypes import TYPE_MAPPERS as type_mappers
+
+        type_mapper = type_mappers[dialect]
+        return [
+            sge.ColumnDef(
+                this=sg.to_identifier(name, quoted=True),
+                kind=type_mapper.from_ibis(dtype),
+                constraints=(
+                    None
+                    if dtype.nullable
+                    else [sge.ColumnConstraint(kind=sge.NotNullColumnConstraint())]
+                ),
+            )
+            for name, dtype in self.items()
+        ]
 
 
 SchemaLike: TypeAlias = Union[
@@ -290,7 +370,7 @@ def infer_pyarrow_table(table):
 def infer_polars_dataframe(df):
     from ibis.formats.polars import PolarsSchema
 
-    return PolarsSchema.to_ibis(df.schema)
+    return PolarsSchema.to_ibis(df.collect_schema())
 
 
 # lock the dispatchers to avoid adding new implementations

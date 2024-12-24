@@ -22,6 +22,7 @@ MACADDR_BACKEND_TYPE = {
     "postgres": "text",
     "risingwave": "text",
     "flink": "CHAR(17) NOT NULL",
+    "databricks": "string",
 }
 
 
@@ -52,13 +53,12 @@ def test_macaddr_literal(con, backend):
                 "impala": "127.0.0.1",
                 "postgres": "127.0.0.1",
                 "risingwave": "127.0.0.1",
-                "pandas": "127.0.0.1",
                 "pyspark": "127.0.0.1",
                 "mysql": "127.0.0.1",
-                "dask": "127.0.0.1",
                 "mssql": "127.0.0.1",
                 "datafusion": "127.0.0.1",
                 "flink": "127.0.0.1",
+                "databricks": "127.0.0.1",
             },
             {
                 "bigquery": "STRING",
@@ -71,6 +71,7 @@ def test_macaddr_literal(con, backend):
                 "postgres": "text",
                 "risingwave": "text",
                 "flink": "CHAR(9) NOT NULL",
+                "databricks": "string",
             },
             id="ipv4",
         ),
@@ -86,13 +87,12 @@ def test_macaddr_literal(con, backend):
                 "impala": "2001:db8::1",
                 "postgres": "2001:db8::1",
                 "risingwave": "2001:db8::1",
-                "pandas": "2001:db8::1",
                 "pyspark": "2001:db8::1",
                 "mysql": "2001:db8::1",
-                "dask": "2001:db8::1",
                 "mssql": "2001:db8::1",
                 "datafusion": "2001:db8::1",
                 "flink": "2001:db8::1",
+                "databricks": "2001:db8::1",
             },
             {
                 "bigquery": "STRING",
@@ -105,6 +105,7 @@ def test_macaddr_literal(con, backend):
                 "postgres": "text",
                 "risingwave": "text",
                 "flink": "CHAR(11) NOT NULL",
+                "databricks": "string",
             },
             id="ipv6",
         ),

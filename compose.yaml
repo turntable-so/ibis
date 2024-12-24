@@ -1,6 +1,6 @@
 services:
   clickhouse:
-    image: clickhouse/clickhouse-server:24.5.1.1763-alpine
+    image: clickhouse/clickhouse-server:24.12.1.1614-alpine
     ports:
       - 8123:8123 # http port
       - 9000:9000 # native protocol port
@@ -18,7 +18,7 @@ services:
   mysql:
     environment:
       MYSQL_ALLOW_EMPTY_PASSWORD: "true"
-      MYSQL_DATABASE: ibis_testing
+      MYSQL_DATABASE: ibis-testing
       MYSQL_PASSWORD: ibis
       MYSQL_USER: ibis
     healthcheck:
@@ -28,7 +28,7 @@ services:
         - CMD
         - mariadb-admin
         - ping
-    image: mariadb:11.4.2
+    image: mariadb:11.6.2
     ports:
       - 3306:3306
     networks:
@@ -63,12 +63,17 @@ services:
     environment:
       MSSQL_SA_PASSWORD: 1bis_Testing!
       ACCEPT_EULA: "Y"
+      # The default collation in MSSQL isS QL_Latin1_General_CP1_CI_AS
+      # where the CI stands for Case Insensitive.
+      # We use a case-sensitive collation for testing so that we don't
+      # break users with case-sensitive collations.
+      MSSQL_COLLATION: Latin1_General_100_BIN2_UTF8
     healthcheck:
       interval: 1s
       retries: 20
       test:
         - CMD-SHELL
-        - /opt/mssql-tools/bin/sqlcmd -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -Q "IF DB_ID('ibis_testing') IS NULL BEGIN CREATE DATABASE [ibis_testing] END"
+        - $(find /opt -name sqlcmd -type f -executable) -C -S localhost -U sa -P "$$MSSQL_SA_PASSWORD" -Q "SELECT 1"
     ports:
       - 1433:1433
     volumes:
@@ -77,7 +82,7 @@ services:
       - mssql
 
   hive-metastore-db:
-    image: postgres:16.3-alpine
+    image: postgres:17.2-alpine
     environment:
       POSTGRES_USER: admin
       POSTGRES_PASSWORD: admin
@@ -94,7 +99,7 @@ services:
       - trino
 
   minio:
-    image: bitnami/minio:2024.6.11
+    image: bitnami/minio:2024.12.18
     environment:
       MINIO_ROOT_USER: accesskey
       MINIO_ROOT_PASSWORD: secretkey
@@ -156,7 +161,7 @@ services:
       test:
         - CMD-SHELL
         - trino --output-format null --execute 'show schemas in hive; show schemas in memory'
-    image: trinodb/trino:449
+    image: trinodb/trino:468
     ports:
       - 8080:8080
     networks:
@@ -167,7 +172,7 @@ services:
       - $PWD/docker/trino/jvm.config:/etc/trino/jvm.config:ro
 
   druid-postgres:
-    image: postgres:16.3-alpine
+    image: postgres:17.2-alpine
     container_name: druid-postgres
     environment:
       POSTGRES_PASSWORD: FoolishPassword
@@ -199,7 +204,7 @@ services:
       - druid
 
   druid-coordinator:
-    image: apache/druid:29.0.1
+    image: apache/druid:31.0.0
     hostname: coordinator
     container_name: coordinator
     volumes:
@@ -224,7 +229,7 @@ services:
       - druid
 
   druid-broker:
-    image: apache/druid:29.0.1
+    image: apache/druid:31.0.0
     hostname: broker
     container_name: broker
     volumes:
@@ -252,7 +257,7 @@ services:
       - druid
 
   druid-historical:
-    image: apache/druid:29.0.1
+    image: apache/druid:31.0.0
     hostname: historical
     container_name: historical
     volumes:
@@ -279,7 +284,7 @@ services:
       - druid
 
   druid-middlemanager:
-    image: apache/druid:29.0.1
+    image: apache/druid:31.0.0
     hostname: middlemanager
     container_name: middlemanager
     volumes:
@@ -307,7 +312,7 @@ services:
       - druid
 
   druid:
-    image: apache/druid:29.0.1
+    image: apache/druid:31.0.0
     hostname: router
     container_name: router
     volumes:
@@ -341,7 +346,7 @@ services:
       - druid
 
   oracle:
-    image: gvenzl/oracle-free:23.4-slim
+    image: gvenzl/oracle-free:23.6-slim
     environment:
       ORACLE_PASSWORD: ibis
       ORACLE_DATABASE: IBIS_TESTING
@@ -362,7 +367,7 @@ services:
       - oracle:/opt/oracle/data
 
   exasol:
-    image: exasol/docker-db:8.27.0
+    image: exasol/docker-db:8.32.0
     privileged: true
     ports:
       - 8563:8563
@@ -441,7 +446,7 @@ services:
         - kudu cluster ksck kudu:7051
 
   impala-hive-metastore:
-    image: apache/impala:4.0.0-impala_quickstart_hms
+    image: apache/impala:4.4.1-impala_quickstart_hms
     container_name: impala-hive-metastore
     command: hms
     volumes:
@@ -451,6 +456,14 @@ services:
       # shared volume.
       - impala:/user/hive/warehouse
       - ./docker/impala/conf:/opt/hive/conf:ro
+    healthcheck:
+      interval: 3s
+      retries: 20
+      test:
+        - CMD-SHELL
+        - bash -c 'printf \"GET / HTTP/1.1\n\n\" > /dev/tcp/127.0.0.1/9083; exit $$?;'
+        - bash -c 'printf \"GET / HTTP/1.1\n\n\" > /dev/tcp/impala-hive-metastore/9083; exit $$?;'
+        - bash -c 'printf \"GET / HTTP/1.1\n\n\" > /dev/tcp/impala-hive-metastore.impala/9083; exit $$?;'
     networks:
       impala:
         aliases:
@@ -458,7 +471,7 @@ services:
           - impala-hive-metastore.impala
 
   statestored:
-    image: apache/impala:4.0.0-statestored
+    image: apache/impala:4.4.1-statestored
     ports:
       - 25010:25010 # Web debug UI
     command:
@@ -468,21 +481,21 @@ services:
     volumes:
       - ./docker/impala/conf:/opt/impala/conf:ro
     healthcheck:
-      interval: 30s
+      interval: 3s
       retries: 20
       test:
         - CMD-SHELL
-        - nc -z 127.0.0.1 25010
+        - bash -c 'printf \"GET / HTTP/1.1\n\n\" > /dev/tcp/127.0.0.1/25010; exit $$?;'
     networks:
       - impala
 
   catalogd:
+    image: apache/impala:4.4.1-catalogd
     depends_on:
       impala-hive-metastore:
         condition: service_started
       statestored:
         condition: service_healthy
-    image: apache/impala:4.0.0-catalogd
     ports:
       - 25020:25020 # Web debug UI
     command:
@@ -497,16 +510,16 @@ services:
       - impala:/user/hive/warehouse
       - ./docker/impala/conf:/opt/impala/conf:ro
     healthcheck:
-      interval: 30s
+      interval: 3s
       retries: 20
       test:
         - CMD-SHELL
-        - nc -z 127.0.0.1 25020
+        - bash -c 'printf \"GET / HTTP/1.1\n\n\" > /dev/tcp/127.0.0.1/25020; exit $$?;'
     networks:
       - impala
 
   impala:
-    image: apache/impala:4.0.0-impalad_coord_exec
+    image: apache/impala:4.4.1-impalad_coord_exec
     depends_on:
       statestored:
         condition: service_healthy
@@ -519,11 +532,11 @@ services:
     ports:
       - 21050:21050 # HS2 endpoint
     healthcheck:
-      interval: 30s
+      interval: 3s
       retries: 20
       test:
         - CMD-SHELL
-        - nc -z 127.0.0.1 21050
+        - bash -c 'printf \"GET / HTTP/1.1\n\n\" > /dev/tcp/127.0.0.1/21050; exit $$?;'
     command:
       - -v=1
       - -redirect_stdout_stderr=false
@@ -542,7 +555,7 @@ services:
       - impala
 
   risingwave:
-    image: ghcr.io/risingwavelabs/risingwave:nightly-20240204
+    image: ghcr.io/risingwavelabs/risingwave:v2.1.0
     command: "standalone --meta-opts=\" \
       --advertise-addr 0.0.0.0:5690 \
       --backend mem \
@@ -574,6 +587,24 @@ services:
     networks:
       - risingwave
 
+  spark-connect:
+    image: bitnami/spark:3.5.4
+    ports:
+      - 15002:15002
+    command: /opt/bitnami/spark/sbin/start-connect-server.sh --name ibis_testing --packages org.apache.spark:spark-connect_2.12:3.5.3,org.apache.iceberg:iceberg-spark-runtime-3.5_2.12:1.6.1,io.delta:delta-core_2.12:2.1.0
+    healthcheck:
+      test:
+        - CMD-SHELL
+        - bash -c 'printf \"GET / HTTP/1.1\n\n\" > /dev/tcp/127.0.0.1/15002; exit $$?;'
+      interval: 5s
+      retries: 6
+    volumes:
+      - spark-connect:/data
+      - $PWD/docker/spark-connect/conf.properties:/opt/bitnami/spark/conf/spark-defaults.conf:ro
+      - $PWD/docker/spark-connect/log4j2.properties:/opt/bitnami/spark/conf/log4j2.properties:ro
+    networks:
+      - spark-connect
+
 networks:
   impala:
     # docker defaults to naming networks "$PROJECT_$NETWORK" but the Java Hive
@@ -591,6 +622,7 @@ networks:
   exasol:
   flink:
   risingwave:
+  spark-connect:
 
 volumes:
   clickhouse:
@@ -602,3 +634,4 @@ volumes:
   exasol:
   impala:
   risingwave:
+  spark-connect:

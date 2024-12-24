@@ -6,7 +6,6 @@ import pytest
 from pytest import param
 
 import ibis
-from ibis.backends.tests.errors import ClickHouseDatabaseError
 
 cc = pytest.importorskip("clickhouse_connect")
 
@@ -38,23 +37,23 @@ def time_right(con):
 
 def test_timestamp_extract_field(alltypes, assert_sql):
     t = alltypes.timestamp_col
-    expr = alltypes[
+    expr = alltypes.select(
         t.year().name("year"),
         t.month().name("month"),
         t.day().name("day"),
         t.hour().name("hour"),
         t.minute().name("minute"),
         t.second().name("second"),
-    ]
+    )
     assert_sql(expr)
 
 
 def test_isin_notin_in_select(alltypes, assert_sql):
     values = ["foo", "bar"]
-    filtered = alltypes[alltypes.string_col.isin(values)]
+    filtered = alltypes.filter(alltypes.string_col.isin(values))
     assert_sql(filtered, "out1.sql")
 
-    filtered = alltypes[alltypes.string_col.notin(values)]
+    filtered = alltypes.filter(alltypes.string_col.notin(values))
     assert_sql(filtered, "out2.sql")
 
 
@@ -100,7 +99,7 @@ def test_simple_scalar_aggregates(alltypes, assert_sql):
     # Things like table.column.{sum, mean, ...}()
     table = alltypes
 
-    expr = table[table.int_col > 0].float_col.sum()
+    expr = table.filter(table.int_col > 0).float_col.sum()
     assert_sql(expr)
 
 
@@ -152,7 +151,7 @@ def test_simple_scalar_aggregates(alltypes, assert_sql):
 
 def test_table_column_unbox(alltypes, assert_sql):
     m = alltypes.float_col.sum().name("total")
-    agged = alltypes[alltypes.int_col > 0].group_by("string_col").aggregate([m])
+    agged = alltypes.filter(alltypes.int_col > 0).group_by("string_col").aggregate([m])
     expr = agged.string_col
     assert_sql(expr)
 
@@ -189,16 +188,11 @@ def test_physical_table_reference_translate(alltypes, assert_sql):
 
 
 def test_non_equijoin(alltypes):
-    t = alltypes.limit(100)
+    t = alltypes.limit(10)
     t2 = t.view()
     expr = t.join(t2, t.tinyint_col < t2.timestamp_col.minute()).count()
-
-    # compilation should pass
-    expr.compile()
-
-    # while execution should fail since clickhouse doesn't support non-equijoin
-    with pytest.raises(ClickHouseDatabaseError, match="INVALID_JOIN_ON_EXPRESSION"):
-        expr.execute()
+    count = expr.to_pandas()
+    assert count == 45
 
 
 @pytest.mark.parametrize(
@@ -213,7 +207,7 @@ def test_simple_joins(
 ):
     t1, t2 = batting, awards_players
     pred = [t1[left_key] == t2[right_key]]
-    expr = getattr(t1, join_type)(t2, pred)[[t1]]
+    expr = getattr(t1, join_type)(t2, pred).select(t1)
     assert_sql(expr)
 
 
@@ -226,7 +220,7 @@ def test_self_reference_simple(con, alltypes, assert_sql):
 def test_join_self_reference(con, alltypes, assert_sql):
     t1 = alltypes
     t2 = t1.view()
-    expr = t1.inner_join(t2, ["id"])[[t1]]
+    expr = t1.inner_join(t2, ["id"]).select(t1)
     assert_sql(expr)
     assert len(con.execute(expr))
 
@@ -261,7 +255,7 @@ def test_filter_predicates(diamonds):
 
     expr = diamonds
     for pred in predicates:
-        expr = expr[pred(expr)].select(expr)
+        expr = expr.filter(pred(expr)).select(expr)
 
     expr.execute()
 
@@ -305,9 +299,9 @@ def test_join_with_external_table_errors(alltypes):
     )
 
     alltypes = alltypes.mutate(b=alltypes.tinyint_col)
-    expr = alltypes.inner_join(external_table, ["b"])[
+    expr = alltypes.inner_join(external_table, ["b"]).select(
         external_table.a, external_table.c, alltypes.id
-    ]
+    )
 
     with pytest.raises(cc.driver.exceptions.DatabaseError):
         expr.execute()
@@ -328,9 +322,9 @@ def test_join_with_external_table(alltypes, df):
     )
 
     alltypes = alltypes.mutate(b=alltypes.tinyint_col)
-    expr = alltypes.inner_join(external_table, ["b"])[
+    expr = alltypes.inner_join(external_table, ["b"]).select(
         external_table.a, external_table.c, alltypes.id
-    ]
+    )
 
     result = expr.execute(external_tables={"external": external_df})
     expected = df.assign(b=df.tinyint_col).merge(external_df, on="b")[["a", "c", "id"]]

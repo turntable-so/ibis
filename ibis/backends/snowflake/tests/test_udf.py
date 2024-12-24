@@ -8,7 +8,6 @@ import pandas.testing as tm
 import pytest
 from pytest import param
 
-import ibis
 import ibis.expr.datatypes as dt
 from ibis import udf
 
@@ -103,48 +102,46 @@ def test_xgboost_model(con):
         carat_scaled: float, cut_encoded: int, color_encoded: int, clarity_encoded: int
     ) -> int:
         import sys
+        from pathlib import Path
 
         import joblib
         import pandas as pd
 
-        import_dir = sys._xoptions.get("snowflake_import_directory")
-        model = joblib.load(f"{import_dir}model.joblib")
+        import_dir = Path(sys._xoptions.get("snowflake_import_directory"))
+        assert import_dir.exists(), import_dir
+
+        model_path = import_dir / "model.joblib"
+        assert model_path.exists(), model_path
+
+        model = joblib.load(model_path)
+
         df = pd.concat(
             [carat_scaled, cut_encoded, color_encoded, clarity_encoded], axis=1
         )
         df.columns = ["CARAT_SCALED", "CUT_ENCODED", "COLOR_ENCODED", "CLARITY_ENCODED"]
         return model.predict(df)
 
-    def cases(value, mapping):
-        """This should really be a top-level function or method."""
-        expr = ibis.case()
-        for k, v in mapping.items():
-            expr = expr.when(value == k, v)
-        return expr.end()
-
     diamonds = con.tables.DIAMONDS
     expr = diamonds.mutate(
         predicted_price=predict_price(
             (_.carat - _.carat.mean()) / _.carat.std(),
-            cases(
-                _.cut,
-                {
-                    c: i
+            _.cut.cases(
+                *(
+                    (c, i)
                     for i, c in enumerate(
                         ("Fair", "Good", "Very Good", "Premium", "Ideal"), start=1
                     )
-                },
+                )
             ),
-            cases(_.color, {c: i for i, c in enumerate("DEFGHIJ", start=1)}),
-            cases(
-                _.clarity,
-                {
-                    c: i
+            _.color.cases(*((c, i) for i, c in enumerate("DEFGHIJ", start=1))),
+            _.clarity.cases(
+                *(
+                    (c, i)
                     for i, c in enumerate(
                         ("I1", "IF", "SI1", "SI2", "VS1", "VS2", "VVS1", "VVS2"),
                         start=1,
                     )
-                },
+                )
             ),
         )
     )
@@ -224,20 +221,14 @@ def snowpark_session():
                 session.clear_imports()
 
 
-@pytest.mark.parametrize(
-    "execute_as",
-    [
-        "owner",
-        "caller",
-    ],
-)
+@pytest.mark.parametrize("execute_as", ["owner", "caller"])
 def test_ibis_inside_snowpark(snowpark_session, execute_as):
     import snowflake.snowpark as sp
 
     def ibis_sproc(session):
         import ibis.backends.snowflake
 
-        con = ibis.backends.snowflake.Backend.from_snowpark(session)
+        con = ibis.backends.snowflake.Backend.from_connection(session)
 
         expr = (
             con.tables.functional_alltypes.group_by("string_col")
@@ -275,7 +266,6 @@ def test_ibis_inside_snowpark(snowpark_session, execute_as):
             "snowflake-snowpark-python",
             "toolz",
             "atpublic",
-            "bidict",
             "pyarrow",
             "pandas",
             "numpy",

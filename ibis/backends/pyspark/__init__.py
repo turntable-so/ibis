@@ -14,6 +14,7 @@ from pyspark import SparkConf
 from pyspark.sql import SparkSession
 from pyspark.sql.types import BooleanType, DoubleType, LongType, StringType
 
+import ibis.backends.sql.compilers as sc
 import ibis.common.exceptions as com
 import ibis.config
 import ibis.expr.operations as ops
@@ -21,16 +22,27 @@ import ibis.expr.schema as sch
 import ibis.expr.types as ir
 from ibis import util
 from ibis.backends import CanCreateDatabase, CanListCatalog
-from ibis.backends.pyspark.compiler import PySparkCompiler
 from ibis.backends.pyspark.converter import PySparkPandasData
 from ibis.backends.pyspark.datatypes import PySparkSchema, PySparkType
 from ibis.backends.sql import SQLBackend
+from ibis.backends.sql.compilers.base import AlterTable, RenameTable
 from ibis.expr.operations.udf import InputType
 from ibis.legacy.udf.vectorized import _coerce_to_series
-from ibis.util import deprecated
+
+try:
+    from pyspark.errors import ParseException
+    from pyspark.errors.exceptions.connect import SparkConnectGrpcException
+except ImportError:
+    from pyspark.sql.utils import ParseException
+
+    # Use a dummy class for when spark connect is not available
+    class SparkConnectGrpcException(Exception):
+        pass
+
 
 if TYPE_CHECKING:
     from collections.abc import Mapping, Sequence
+    from urllib.parse import ParseResult
 
     import pandas as pd
     import polars as pl
@@ -39,16 +51,10 @@ if TYPE_CHECKING:
 
     from ibis.expr.api import Watermark
 
-PYSPARK_LT_34 = vparse(pyspark.__version__) < vparse("3.4")
-
+PYSPARK_VERSION = vparse(pyspark.__version__)
+PYSPARK_LT_34 = PYSPARK_VERSION < vparse("3.4")
+PYSPARK_LT_35 = PYSPARK_VERSION < vparse("3.5")
 ConnectionMode = Literal["streaming", "batch"]
-
-
-def normalize_filenames(source_list):
-    # Promote to list
-    source_list = util.promote_list(source_list)
-
-    return list(map(util.normalize_filename, source_list))
 
 
 @F.pandas_udf(returnType=DoubleType(), functionType=F.PandasUDFType.SCALAR)
@@ -85,7 +91,7 @@ def unwrap_json(typ):
             value = json.loads(raw)
             # exact type check because we want to distinguish between integer
             # and booleans and bool is a subclass of int
-            return value if type(value) == typ else None
+            return value if type(value) is typ else None
 
         return s.map(nullify_type_mismatched_value)
 
@@ -98,7 +104,7 @@ def _interval_to_string(interval):
 
 class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
     name = "pyspark"
-    compiler = PySparkCompiler()
+    compiler = sc.pyspark.compiler
 
     class Options(ibis.config.Config):
         """PySpark options.
@@ -112,23 +118,9 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
 
         treat_nan_as_null: bool = False
 
-    def _from_url(self, url: str, **kwargs) -> Backend:
+    def _from_url(self, url: ParseResult, **kwargs) -> Backend:
         """Construct a PySpark backend from a URL `url`."""
-        from urllib.parse import parse_qs, urlparse
-
-        url = urlparse(url)
-        query_params = parse_qs(url.query)
-        params = query_params.copy()
-
-        for name, value in query_params.items():
-            if len(value) > 1:
-                params[name] = value
-            elif len(value) == 1:
-                params[name] = value[0]
-            else:
-                raise com.IbisError(f"Invalid URL parameter: {name}")
-
-        conf = SparkConf().setAll(params.items())
+        conf = SparkConf().setAll(kwargs.items())
 
         if database := url.path[1:]:
             conf = conf.set("spark.sql.warehouse.dir", str(Path(database).absolute()))
@@ -142,19 +134,24 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         self._cached_dataframes = {}
 
     def do_connect(
-        self, session: SparkSession | None = None, mode: ConnectionMode | None = None
+        self,
+        session: SparkSession | None = None,
+        mode: ConnectionMode = "batch",
+        **kwargs,
     ) -> None:
         """Create a PySpark `Backend` for use with Ibis.
 
         Parameters
         ----------
         session
-            A SparkSession instance
+            A `SparkSession` instance.
         mode
             Can be either "batch" or "streaming". If "batch", every source, sink, and
             query executed within this connection will be interpreted as a batch
             workload. If "streaming", every source, sink, and query executed within
             this connection will be interpreted as a streaming workload.
+        kwargs
+            Additional keyword arguments used to configure the SparkSession.
 
         Examples
         --------
@@ -170,7 +167,6 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
 
             session = SparkSession.builder.getOrCreate()
 
-        mode = mode or "batch"
         if mode not in ("batch", "streaming"):
             raise com.IbisInputError(
                 f"Invalid connection mode: {mode}, must be `streaming` or `batch`"
@@ -184,7 +180,36 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         # local time to UTC with microsecond resolution.
         # https://spark.apache.org/docs/latest/sql-pyspark-pandas-with-arrow.html#timestamp-with-time-zone-semantics
         self._session.conf.set("spark.sql.session.timeZone", "UTC")
-        self._session.conf.set("spark.sql.mapKeyDedupPolicy", "LAST_WIN")
+
+        # Databricks Serverless compute only supports limited properties
+        # and any attempt to set unsupported properties will result in an error.
+        # https://docs.databricks.com/en/spark/conf.html
+        with contextlib.suppress(SparkConnectGrpcException):
+            self._session.conf.set("spark.sql.mapKeyDedupPolicy", "LAST_WIN")
+
+        for key, value in kwargs.items():
+            self._session.conf.set(key, value)
+
+    @util.experimental
+    @classmethod
+    def from_connection(
+        cls, session: SparkSession, mode: ConnectionMode = "batch", **kwargs
+    ) -> Backend:
+        """Create a PySpark `Backend` from an existing `SparkSession` instance.
+
+        Parameters
+        ----------
+        session
+            A `SparkSession` instance.
+        mode
+            Can be either "batch" or "streaming". If "batch", every source, sink, and
+            query executed within this connection will be interpreted as a batch
+            workload. If "streaming", every source, sink, and query executed within
+            this connection will be interpreted as a streaming workload.
+        kwargs
+            Additional keyword arguments used to configure the SparkSession.
+        """
+        return ibis.pyspark.connect(session, mode, **kwargs)
 
     def disconnect(self) -> None:
         self._session.stop()
@@ -232,27 +257,96 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         # 2. set database
         # 3. set catalog to previous
         # 4. set database to previous
+        #
+        # Unity catalog has special handling for "USE CATALOG" and "USE DATABASE"
+        # and also has weird permissioning around using `setCurrentCatalog` and
+        # `setCurrentDatabase`.
+        #
+        # We attempt to use the Unity-specific Spark SQL to set CATALOG and DATABASE
+        # and if that causes a parser exception we fall back to using the catalog API.
+        v = self.compiler.v
+        quoted = self.compiler.quoted
+        dialect = self.dialect
+        catalog_api = self._session.catalog
+
         try:
             if catalog is not None:
-                self._session.catalog.setCurrentCatalog(catalog)
-            self._session.catalog.setCurrentDatabase(db)
+                catalog_sql = sge.Use(
+                    kind=v.CATALOG, this=sg.to_identifier(catalog, quoted=quoted)
+                ).sql(dialect)
+
+                try:
+                    self.raw_sql(catalog_sql)
+                except ParseException:
+                    catalog_api.setCurrentCatalog(catalog)
+
+            db_sql = sge.Use(
+                kind=v.DATABASE, this=sg.to_identifier(db, quoted=quoted)
+            ).sql(dialect)
+
+            try:
+                self.raw_sql(db_sql)
+            except ParseException:
+                catalog_api.setCurrentDatabase(db)
             yield
         finally:
             if catalog is not None:
-                self._session.catalog.setCurrentCatalog(current_catalog)
-            self._session.catalog.setCurrentDatabase(current_db)
+                catalog_sql = sge.Use(
+                    kind=v.CATALOG,
+                    this=sg.to_identifier(current_catalog, quoted=quoted),
+                ).sql(dialect)
+                try:
+                    self.raw_sql(catalog_sql)
+                except ParseException:
+                    catalog_api.setCurrentCatalog(current_catalog)
+
+            db_sql = sge.Use(
+                kind=v.DATABASE, this=sg.to_identifier(current_db, quoted=quoted)
+            ).sql(dialect)
+
+            try:
+                self.raw_sql(db_sql)
+            except ParseException:
+                catalog_api.setCurrentDatabase(current_db)
 
     @contextlib.contextmanager
     def _active_catalog(self, name: str | None):
         if name is None or PYSPARK_LT_34:
             yield
             return
-        current = self.current_catalog
+
+        prev_catalog = self.current_catalog
+        prev_database = self.current_database
+
+        v = self.compiler.v
+        quoted = self.compiler.quoted
+        dialect = self.dialect
+
+        catalog_sql = sge.Use(
+            kind=v.CATALOG, this=sg.to_identifier(name, quoted=quoted)
+        ).sql(dialect)
+        catalog_api = self._session.catalog
+
         try:
-            self._session.catalog.setCurrentCatalog(name)
+            try:
+                self.raw_sql(catalog_sql)
+            except ParseException:
+                catalog_api.setCurrentCatalog(name)
             yield
         finally:
-            self._session.catalog.setCurrentCatalog(current)
+            catalog_sql = sge.Use(
+                kind=v.CATALOG, this=sg.to_identifier(prev_catalog, quoted=quoted)
+            ).sql(dialect)
+            db_sql = sge.Use(
+                kind=v.DATABASE, this=sg.to_identifier(prev_database, quoted=quoted)
+            ).sql(dialect)
+
+            try:
+                self.raw_sql(catalog_sql)
+                self.raw_sql(db_sql)
+            except ParseException:
+                catalog_api.setCurrentCatalog(prev_catalog)
+                catalog_api.setCurrentDatabase(prev_database)
 
     def list_catalogs(self, like: str | None = None) -> list[str]:
         catalogs = [res.catalog for res in self._session.sql("SHOW CATALOGS").collect()]
@@ -304,18 +398,26 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
     def _register_udfs(self, expr: ir.Expr) -> None:
         node = expr.op()
         for udf in node.find(ops.ScalarUDF):
-            if udf.__input_type__ not in (InputType.PANDAS, InputType.BUILTIN):
-                raise NotImplementedError(
-                    "Only Builtin UDFs and Pandas UDFs are supported in the PySpark backend"
-                )
-            # register pandas UDFs
+            udf_name = self.compiler.__sql_name__(udf)
+            udf_return = PySparkType.from_ibis(udf.dtype)
             if udf.__input_type__ == InputType.PANDAS:
-                udf_name = self.compiler.__sql_name__(udf)
                 udf_func = self._wrap_udf_to_return_pandas(udf.__func__, udf.dtype)
-                udf_return = PySparkType.from_ibis(udf.dtype)
                 spark_udf = F.pandas_udf(udf_func, udf_return, F.PandasUDFType.SCALAR)
-                self._session.udf.register(udf_name, spark_udf)
-
+            elif udf.__input_type__ == InputType.PYTHON:
+                udf_func = udf.__func__
+                spark_udf = F.udf(udf_func, udf_return)
+            elif udf.__input_type__ == InputType.PYARROW:
+                # raise not implemented error if running on pyspark < 3.5
+                if PYSPARK_LT_35:
+                    raise NotImplementedError(
+                        "pyarrow UDFs are only supported in pyspark >= 3.5"
+                    )
+                udf_func = udf.__func__
+                spark_udf = F.udf(udf_func, udf_return, useArrow=True)
+            else:
+                # Builtin functions don't need to be registered
+                continue
+            self._session.udf.register(udf_name, spark_udf)
         for udf in node.find(ops.ElementWiseVectorizedUDF):
             udf_name = self.compiler.__sql_name__(udf)
             udf_func = self._wrap_udf_to_return_pandas(udf.func, udf.return_type)
@@ -339,6 +441,11 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         schema = PySparkSchema.from_ibis(op.schema)
         df = self._session.createDataFrame(data=op.data.to_frame(), schema=schema)
         df.createOrReplaceTempView(op.name)
+
+    def _finalize_memtable(self, name: str) -> None:
+        """No-op, otherwise a deadlock can occur when using Spark Connect."""
+        if isinstance(session := self._session, pyspark.sql.SparkSession):
+            session.catalog.dropTempView(name)
 
     @contextlib.contextmanager
     def _safe_raw_sql(self, query: str) -> Any:
@@ -384,7 +491,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         name
             Database name
         catalog
-            Catalog to create database in (defaults to ``current_catalog``)
+            Catalog to create database in (defaults to `current_catalog`)
         path
             Path where to store the database data; otherwise uses Spark default
         force
@@ -401,7 +508,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         sql = sge.Create(
             kind="DATABASE",
             exist=force,
-            this=sg.to_identifier(name),
+            this=sg.to_identifier(name, quoted=self.compiler.quoted),
             properties=properties,
         )
         with self._active_catalog(catalog):
@@ -418,14 +525,17 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         name
             Database name
         catalog
-            Catalog containing database to drop (defaults to ``current_catalog``)
+            Catalog containing database to drop (defaults to `current_catalog`)
         force
             If False, Spark throws exception if database is not empty or
             database does not exist
 
         """
         sql = sge.Drop(
-            kind="DATABASE", exist=force, this=sg.to_identifier(name), cascade=force
+            kind="DATABASE",
+            exist=force,
+            this=sg.to_identifier(name, quoted=self.compiler.quoted),
+            cascade=force,
         )
         with self._active_catalog(catalog):
             with self._safe_raw_sql(sql):
@@ -458,9 +568,19 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
 
         table_loc = self._to_sqlglot_table((catalog, database))
         catalog, db = self._to_catalog_db_tuple(table_loc)
+        session = self._session
         with self._active_catalog_database(catalog, db):
-            df = self._session.table(table_name)
-            struct = PySparkType.to_ibis(df.schema)
+            try:
+                df = session.table(table_name)
+                # this is intentionally included in the try block because when
+                # using spark connect, the table-not-found exception coming
+                # from the server will *NOT* be raised until the schema
+                # property is accessed
+                struct = PySparkType.to_ibis(df.schema)
+            except Exception as e:
+                if not session.catalog.tableExists(table_name):
+                    raise com.TableNotFound(table_name) from e
+                raise
 
         return sch.Schema(struct)
 
@@ -471,7 +591,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             ir.Table | pd.DataFrame | pa.Table | pl.DataFrame | pl.LazyFrame | None
         ) = None,
         *,
-        schema: sch.Schema | None = None,
+        schema: sch.SchemaLike | None = None,
         database: str | None = None,
         temp: bool | None = None,
         overwrite: bool = False,
@@ -518,13 +638,11 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
-        temp_memtable_view = None
         if obj is not None:
             if isinstance(obj, ir.Expr):
                 table = obj
             else:
                 table = ibis.memtable(obj)
-                temp_memtable_view = table.op().name
             query = self.compile(table)
             mode = "overwrite" if overwrite else "error"
             with self._active_catalog_database(catalog, db):
@@ -532,16 +650,12 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
                 df = self._session.sql(query)
                 df.write.saveAsTable(name, format=format, mode=mode)
         elif schema is not None:
+            schema = ibis.schema(schema)
             schema = PySparkSchema.from_ibis(schema)
             with self._active_catalog_database(catalog, db):
                 self._session.catalog.createTable(name, schema=schema, format=format)
         else:
             raise com.IbisError("The schema or obj parameter is required")
-
-        # Clean up temporary memtable if we've created one
-        # for in-memory reads
-        if temp_memtable_view is not None:
-            self.drop_table(temp_memtable_view)
 
         return self.table(name, database=(catalog, db))
 
@@ -594,12 +708,11 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             The new name of the table.
 
         """
-        old = sg.table(old_name, quoted=True)
-        new = sg.table(new_name, quoted=True)
-        query = sge.AlterTable(
-            this=old,
-            exists=False,
-            actions=[sge.RenameTable(this=new, exists=True)],
+        quoted = self.compiler.quoted
+        old = sge.to_table(old_name, quoted=quoted)
+        new = sge.to_table(new_name, quoted=quoted)
+        query = AlterTable(
+            this=old, exists=False, actions=[RenameTable(this=new, exists=True)]
         )
         with self._safe_raw_sql(query):
             pass
@@ -629,20 +742,19 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         )
         return self.raw_sql(f"ANALYZE TABLE {table} COMPUTE STATISTICS{maybe_noscan}")
 
-    def _load_into_cache(self, name, expr):
+    def _create_cached_table(self, name, expr):
         query = self.compile(expr)
         t = self._session.sql(query).cache()
         assert t.is_cached
-        t.createOrReplaceTempView(name)
+        t.createTempView(name)
         # store the underlying spark dataframe so we can release memory when
         # asked to, instead of when the session ends
         self._cached_dataframes[name] = t
+        return self.table(name)
 
-    def _clean_up_cached_table(self, op):
-        name = op.name
+    def _drop_cached_table(self, name):
         self._session.catalog.dropTempView(name)
         t = self._cached_dataframes.pop(name)
-        assert t.is_cached
         t.unpersist()
         assert not t.is_cached
 
@@ -710,7 +822,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         if self.mode == "streaming":
             raise NotImplementedError(
                 "Pyspark in streaming mode does not support direction registration of parquet files. "
-                "Please use `read_parquet_directory` instead."
+                "Please use `read_parquet_dir` instead."
             )
         path = util.normalize_filename(path)
         spark_df = self._session.read.parquet(path, **kwargs)
@@ -748,11 +860,11 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         if self.mode == "streaming":
             raise NotImplementedError(
                 "Pyspark in streaming mode does not support direction registration of CSV files. "
-                "Please use `read_csv_directory` instead."
+                "Please use `read_csv_dir` instead."
             )
         inferSchema = kwargs.pop("inferSchema", True)
         header = kwargs.pop("header", True)
-        source_list = normalize_filenames(source_list)
+        source_list = util.normalize_filenames(source_list)
         spark_df = self._session.read.csv(
             source_list, inferSchema=inferSchema, header=header, **kwargs
         )
@@ -790,79 +902,22 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         if self.mode == "streaming":
             raise NotImplementedError(
                 "Pyspark in streaming mode does not support direction registration of JSON files. "
-                "Please use `read_json_directory` instead."
+                "Please use `read_json_dir` instead."
             )
-        source_list = normalize_filenames(source_list)
+        source_list = util.normalize_filenames(source_list)
         spark_df = self._session.read.json(source_list, **kwargs)
         table_name = table_name or util.gen_name("read_json")
 
         spark_df.createOrReplaceTempView(table_name)
         return self.table(table_name)
 
-    @deprecated(
-        as_of="9.1",
-        instead="use the explicit `read_*` method for the filetype you are trying to read, e.g., read_parquet, read_csv, etc.",
-    )
-    def register(
-        self,
-        source: str | Path | Any,
-        table_name: str | None = None,
-        **kwargs: Any,
-    ) -> ir.Table:
-        """Register a data source as a table in the current database.
-
-        Parameters
-        ----------
-        source
-            The data source(s). May be a path to a file or directory of
-            parquet/csv files, or an iterable of CSV files.
-        table_name
-            An optional name to use for the created table. This defaults to
-            a random generated name.
-        **kwargs
-            Additional keyword arguments passed to PySpark loading functions for
-            CSV or parquet.
-
-        Returns
-        -------
-        ir.Table
-            The just-registered table
-
-        """
-        if isinstance(source, (str, Path)):
-            first = str(source)
-        elif isinstance(source, (list, tuple)):
-            first = source[0]
-        else:
-            self._register_failure()
-
-        if first.startswith(("parquet://", "parq://")) or first.endswith(
-            ("parq", "parquet")
-        ):
-            return self.read_parquet(source, table_name=table_name, **kwargs)
-        elif first.startswith(
-            ("csv://", "csv.gz://", "txt://", "txt.gz://")
-        ) or first.endswith(("csv", "csv.gz", "tsv", "tsv.gz", "txt", "txt.gz")):
-            return self.read_csv(source, table_name=table_name, **kwargs)
-        else:
-            self._register_failure()  # noqa: RET503
-
-    def _register_failure(self):
-        import inspect
-
-        msg = ", ".join(
-            name for name, _ in inspect.getmembers(self) if name.startswith("read_")
-        )
-        raise ValueError(
-            f"Cannot infer appropriate read function for input, "
-            f"please call one of {msg} directly"
-        )
-
     @util.experimental
     def to_delta(
         self,
         expr: ir.Table,
         path: str | Path,
+        params: Mapping[ir.Scalar, Any] | None = None,
+        limit: int | str | None = None,
         **kwargs: Any,
     ) -> None:
         """Write the results of executing the given expression to a Delta Lake table.
@@ -876,17 +931,22 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             The ibis expression to execute and persist to a Delta Lake table.
         path
             The data source. A string or Path to the Delta Lake table.
-
+        params
+            Mapping of scalar parameter expressions to value.
+        limit
+            An integer to effect a specific row limit. A value of `None` means
+            "no limit". The default is in `ibis/config.py`.
         **kwargs
-            PySpark Delta Lake table write arguments.
-            https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrameWriter.save.html
+            Additional keyword arguments passed to
+            [pyspark.sql.DataFrameWriter](https://spark.apache.org/docs/latest/api/python/reference/pyspark.sql/api/pyspark.sql.DataFrameWriter.html).
 
         """
         if self.mode == "streaming":
             raise NotImplementedError(
                 "Writing to a Delta Lake table in streaming mode is not supported"
             )
-        df = self._session.sql(expr.compile())
+        self._run_pre_execute_hooks(expr)
+        df = self._session.sql(self.compile(expr, params=params, limit=limit))
         df.write.format("delta").save(os.fspath(path), **kwargs)
 
     def to_pyarrow(
@@ -938,6 +998,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
     def read_kafka(
         self,
         table_name: str | None = None,
+        *,
         watermark: Watermark | None = None,
         auto_parse: bool = False,
         schema: sch.Schema | None = None,
@@ -1001,8 +1062,11 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
     def to_kafka(
         self,
         expr: ir.Expr,
+        *,
         auto_format: bool = False,
         options: Mapping[str, str] | None = None,
+        params: Mapping | None = None,
+        limit: str | None = "default",
     ) -> StreamingQuery:
         """Write the results of executing the given expression to a Kafka topic.
 
@@ -1020,6 +1084,11 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         options
             PySpark Kafka write arguments.
             https://spark.apache.org/docs/latest/structured-streaming-kafka-integration.html
+        params
+            Mapping of scalar parameter expressions to value.
+        limit
+            An integer to effect a specific row limit. A value of `None` means
+            "no limit". The default is in `ibis/config.py`.
 
         Returns
         -------
@@ -1028,7 +1097,7 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
         """
         if self.mode == "batch":
             raise NotImplementedError("Writing to Kafka in batch mode is not supported")
-        df = self._session.sql(expr.compile())
+        df = self._session.sql(self.compile(expr, params=params, limit=limit))
         if auto_format:
             df = df.select(
                 F.to_json(F.struct([F.col(c).alias(c) for c in df.columns])).alias(
@@ -1040,3 +1109,245 @@ class Backend(SQLBackend, CanListCatalog, CanCreateDatabase):
             sq = sq.option(k, v)
         sq.start()
         return sq
+
+    @util.experimental
+    def read_csv_dir(
+        self,
+        path: str | Path,
+        table_name: str | None = None,
+        watermark: Watermark | None = None,
+        **kwargs: Any,
+    ) -> ir.Table:
+        """Register a CSV directory as a table in the current database.
+
+        Parameters
+        ----------
+        path
+            The data source.
+        table_name
+            An optional name to use for the created table. This defaults to
+            a random generated name.
+        watermark
+            Watermark strategy for the table.
+        kwargs
+            Additional keyword arguments passed to PySpark loading function.
+            https://spark.apache.org/docs/latest/api/python/reference/pyspark.ss/api/pyspark.sql.streaming.DataStreamReader.csv.html
+
+        Returns
+        -------
+        ir.Table
+            The just-registered table
+
+        """
+        inferSchema = kwargs.pop("inferSchema", True)
+        header = kwargs.pop("header", True)
+        path = util.normalize_filename(path)
+        if self.mode == "batch":
+            spark_df = self._session.read.csv(
+                path, inferSchema=inferSchema, header=header, **kwargs
+            )
+            if watermark is not None:
+                raise com.IbisInputError("Watermark is not supported in batch mode")
+        elif self.mode == "streaming":
+            spark_df = self._session.readStream.csv(
+                path, inferSchema=inferSchema, header=header, **kwargs
+            )
+            if watermark is not None:
+                spark_df = spark_df.withWatermark(
+                    watermark.time_col,
+                    _interval_to_string(watermark.allowed_delay),
+                )
+        table_name = table_name or util.gen_name("read_csv_dir")
+
+        spark_df.createOrReplaceTempView(table_name)
+        return self.table(table_name)
+
+    @util.experimental
+    def read_parquet_dir(
+        self,
+        path: str | Path,
+        table_name: str | None = None,
+        watermark: Watermark | None = None,
+        schema: sch.Schema | None = None,
+        **kwargs: Any,
+    ) -> ir.Table:
+        """Register a parquet file as a table in the current database.
+
+        Parameters
+        ----------
+        path
+            The data source. A directory of parquet files.
+        table_name
+            An optional name to use for the created table. This defaults to
+            a random generated name.
+        watermark
+            Watermark strategy for the table.
+        schema
+            Schema of the parquet source.
+        kwargs
+            Additional keyword arguments passed to PySpark.
+            https://spark.apache.org/docs/latest/api/python/reference/pyspark.ss/api/pyspark.sql.streaming.DataStreamReader.parquet.html
+
+        Returns
+        -------
+        ir.Table
+            The just-registered table
+
+        """
+        path = util.normalize_filename(path)
+        if self.mode == "batch":
+            spark_df = self._session.read
+            if schema is not None:
+                spark_df = spark_df.schema(PySparkSchema.from_ibis(schema))
+            spark_df = spark_df.parquet(path, **kwargs)
+            if watermark is not None:
+                raise com.IbisInputError("Watermark is not supported in batch mode")
+        elif self.mode == "streaming":
+            spark_df = self._session.readStream
+            if schema is not None:
+                spark_df = spark_df.schema(PySparkSchema.from_ibis(schema))
+            spark_df = spark_df.parquet(path, **kwargs)
+            if watermark is not None:
+                spark_df = spark_df.withWatermark(
+                    watermark.time_col,
+                    _interval_to_string(watermark.allowed_delay),
+                )
+        table_name = table_name or util.gen_name("read_parquet_dir")
+
+        spark_df.createOrReplaceTempView(table_name)
+        return self.table(table_name)
+
+    @util.experimental
+    def read_json_dir(
+        self,
+        path: str | Path,
+        table_name: str | None = None,
+        watermark: Watermark | None = None,
+        **kwargs: Any,
+    ) -> ir.Table:
+        """Register a JSON file as a table in the current database.
+
+        Parameters
+        ----------
+        path
+            The data source. A directory of JSON files.
+        table_name
+            An optional name to use for the created table. This defaults to
+            a random generated name.
+        watermark
+            Watermark strategy for the table.
+        kwargs
+            Additional keyword arguments passed to PySpark loading function.
+            https://spark.apache.org/docs/latest/api/python/reference/pyspark.ss/api/pyspark.sql.streaming.DataStreamReader.json.html
+
+        Returns
+        -------
+        ir.Table
+            The just-registered table
+
+        """
+        path = util.normalize_filename(path)
+        if self.mode == "batch":
+            spark_df = self._session.read.json(path, **kwargs)
+            if watermark is not None:
+                raise com.IbisInputError("Watermark is not supported in batch mode")
+        elif self.mode == "streaming":
+            spark_df = self._session.readStream.json(path, **kwargs)
+            if watermark is not None:
+                spark_df = spark_df.withWatermark(
+                    watermark.time_col,
+                    _interval_to_string(watermark.allowed_delay),
+                )
+        table_name = table_name or util.gen_name("read_json_dir")
+
+        spark_df.createOrReplaceTempView(table_name)
+        return self.table(table_name)
+
+    def _to_filesystem_output(
+        self,
+        expr: ir.Expr,
+        format: str,
+        path: str | Path,
+        params: Mapping[ir.Scalar, Any] | None = None,
+        limit: int | str | None = None,
+        options: Mapping[str, str] | None = None,
+    ) -> StreamingQuery | None:
+        df = self._session.sql(self.compile(expr, params=params, limit=limit))
+        if self.mode == "batch":
+            df = df.write.format(format)
+            for k, v in (options or {}).items():
+                df = df.option(k, v)
+            df.save(os.fspath(path))
+            return None
+        sq = df.writeStream.format(format)
+        sq = sq.option("path", os.fspath(path))
+        for k, v in (options or {}).items():
+            sq = sq.option(k, v)
+        sq.start()
+        return sq
+
+    @util.experimental
+    def to_parquet_dir(
+        self,
+        expr: ir.Expr,
+        path: str | Path,
+        params: Mapping[ir.Scalar, Any] | None = None,
+        limit: int | str | None = None,
+        options: Mapping[str, str] | None = None,
+    ) -> StreamingQuery | None:
+        """Write the results of executing the given expression to a parquet directory.
+
+        Parameters
+        ----------
+        expr
+            The ibis expression to execute and persist to parquet.
+        path
+            The data source. A string or Path to the parquet directory.
+        params
+            Mapping of scalar parameter expressions to value.
+        limit
+            An integer to effect a specific row limit. A value of `None` means
+            "no limit". The default is in `ibis/config.py`.
+        options
+            Additional keyword arguments passed to pyspark.sql.streaming.DataStreamWriter
+
+        Returns
+        -------
+        StreamingQuery | None
+            Returns a Pyspark StreamingQuery object if in streaming mode, otherwise None
+        """
+        self._run_pre_execute_hooks(expr)
+        return self._to_filesystem_output(expr, "parquet", path, params, limit, options)
+
+    @util.experimental
+    def to_csv_dir(
+        self,
+        expr: ir.Expr,
+        path: str | Path,
+        params: Mapping[ir.Scalar, Any] | None = None,
+        limit: int | str | None = None,
+        options: Mapping[str, str] | None = None,
+    ) -> StreamingQuery | None:
+        """Write the results of executing the given expression to a CSV directory.
+
+        Parameters
+        ----------
+        expr
+            The ibis expression to execute and persist to CSV.
+        path
+            The data source. A string or Path to the CSV directory.
+        params
+            Mapping of scalar parameter expressions to value.
+        limit
+            An integer to effect a specific row limit. A value of `None` means
+            "no limit". The default is in `ibis/config.py`.
+        options
+            Additional keyword arguments passed to pyspark.sql.streaming.DataStreamWriter
+
+        Returns
+        -------
+        StreamingQuery | None
+            Returns a Pyspark StreamingQuery object if in streaming mode, otherwise None
+        """
+        self._run_pre_execute_hooks(expr)
+        return self._to_filesystem_output(expr, "csv", path, params, limit, options)

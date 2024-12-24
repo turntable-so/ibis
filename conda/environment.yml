@@ -3,12 +3,10 @@ channels:
   - conda-forge
 dependencies:
   # runtime dependencies
-  - apache-flink
+  - apache-flink =1.20.0
   - atpublic >=2.3
-  - bidict >=0.22.1
   - black >=22.1.0,<25
   - clickhouse-connect >=0.5.23
-  - dask >=2022.9.1
   - datafusion >=0.6
   - db-dtypes >=0.3.0,<2
   - deltalake
@@ -27,15 +25,14 @@ dependencies:
   - parsy >=2
   - pins >=0.8.2
   - pip
-  - poetry-core >=1.0.0
-  - poetry-dynamic-versioning >=0.18.0
-  - polars >=0.20.17
+  - uv>=0.4.29
+  - polars >=1,<2
   - psycopg2 >=2.8.4
   - pyarrow >=10.0.1
   - pyarrow-hotfix >=0.4
   - pydata-google-auth
   - pydruid >=0.6.5
-  - pymysql >=1
+  - mysqlclient >=2.2.4
   - pyodbc >=4.0.39
   - pyspark >=3
   - python >=3.10
@@ -45,7 +42,7 @@ dependencies:
   - pytz >=2022.7
   - regex >=2021.7.6
   - requests >=2
-  - rich >=12.4.4
+  - rich >=13.8.0
   - shapely >=2,<3
   - snowflake-connector-python >=3.0.2
   - sqlglot >=22.5,<23.1
@@ -59,7 +56,7 @@ dependencies:
   # test dependencies
   - filelock >=3.7.0,<4
   - hypothesis >=6.58.0,<7
-  - pytest >=8.0.2,<9
+  - pytest >=8.2.0,<9
   - pytest-benchmark >=3.4.1,<5
   - pytest-clarity >=1.0.1,<2
   - pytest-cov >=3.0.0,<5
@@ -88,10 +85,8 @@ dependencies:
   - codespell >=2.2.6
   - go-shfmt
   - ipython
-  - poetry-plugin-export
   - pre-commit
   - prettier
-  - pydeps >=1.12.7
   - pyinstrument
   - ruff >=0.1.8
   - taplo

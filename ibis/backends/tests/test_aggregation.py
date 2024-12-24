@@ -1,10 +1,9 @@
 from __future__ import annotations
 
+import itertools
 from datetime import date
 from operator import methodcaller
 
-import numpy as np
-import pandas as pd
 import pytest
 from pytest import param
 
@@ -15,6 +14,7 @@ from ibis import _
 from ibis import literal as L
 from ibis.backends.tests.errors import (
     ClickHouseDatabaseError,
+    DatabricksServerOperationError,
     ExaQueryError,
     GoogleBadRequest,
     ImpalaHiveServer2Error,
@@ -27,10 +27,15 @@ from ibis.backends.tests.errors import (
     PyDruidProgrammingError,
     PyODBCProgrammingError,
     PySparkAnalysisException,
+    PySparkPythonException,
     SnowflakeProgrammingError,
     TrinoUserError,
 )
+from ibis.conftest import IS_SPARK_REMOTE
 from ibis.legacy.udf.vectorized import reduction
+
+np = pytest.importorskip("numpy")
+pd = pytest.importorskip("pandas")
 
 with pytest.warns(FutureWarning, match="v9.0"):
 
@@ -63,6 +68,7 @@ aggregate_test_params = [
                     "oracle",
                     "flink",
                     "exasol",
+                    "databricks",
                 ],
                 raises=com.OperationNotDefinedError,
             ),
@@ -70,6 +76,12 @@ aggregate_test_params = [
                 ["sqlite", "mysql"],
                 reason="no udf support",
                 raises=com.OperationNotDefinedError,
+            ),
+            pytest.mark.notyet(
+                ["pyspark"],
+                condition=IS_SPARK_REMOTE,
+                raises=PySparkPythonException,
+                reason="remote udfs not yet tested due to environment complexities",
             ),
         ],
     ),
@@ -92,7 +104,6 @@ aggregate_test_params = [
                     "pyspark",
                     "trino",
                     "druid",
-                    "oracle",
                     "flink",
                     "risingwave",
                     "exasol",
@@ -110,16 +121,10 @@ aggregate_test_params = [
         lambda t: t.timestamp_col.max(),
         lambda t: t.timestamp_col.max(),
         id="timestamp_max",
-        marks=pytest.mark.broken(
-            ["druid"],
-            raises=PyDruidProgrammingError,
-            reason="Max aggregation is not supported for 'STRING' type SQL",
-        ),
     ),
 ]
 
 argidx_not_grouped_marks = [
-    "datafusion",
     "impala",
     "mysql",
     "mssql",
@@ -130,20 +135,14 @@ argidx_not_grouped_marks = [
 ]
 
 
-def make_argidx_params(marks, grouped=False):
+def make_argidx_params(marks):
     marks = [pytest.mark.notyet(marks, raises=com.OperationNotDefinedError)]
     return [
         param(
             lambda t: t.timestamp_col.argmin(t.id),
             lambda s: s.timestamp_col.iloc[s.id.argmin()],
             id="argmin",
-            marks=marks
-            + [
-                pytest.mark.xfail_version(
-                    polars=["polars>=0.19.12,<1"], raises=BaseException
-                )
-            ]
-            * grouped,
+            marks=marks,
         ),
         param(
             lambda t: t.double_col.argmax(t.id),
@@ -171,7 +170,7 @@ def test_aggregate(backend, alltypes, df, result_fn, expected_fn):
 
 @pytest.mark.parametrize(
     ("result_fn", "expected_fn"),
-    aggregate_test_params + make_argidx_params(argidx_not_grouped_marks, grouped=True),
+    aggregate_test_params + make_argidx_params(argidx_not_grouped_marks),
 )
 def test_aggregate_grouped(backend, alltypes, df, result_fn, expected_fn):
     grouping_key_col = "bigint_col"
@@ -218,17 +217,13 @@ def test_aggregate_grouped(backend, alltypes, df, result_fn, expected_fn):
         "oracle",
         "flink",
         "exasol",
+        "databricks",
     ],
     raises=com.OperationNotDefinedError,
 )
-@pytest.mark.notimpl(
+@pytest.mark.notyet(
     ["pyspark"],
-    raises=NotImplementedError,
-    reason=(
-        "Invalid  return type with grouped aggregate Pandas UDFs: "
-        "StructType([StructField('mean', DoubleType(), True), "
-        "StructField('std', DoubleType(), True)]) is not supported"
-    ),
+    raises=(PySparkPythonException, NotImplementedError),
 )
 def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
     """Tests .aggregate() on a multi-key group_by with a reduction
@@ -285,7 +280,7 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
             lambda t, where: t.bool_col[where].any(),
             id="any",
             marks=[
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["druid"],
                     raises=AttributeError,
                     reason="'IntegerColumn' object has no attribute 'any'",
@@ -297,25 +292,23 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
             lambda t, where: ~t.bool_col[where].any(),
             id="notany",
             marks=[
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["druid"],
                     raises=AttributeError,
                     reason="'IntegerColumn' object has no attribute 'notany'",
                 ),
-                pytest.mark.notimpl(["exasol"], raises=ExaQueryError),
             ],
         ),
         param(
-            lambda t, where: -t.bool_col.any(where=where),
+            lambda t, where: ~t.bool_col.any(where=where),
             lambda t, where: ~t.bool_col[where].any(),
             id="any_negate",
             marks=[
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["druid"],
                     raises=AttributeError,
                     reason="'IntegerColumn' object has no attribute 'any'",
                 ),
-                pytest.mark.notimpl(["exasol"], raises=ExaQueryError),
             ],
         ),
         param(
@@ -323,7 +316,7 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
             lambda t, where: t.bool_col[where].all(),
             id="all",
             marks=[
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["druid"],
                     raises=AttributeError,
                     reason="'IntegerColumn' object has no attribute 'all'",
@@ -335,25 +328,23 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
             lambda t, where: ~t.bool_col[where].all(),
             id="notall",
             marks=[
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["druid"],
                     raises=AttributeError,
                     reason="'IntegerColumn' object has no attribute 'notall'",
                 ),
-                pytest.mark.notimpl(["exasol"], raises=ExaQueryError),
             ],
         ),
         param(
-            lambda t, where: -t.bool_col.all(where=where),
+            lambda t, where: ~t.bool_col.all(where=where),
             lambda t, where: ~t.bool_col[where].all(),
             id="all_negate",
             marks=[
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["druid"],
                     raises=AttributeError,
                     reason="'IntegerColumn' object has no attribute 'all'",
                 ),
-                pytest.mark.notimpl(["exasol"], raises=ExaQueryError),
             ],
         ),
         param(
@@ -366,7 +357,7 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
             lambda t, where: (t.int_col > 0)[where].sum(),
             id="bool_sum",
             marks=[
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["oracle"],
                     raises=OracleDatabaseError,
                     reason="ORA-02000: missing AS keyword",
@@ -405,7 +396,6 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
                         "mssql",
                         "trino",
                         "druid",
-                        "oracle",
                         "exasol",
                         "flink",
                         "risingwave",
@@ -423,7 +413,6 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
                     [
                         "impala",
                         "mysql",
-                        "datafusion",
                         "mssql",
                         "druid",
                         "oracle",
@@ -443,7 +432,6 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
                     [
                         "impala",
                         "mysql",
-                        "datafusion",
                         "mssql",
                         "druid",
                         "oracle",
@@ -483,7 +471,17 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
             lambda t, where: t.string_col[where].nunique(),
             id="approx_nunique",
             marks=[
-                pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError),
+                pytest.mark.xfail_version(
+                    duckdb=["duckdb>=1.1"],
+                    raises=AssertionError,
+                    reason="not exact, even at this tiny scale",
+                    strict=False,
+                ),
+                pytest.mark.notimpl(
+                    ["datafusion"],
+                    reason="data type is not supported",
+                    raises=Exception,
+                ),
             ],
         ),
         param(
@@ -492,7 +490,7 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
             id="bit_and",
             marks=[
                 pytest.mark.notimpl(
-                    ["polars", "mssql"],
+                    ["polars", "mssql", "exasol"],
                     raises=com.OperationNotDefinedError,
                 ),
                 pytest.mark.notimpl(["druid"], strict=False, raises=AssertionError),
@@ -507,7 +505,7 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
             id="bit_or",
             marks=[
                 pytest.mark.notimpl(
-                    ["polars", "mssql"],
+                    ["polars", "mssql", "exasol"],
                     raises=com.OperationNotDefinedError,
                 ),
                 pytest.mark.notyet(
@@ -521,7 +519,7 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
             id="bit_xor",
             marks=[
                 pytest.mark.notimpl(
-                    ["polars", "mssql"],
+                    ["polars", "mssql", "exasol"],
                     raises=com.OperationNotDefinedError,
                 ),
                 pytest.mark.notyet(
@@ -534,66 +532,16 @@ def test_aggregate_multikey_group_reduction_udf(backend, alltypes, df):
             lambda t, where: len(t[where]),
             id="count_star",
         ),
-        param(
-            lambda t, where: t.string_col.nullif("3").collect(where=where),
-            lambda t, where: t.string_col[t.string_col != "3"][where].tolist(),
-            id="collect",
-            marks=[
-                pytest.mark.notimpl(
-                    ["impala", "mysql", "sqlite", "mssql", "druid", "oracle", "exasol"],
-                    raises=com.OperationNotDefinedError,
-                ),
-                pytest.mark.broken(
-                    ["dask"],
-                    raises=(AttributeError, TypeError),
-                    reason=(
-                        "For 'is_in' case: 'Series' object has no attribute 'arraycollect'"
-                        "For 'no_cond' case: TypeError: Object "
-                        "<dask.dataframe.groupby.Aggregation object at 0x124569840> is not "
-                        "callable or a string"
-                    ),
-                ),
-                pytest.mark.notyet(["flink"], raises=com.OperationNotDefinedError),
-            ],
-        ),
     ],
 )
 @pytest.mark.parametrize(
     ("ibis_cond", "pandas_cond"),
     [
-        param(
-            lambda _: None,
-            lambda _: slice(None),
-            marks=pytest.mark.notimpl(
-                ["exasol"],
-                raises=(com.OperationNotDefinedError, ExaQueryError),
-                strict=False,
-            ),
-            id="no_cond",
-        ),
+        param(lambda _: None, lambda _: slice(None), id="no_cond"),
         param(
             lambda t: t.string_col.isin(["1", "7"]),
             lambda t: t.string_col.isin(["1", "7"]),
-            marks=[
-                pytest.mark.notimpl(
-                    ["exasol"],
-                    raises=(com.OperationNotDefinedError, ExaQueryError),
-                    strict=False,
-                ),
-            ],
             id="is_in",
-        ),
-        param(
-            lambda _: ibis._.string_col.isin(["1", "7"]),
-            lambda t: t.string_col.isin(["1", "7"]),
-            marks=[
-                pytest.mark.notimpl(
-                    ["exasol"],
-                    raises=(com.OperationNotDefinedError, ExaQueryError),
-                    strict=False,
-                ),
-            ],
-            id="is_in_deferred",
         ),
     ],
 )
@@ -606,6 +554,12 @@ def test_reduction_ops(
     ibis_cond,
     pandas_cond,
 ):
+    # Operate on a subset of the data, since aggregations like var/std with
+    # sample/population can be too numerically similar for a larger number of
+    # rows.
+    alltypes = alltypes.filter(alltypes.id < 1550)
+    df = df[df.id < 1550]
+
     expr = alltypes.agg(tmp=result_fn(alltypes, ibis_cond(alltypes))).tmp
     result = expr.execute().squeeze()
     expected = expected_fn(df, pandas_cond(df))
@@ -621,25 +575,43 @@ def test_reduction_ops(
     ["druid", "impala", "mssql", "mysql", "oracle"],
     raises=com.OperationNotDefinedError,
 )
-@pytest.mark.notimpl(["risingwave"], raises=PsycoPg2InternalError)
+@pytest.mark.notimpl(
+    ["risingwave"],
+    raises=com.UnsupportedOperationError,
+    reason="risingwave requires an `order_by` for these aggregations",
+)
 @pytest.mark.parametrize("method", ["first", "last"])
+@pytest.mark.parametrize("filtered", [False, True])
 @pytest.mark.parametrize(
-    "filtered",
+    "include_null",
     [
+        False,
         param(
-            False,
+            True,
             marks=[
-                pytest.mark.notyet(
-                    ["datafusion"],
-                    raises=Exception,
-                    reason="datafusion 38.0.1 has a bug in FILTER handling that causes this test to fail",
-                )
+                pytest.mark.notimpl(
+                    [
+                        "clickhouse",
+                        "exasol",
+                        "flink",
+                        "postgres",
+                        "risingwave",
+                        "snowflake",
+                    ],
+                    raises=com.UnsupportedOperationError,
+                    reason="`include_null=True` is not supported",
+                ),
+                pytest.mark.notimpl(
+                    ["bigquery", "pyspark", "databricks"],
+                    raises=com.UnsupportedOperationError,
+                    reason="Can't mix `where` and `include_null=True`",
+                    strict=False,
+                ),
             ],
         ),
-        True,
     ],
 )
-def test_first_last(backend, alltypes, method, filtered):
+def test_first_last(alltypes, method, filtered, include_null):
     # `first` and `last` effectively choose an arbitrary value when no
     # additional order is specified. *Most* backends will result in the
     # first/last element in a column being selected (at least when operating on
@@ -649,7 +621,7 @@ def test_first_last(backend, alltypes, method, filtered):
     # To sanely test this we create a column that is a mix of nulls and a
     # single value (or a single value after filtering is applied).
     if filtered:
-        new = alltypes.int_col.cases([(3, 30), (4, 40)])
+        new = alltypes.int_col.cases((3, 30), (4, 40))
         where = _.int_col == 3
     else:
         new = (alltypes.int_col == 3).ifelse(30, None)
@@ -657,9 +629,98 @@ def test_first_last(backend, alltypes, method, filtered):
 
     t = alltypes.mutate(new=new)
 
-    expr = getattr(t.new, method)(where=where)
+    expr = getattr(t.new, method)(where=where, include_null=include_null)
     res = expr.execute()
-    assert res == 30
+    if include_null:
+        # no ordering, so technically could be either 30 or NULL
+        assert res == 30 or pd.isna(res)
+    else:
+        assert res == 30
+
+
+@pytest.mark.notimpl(
+    ["clickhouse", "exasol", "flink", "pyspark", "sqlite", "databricks"],
+    raises=com.UnsupportedOperationError,
+)
+@pytest.mark.notimpl(
+    ["druid", "impala", "mssql", "mysql", "oracle"],
+    raises=com.OperationNotDefinedError,
+)
+@pytest.mark.parametrize("method", ["first", "last"])
+@pytest.mark.parametrize("filtered", [False, True], ids=["not-filtered", "filtered"])
+@pytest.mark.parametrize(
+    "include_null",
+    [
+        param(False, id="exclude-null"),
+        param(
+            True,
+            marks=[
+                pytest.mark.notimpl(
+                    ["clickhouse", "exasol", "flink", "postgres", "snowflake"],
+                    raises=com.UnsupportedOperationError,
+                    reason="`include_null=True` is not supported",
+                ),
+                pytest.mark.notimpl(
+                    ["bigquery"],
+                    raises=com.UnsupportedOperationError,
+                    reason="Can't mix `where` and `include_null=True`",
+                    strict=False,
+                ),
+            ],
+            id="include-null",
+        ),
+    ],
+)
+def test_first_last_ordered(alltypes, method, filtered, include_null):
+    t = alltypes.mutate(new=alltypes.int_col.nullif(0).nullif(9))
+    if filtered:
+        where = _.int_col != (1 if method == "last" else 8)
+        sol = 2 if method == "last" else 7
+    else:
+        where = None
+        sol = 1 if method == "last" else 8
+
+    expr = getattr(t.new, method)(
+        where=where, order_by=t.int_col.desc(), include_null=include_null
+    )
+    res = expr.execute()
+    if include_null:
+        assert pd.isna(res)
+    else:
+        assert res == sol
+
+
+@pytest.mark.notimpl(
+    [
+        "druid",
+        "exasol",
+        "flink",
+        "impala",
+        "mssql",
+        "mysql",
+        "oracle",
+    ],
+    raises=com.OperationNotDefinedError,
+)
+@pytest.mark.parametrize("method", ["argmin", "argmax"])
+@pytest.mark.parametrize("filtered", [True, False], ids=["filtered", "unfiltered"])
+@pytest.mark.parametrize("null_result", [True, False], ids=["null", "non-null"])
+def test_argmin_argmax(alltypes, method, filtered, null_result):
+    t = alltypes.mutate(by_col=_.int_col.nullif(0).nullif(9), val_col=10 * _.int_col)
+
+    if filtered:
+        where = _.int_col != (1 if method == "argmin" else 8)
+        sol = 20 if method == "argmin" else 70
+    else:
+        where = None
+        sol = 10 if method == "argmin" else 80
+
+    if null_result:
+        t = t.mutate(val_col=_.val_col.nullif(sol))
+
+    expr = getattr(t.val_col, method)("by_col", where=where)
+    res = expr.execute()
+    assert pd.isna(res) if null_result else res == sol
 
 
 @pytest.mark.notimpl(
@@ -676,12 +737,12 @@ def test_first_last(backend, alltypes, method, filtered):
     raises=com.OperationNotDefinedError,
 )
 @pytest.mark.parametrize("filtered", [False, True])
-def test_arbitrary(backend, alltypes, df, filtered):
+def test_arbitrary(alltypes, filtered):
     # Arbitrary chooses a non-null arbitrary value. To ensure we can test for
     # _something_ we create a column that is a mix of nulls and a single value
     # (or a single value after filtering is applied).
     if filtered:
-        new = alltypes.int_col.cases([(3, 30), (4, 40)])
+        new = alltypes.int_col.cases((3, 30), (4, 40))
         where = _.int_col == 3
     else:
         new = (alltypes.int_col == 3).ifelse(30, None)
@@ -713,7 +774,7 @@ def test_arbitrary(backend, alltypes, df, filtered):
     ],
 )
 @pytest.mark.notyet(
-    ["bigquery", "druid", "mssql", "oracle", "sqlite", "flink"],
+    ["druid", "mssql", "oracle", "sqlite", "flink"],
     raises=(
         OracleDatabaseError,
         com.UnsupportedOperationError,
@@ -726,7 +787,6 @@ def test_arbitrary(backend, alltypes, df, filtered):
     raises=com.OperationNotDefinedError,
     reason="no one has attempted implementation yet",
 )
-@pytest.mark.notimpl(["exasol"], raises=com.UnsupportedOperationError)
 def test_count_distinct_star(alltypes, df, ibis_cond, pandas_cond):
     table = alltypes[["int_col", "double_col", "string_col"]]
     expr = table.nunique(where=ibis_cond(table))
@@ -753,24 +813,13 @@ def test_count_distinct_star(alltypes, df, ibis_cond, pandas_cond):
                         "mysql",
                         "sqlite",
                         "druid",
-                        "exasol",
                     ],
                     raises=com.OperationNotDefinedError,
-                ),
-                pytest.mark.never(
-                    ["dask"],
-                    reason="backend implements approximate quantiles",
-                    raises=AssertionError,
                 ),
                 pytest.mark.never(
                     ["trino"],
                     reason="backend implements approximate quantiles",
                     raises=com.OperationNotDefinedError,
-                ),
-                pytest.mark.never(
-                    ["pyspark"],
-                    reason="backend implements approximate quantiles",
-                    raises=AssertionError,
                 ),
                 pytest.mark.never(
                     ["flink"],
@@ -799,7 +848,7 @@ def test_count_distinct_star(alltypes, df, ibis_cond, pandas_cond):
                     raises=com.UnsupportedBackendType,
                 ),
                 pytest.mark.notyet(
-                    ["snowflake"],
+                    ["snowflake", "risingwave"],
                     reason="backend doesn't implement array of quantiles as input",
                     raises=com.OperationNotDefinedError,
                 ),
@@ -808,25 +857,10 @@ def test_count_distinct_star(alltypes, df, ibis_cond, pandas_cond):
                     reason="backend implements approximate quantiles",
                     raises=com.OperationNotDefinedError,
                 ),
-                pytest.mark.broken(
-                    ["pyspark"],
-                    reason="backend implements approximate quantiles",
-                    raises=AssertionError,
-                ),
-                pytest.mark.broken(
-                    ["dask"],
-                    reason="backend implements approximate quantiles",
-                    raises=AssertionError,
-                ),
                 pytest.mark.never(
                     ["flink"],
                     reason="backend doesn't implement approximate quantiles yet",
                     raises=com.OperationNotDefinedError,
-                ),
-                pytest.mark.broken(
-                    ["risingwave"],
-                    reason="Invalid input syntax: direct arg in `percentile_cont` must be castable to float64",
-                    raises=PsycoPg2InternalError,
                 ),
             ],
         ),
@@ -841,14 +875,7 @@ def test_count_distinct_star(alltypes, df, ibis_cond, pandas_cond):
             lambda t: t.string_col.isin(["1", "7"]),
             id="is_in",
             marks=[
-                pytest.mark.notimpl(
-                    ["datafusion"], raises=com.OperationNotDefinedError
-                ),
-                pytest.mark.notimpl(
-                    "risingwave",
-                    raises=PsycoPg2InternalError,
-                    reason="probably incorrect filter syntax but not sure",
-                ),
+                pytest.mark.notimpl(["datafusion"], raises=com.OperationNotDefinedError)
             ],
         ),
     ],
@@ -867,6 +894,51 @@ def test_quantile(
     assert pytest.approx(result) == expected
 
 
+@pytest.mark.parametrize("filtered", [False, True])
+@pytest.mark.parametrize(
+    "multi",
+    [
+        False,
+        param(
+            True,
+            marks=[
+                pytest.mark.notimpl(
+                    ["datafusion", "oracle", "snowflake", "polars", "risingwave"],
+                    raises=com.OperationNotDefinedError,
+                    reason="multi-quantile not yet implemented",
+                ),
+                pytest.mark.notyet(
+                    ["mssql", "exasol"],
+                    raises=com.UnsupportedBackendType,
+                    reason="array types not supported",
+                ),
+            ],
+        ),
+    ],
+)
+@pytest.mark.notyet(
+    ["druid", "flink", "impala", "mysql", "sqlite"],
+    raises=(com.OperationNotDefinedError, com.UnsupportedBackendType),
+    reason="quantiles (approximate or otherwise) not supported",
+)
+def test_approx_quantile(con, filtered, multi):
+    t = ibis.memtable({"x": [0, 25, 25, 50, 75, 75, 100, 125, 125, 150, 175, 175, 200]})
+    where = t.x <= 100 if filtered else None
+    q = [0.25, 0.75] if multi else 0.25
+    res = con.execute(t.x.approx_quantile(q, where=where))
+    if multi:
+        assert isinstance(res, list)
+        assert all(pd.api.types.is_float(r) for r in res)
+        sol = [25, 75] if filtered else [50, 150]
+    else:
+        assert pd.api.types.is_float(res)
+        sol = 25 if filtered else 50
+
+    # Give pretty wide bounds for approximation - we're mostly testing that
+    # the call is valid and the filtering logic is applied properly.
+    assert res == pytest.approx(sol, abs=10)
+
+
 @pytest.mark.parametrize(
     ("result_fn", "expected_fn"),
     [
@@ -875,11 +947,6 @@ def test_quantile(
             lambda t, where: t.G[where].cov(t.RBI[where], ddof=0),
             id="covar_pop",
             marks=[
-                pytest.mark.notyet(
-                    ["dask"],
-                    reason="dask doesn't support `cov(ddof=0)` yet",
-                    raises=com.UnsupportedOperationError,
-                ),
                 pytest.mark.notimpl(
                     ["polars", "druid"],
                     raises=com.OperationNotDefinedError,
@@ -913,11 +980,6 @@ def test_quantile(
                     raises=PsycoPg2InternalError,
                     reason="function covar_pop(integer, integer) does not exist",
                 ),
-                pytest.mark.xfail_version(
-                    datafusion=["datafusion==38.0.1"],
-                    reason="datafusion FILTER syntax seems broken",
-                    strict=False,  # passes with no filter condition
-                ),
             ],
         ),
         param(
@@ -925,11 +987,6 @@ def test_quantile(
             lambda t, where: t.G[where].corr(t.RBI[where]),
             id="corr_pop",
             marks=[
-                pytest.mark.notyet(
-                    ["dask"],
-                    raises=com.UnsupportedOperationError,
-                    reason="dask doesn't support `corr(ddof=0)` yet",
-                ),
                 pytest.mark.notimpl(
                     ["druid"],
                     raises=com.OperationNotDefinedError,
@@ -960,7 +1017,7 @@ def test_quantile(
                     raises=com.OperationNotDefinedError,
                 ),
                 pytest.mark.notyet(
-                    ["postgres", "duckdb", "snowflake", "risingwave"],
+                    ["postgres", "duckdb", "snowflake", "risingwave", "exasol"],
                     raises=com.UnsupportedOperationError,
                     reason="backend only implements population correlation coefficient",
                 ),
@@ -994,11 +1051,6 @@ def test_quantile(
             lambda t, where: (t.G[where] > 34.0).cov(t.G[where] <= 34.0, ddof=0),
             id="covar_pop_bool",
             marks=[
-                pytest.mark.notyet(
-                    ["dask"],
-                    raises=com.UnsupportedOperationError,
-                    reason="dask doesn't support `cov(ddof=0)` yet",
-                ),
                 pytest.mark.notimpl(
                     ["polars", "druid"],
                     raises=com.OperationNotDefinedError,
@@ -1023,11 +1075,6 @@ def test_quantile(
             lambda t, where: (t.G[where] > 34.0).corr(t.G[where] <= 34.0),
             id="corr_pop_bool",
             marks=[
-                pytest.mark.notyet(
-                    ["dask"],
-                    raises=com.UnsupportedOperationError,
-                    reason="dask doesn't support `corr(ddof=0)` yet",
-                ),
                 pytest.mark.notimpl(
                     ["druid"],
                     raises=com.OperationNotDefinedError,
@@ -1061,7 +1108,7 @@ def test_quantile(
         ),
     ],
 )
-@pytest.mark.notimpl(["mssql", "exasol"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(["mssql"], raises=com.OperationNotDefinedError)
 def test_corr_cov(
     con,
     batting,
@@ -1089,7 +1136,7 @@ def test_corr_cov(
 
 
 @pytest.mark.notimpl(
-    ["mysql", "sqlite", "mssql", "druid", "exasol"],
+    ["mysql", "sqlite", "mssql", "druid"],
     raises=com.OperationNotDefinedError,
 )
 @pytest.mark.notyet(["flink"], raises=com.OperationNotDefinedError)
@@ -1100,13 +1147,12 @@ def test_approx_median(alltypes):
 
 
 @pytest.mark.notimpl(
-    ["bigquery", "druid", "sqlite", "exasol"], raises=com.OperationNotDefinedError
+    ["bigquery", "druid", "sqlite"], raises=com.OperationNotDefinedError
 )
 @pytest.mark.notyet(
     ["impala", "mysql", "mssql", "druid", "trino"],
     raises=com.OperationNotDefinedError,
 )
-@pytest.mark.notyet(["dask"], raises=NotImplementedError)
 @pytest.mark.never(
     ["flink"],
     reason="backend doesn't implement approximate quantiles yet",
@@ -1123,7 +1169,7 @@ def test_median(alltypes, df):
     ["bigquery", "druid", "sqlite"], raises=com.OperationNotDefinedError
 )
 @pytest.mark.notyet(
-    ["impala", "mysql", "mssql", "trino", "exasol", "flink"],
+    ["impala", "mysql", "mssql", "trino", "flink"],
     raises=com.OperationNotDefinedError,
 )
 @pytest.mark.notyet(
@@ -1131,20 +1177,26 @@ def test_median(alltypes, df):
     raises=ClickHouseDatabaseError,
     reason="doesn't support median of strings",
 )
-@pytest.mark.broken(
+@pytest.mark.notyet(
     ["pyspark"], raises=AssertionError, reason="pyspark returns null for string median"
 )
-@pytest.mark.notimpl(["dask"], raises=(AssertionError, NotImplementedError, TypeError))
+@pytest.mark.notyet(
+    ["databricks"],
+    raises=DatabricksServerOperationError,
+    reason="percentile of string is not allowed",
+)
 @pytest.mark.notyet(
     ["snowflake"],
     raises=SnowflakeProgrammingError,
     reason="doesn't support median of strings",
 )
+@pytest.mark.notyet(
+    ["exasol"],
+    raises=ExaQueryError,
+    reason="doesn't support quantile on strings",
+)
 @pytest.mark.notyet(["polars"], raises=PolarsInvalidOperationError)
 @pytest.mark.notyet(["datafusion"], raises=Exception, reason="not supported upstream")
-@pytest.mark.notimpl(
-    ["pandas"], raises=TypeError, reason="results aren't correctly typed"
-)
 @pytest.mark.parametrize(
     "func",
     [
@@ -1168,31 +1220,39 @@ def test_string_quantile(alltypes, func):
     assert result == "a"
 
 
-@pytest.mark.notimpl(["bigquery", "sqlite"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(
+    ["bigquery", "sqlite", "druid"], raises=com.OperationNotDefinedError
+)
 @pytest.mark.notyet(
     ["impala", "mysql", "mssql", "trino", "exasol", "flink"],
     raises=com.OperationNotDefinedError,
 )
-@pytest.mark.broken(["druid"], raises=AttributeError)
 @pytest.mark.notyet(
     ["snowflake"],
     raises=SnowflakeProgrammingError,
     reason="doesn't support median of dates",
 )
-@pytest.mark.notimpl(["dask"], raises=(AssertionError, NotImplementedError, TypeError))
-@pytest.mark.notyet(["polars"], raises=PolarsInvalidOperationError)
-@pytest.mark.notyet(["datafusion"], raises=Exception, reason="not supported upstream")
-@pytest.mark.parametrize(
-    "func",
-    [
-        param(
-            methodcaller("quantile", 0.5),
-            id="quantile",
-        ),
-    ],
+@pytest.mark.notyet(
+    ["pyspark"],
+    raises=PySparkAnalysisException,
+    reason="doesn't support quantile on dates",
 )
-def test_date_quantile(alltypes, func):
-    expr = func(alltypes.timestamp_col.date())
+@pytest.mark.notyet(
+    ["exasol"],
+    raises=ExaQueryError,
+    reason="doesn't support quantile on dates",
+)
+@pytest.mark.notyet(["datafusion"], raises=Exception, reason="not supported upstream")
+@pytest.mark.notyet(
+    ["polars"], raises=PolarsInvalidOperationError, reason="not supported upstream"
+)
+@pytest.mark.notyet(
+    ["databricks"],
+    raises=DatabricksServerOperationError,
+    reason="percentile of string is not allowed",
+)
+def test_date_quantile(alltypes):
+    expr = alltypes.timestamp_col.date().quantile(0.5)
     result = expr.execute()
     assert result == date(2009, 12, 31)
 
@@ -1212,6 +1272,11 @@ def test_date_quantile(alltypes, func):
                     raises=GoogleBadRequest,
                     reason="Argument 2 to STRING_AGG must be a literal or query parameter",
                 ),
+                pytest.mark.notimpl(
+                    ["polars"],
+                    raises=com.UnsupportedArgumentError,
+                    reason="polars doesn't support expression separators",
+                ),
             ],
         ),
     ],
@@ -1223,28 +1288,15 @@ def test_date_quantile(alltypes, func):
         param(
             lambda t: t.string_col.isin(["1", "7"]),
             lambda t: t.string_col.isin(["1", "7"]),
-            marks=[
-                pytest.mark.notyet(["trino"], raises=TrinoUserError),
-            ],
             id="is_in",
         ),
         param(
             lambda t: t.string_col.notin(["1", "7"]),
             lambda t: ~t.string_col.isin(["1", "7"]),
-            marks=[
-                pytest.mark.notyet(["trino"], raises=TrinoUserError),
-            ],
             id="not_in",
         ),
     ],
 )
-@pytest.mark.notimpl(["datafusion", "polars"], raises=com.OperationNotDefinedError)
-@pytest.mark.notyet(
-    ["oracle"],
-    raises=OracleDatabaseError,
-    reason="ORA-00904: 'GROUP_CONCAT': invalid identifier",
-)
-@pytest.mark.notimpl(["exasol"], raises=ExaQueryError)
 @pytest.mark.notyet(["flink"], raises=Py4JJavaError)
 def test_group_concat(
     backend, alltypes, df, ibis_cond, pandas_cond, ibis_sep, pandas_sep
@@ -1277,6 +1329,109 @@ def test_group_concat(
     )
 
 
+@pytest.mark.notimpl(
+    [
+        "clickhouse",
+        "datafusion",
+        "druid",
+        "flink",
+        "impala",
+        "pyspark",
+        "sqlite",
+        "databricks",
+    ],
+    raises=com.UnsupportedOperationError,
+)
+@pytest.mark.parametrize("filtered", [False, True])
+def test_group_concat_ordered(alltypes, df, filtered):
+    ibis_cond = (_.id % 13 == 0) if filtered else None
+    pd_cond = (df.id % 13 == 0) if filtered else True
+    expr = (
+        alltypes.filter(_.bigint_col == 10)
+        .id.cast("str")
+        .group_concat(":", where=ibis_cond, order_by=_.id.desc())
+    )
+    result = expr.execute()
+    expected = ":".join(
+        df.id[(df.bigint_col == 10) & pd_cond].sort_values(ascending=False).astype(str)
+    )
+    assert result == expected
+
+
+def gen_test_collect_marks(distinct, filtered, ordered, include_null):
+    """The marks for this test fail for different combinations of parameters.
+    Rather than set `strict=False` (which can let bugs sneak through), we split
+    the mark generation into a function"""
+    if distinct:
+        yield pytest.mark.notimpl(["datafusion"], raises=com.UnsupportedOperationError)
+    if ordered:
+        yield pytest.mark.notimpl(
+            ["clickhouse", "pyspark", "flink", "databricks"],
+            raises=com.UnsupportedOperationError,
+        )
+    if include_null:
+        yield pytest.mark.notimpl(
+            ["clickhouse", "pyspark", "snowflake", "databricks"],
+            raises=com.UnsupportedOperationError,
+        )
+
+    # Handle special cases
+    if filtered and distinct:
+        yield pytest.mark.notimpl(
+            ["bigquery", "snowflake"],
+            raises=com.UnsupportedOperationError,
+            reason="Can't combine where and distinct",
+        )
+    elif filtered and include_null:
+        yield pytest.mark.notimpl(
+            ["bigquery"],
+            raises=com.UnsupportedOperationError,
+            reason="Can't combine where and include_null",
+        )
+    elif include_null:
+        yield pytest.mark.notimpl(
+            ["bigquery"],
+            raises=GoogleBadRequest,
+            reason="BigQuery can't retrieve arrays with null values",
+        )
+
+
+@pytest.mark.notimpl(
+    ["druid", "exasol", "impala", "mssql", "mysql", "oracle", "sqlite"],
+    raises=com.OperationNotDefinedError,
+)
+@pytest.mark.parametrize(
+    "distinct, filtered, ordered, include_null",
+    [
+        param(*ps, marks=list(gen_test_collect_marks(*ps)))
+        for ps in itertools.product(*([[True, False]] * 4))
+    ],
+)
+def test_collect(alltypes, df, distinct, filtered, ordered, include_null):
+    expr = alltypes.mutate(x=_.string_col.nullif("3")).x.collect(
+        where=((_.id % 13 == 0) if filtered else None),
+        include_null=include_null,
+        distinct=distinct,
+        order_by=(_.x.desc() if ordered else ()),
+    )
+    res = expr.execute()
+
+    x = df.string_col.where(df.string_col != "3", None)
+    if filtered:
+        x = x[df.id % 13 == 0]
+    if not include_null:
+        x = x.dropna()
+    if distinct:
+        x = x.drop_duplicates()
+    sol = sorted(x, key=lambda x: (x is not None, x), reverse=True)
+
+    if not ordered:
+        # If unordered, order afterwards so we can compare
+        res = sorted(res, key=lambda x: (x is not None, x), reverse=True)
+
+    assert res == sol
+
+
 @pytest.mark.notimpl(["mssql"], raises=PyODBCProgrammingError)
 def test_topk_op(alltypes, df):
     # TopK expression will order rows by "count" but each backend
@@ -1306,13 +1461,8 @@ def test_topk_op(alltypes, df):
         )
     ],
 )
-@pytest.mark.broken(
+@pytest.mark.notyet(
     ["druid"], raises=PyDruidProgrammingError, reason="Java NullPointerException"
-)
-@pytest.mark.notimpl(
-    ["dask"],
-    raises=NotImplementedError,
-    reason="sorting on aggregations not yet implemented",
 )
 @pytest.mark.notyet(
     ["flink"], raises=Py4JError, reason="Flink doesn't support semi joins"
@@ -1334,7 +1484,7 @@ def test_topk_filter_op(con, alltypes, df, result_fn, expected_fn):
 
 
 @pytest.mark.parametrize(
-    "agg_fn", [lambda s: list(s), lambda s: np.array(s)], ids=lambda obj: obj.__name__
+    "agg_fn", [lambda s: list(s), lambda s: np.array(s)], ids=["list", "ndarray"]
 )
 @pytest.mark.notimpl(
     [
@@ -1355,8 +1505,15 @@ def test_topk_filter_op(con, alltypes, df, result_fn, expected_fn):
         "oracle",
         "exasol",
         "flink",
+        "databricks",
     ],
     raises=com.OperationNotDefinedError,
+)
+@pytest.mark.notyet(
+    ["pyspark"],
+    condition=IS_SPARK_REMOTE,
+    raises=PySparkPythonException,
+    reason="remote udfs not yet tested due to environment complexities",
 )
 def test_aggregate_list_like(backend, alltypes, df, agg_fn):
     """Tests .aggregate() where the result of an aggregation is a list-like.
@@ -1397,8 +1554,15 @@ def test_aggregate_list_like(backend, alltypes, df, agg_fn):
         "flink",
         "exasol",
         "flink",
+        "databricks",
     ],
     raises=com.OperationNotDefinedError,
+)
+@pytest.mark.notyet(
+    ["pyspark"],
+    condition=IS_SPARK_REMOTE,
+    raises=PySparkPythonException,
+    reason="remote udfs not yet tested due to environment complexities",
 )
 def test_aggregate_mixed_udf(backend, alltypes, df):
     """Tests .aggregate() with multiple aggregations with mixed result types.
@@ -1434,9 +1598,7 @@ def test_aggregate_mixed_udf(backend, alltypes, df):
 
 def test_binds_are_cast(alltypes):
     expr = alltypes.aggregate(
-        high_line_count=(
-            alltypes.string_col.case().when("1-URGENT", 1).else_(0).end().sum()
-        )
+        high_line_count=alltypes.string_col.cases(("1-URGENT", 1), else_=0).sum()
     )
 
     expr.execute()
@@ -1448,12 +1610,9 @@ def test_agg_sort(alltypes):
         query.order_by(alltypes.year)
 
 
-@pytest.mark.xfail_version(
-    polars=["polars==0.14.31"], reason="projection of scalars is broken"
-)
 def test_filter(backend, alltypes, df):
     expr = (
-        alltypes[_.string_col == "1"]
+        alltypes.filter(_.string_col == "1")
         .mutate(x=L(1, "int64"))
         .group_by(_.x)
         .aggregate(sum=_.double_col.sum())
@@ -1482,7 +1641,7 @@ def test_agg_name_in_output_column(alltypes):
 def test_grouped_case(backend, con):
     table = ibis.memtable({"key": [1, 1, 2, 2], "value": [10, 30, 20, 40]})
 
-    case_expr = ibis.case().when(table.value < 25, table.value).else_(ibis.null()).end()
+    case_expr = ibis.cases((table.value < 25, table.value), else_=ibis.null())
 
     expr = (
         table.group_by(k="key")
@@ -1495,8 +1654,12 @@ def test_grouped_case(backend, con):
     backend.assert_frame_equal(result, expected)
 
 
-@pytest.mark.notimpl(["datafusion", "polars"], raises=com.OperationNotDefinedError)
-@pytest.mark.notimpl(["exasol"], raises=ExaQueryError)
+@pytest.mark.notimpl(["polars"], raises=com.OperationNotDefinedError)
+@pytest.mark.notimpl(
+    ["datafusion"],
+    raises=BaseException,
+    reason="because pyo3 panic exception is raised",
+)
 @pytest.mark.notyet(["flink"], raises=Py4JJavaError)
 @pytest.mark.notyet(["impala"], raises=ImpalaHiveServer2Error)
 @pytest.mark.notyet(["clickhouse"], raises=ClickHouseDatabaseError)
@@ -1508,6 +1671,7 @@ def test_grouped_case(backend, con):
 @pytest.mark.notyet(["pyspark"], raises=PySparkAnalysisException)
 @pytest.mark.notyet(["mssql"], raises=PyODBCProgrammingError)
 @pytest.mark.notyet(["risingwave"], raises=AssertionError, strict=False)
+@pytest.mark.notyet(["databricks"], raises=DatabricksServerOperationError)
 def test_group_concat_over_window(backend, con):
     # TODO: this test is flaky on risingwave and I DO NOT LIKE IT
     input_df = pd.DataFrame(
@@ -1515,22 +1679,25 @@ def test_group_concat_over_window(backend, con):
             "s": ["a|b|c", "b|a|c", "b|b|b|c|a"],
             "token": ["a", "b", "c"],
             "pk": [1, 1, 2],
+            "id": [1, 2, 3],
         }
     )
     expected = input_df.assign(test=["a|b|c|b|a|c", "b|a|c", "b|b|b|c|a"])
 
     table = ibis.memtable(input_df)
-    w = ibis.window(group_by="pk", preceding=0, following=None)
-    expr = table.mutate(test=table.s.group_concat(sep="|").over(w)).order_by("pk")
+    expr = table.mutate(
+        test=table.s.group_concat(sep="|").over(
+            group_by="pk", order_by="id", rows=(0, None)
+        )
+    ).order_by("id")
 
     result = con.execute(expr)
     backend.assert_frame_equal(result, expected)
 
 
-@pytest.mark.xfail_version(dask=["dask<2024.2.0"])
 def test_value_counts_on_expr(backend, alltypes, df):
     expr = alltypes.bigint_col.add(1).value_counts()
-    columns = expr.columns
+    columns = list(expr.columns)
     expr = expr.order_by(columns)
     result = expr.execute().sort_values(columns).reset_index(drop=True)
     expected = df.bigint_col.add(1).value_counts().reset_index()
@@ -1539,6 +1706,7 @@ def test_value_counts_on_expr(backend, alltypes, df):
     backend.assert_frame_equal(result, expected)
 
 
+@pytest.mark.xfail_version(datafusion=["datafusion==42"])
 def test_group_by_expr(backend, con):
     expr = (
         ibis.memtable(
@@ -1553,3 +1721,16 @@ def test_group_by_expr(backend, con):
         dict(n="int32", c="int64")
     )
     backend.assert_frame_equal(result, expected)
+
+
+@pytest.mark.parametrize(
+    "value", [ibis.literal("a"), ibis.null("str")], ids=["string", "null"]
+)
+@pytest.mark.notyet(
+    ["mssql"], raises=PyODBCProgrammingError, reason="not supported by the database"
+)
+def test_group_by_scalar(alltypes, df, value):
+    expr = alltypes.group_by(key=value).agg(n=lambda t: t.count())
+    result = expr.execute()
+    n = result["n"].values[0].item()
+    assert n == len(df)

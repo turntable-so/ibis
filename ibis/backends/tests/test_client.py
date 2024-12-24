@@ -13,12 +13,9 @@ import sys
 from operator import itemgetter
 from typing import TYPE_CHECKING
 
-import numpy as np
-import pandas as pd
-import pyarrow as pa
-import pyarrow.dataset
 import pytest
 import rich.console
+import sqlglot as sg
 import toolz
 from packaging.version import parse as vparse
 from pytest import mark, param
@@ -29,21 +26,27 @@ import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
 from ibis.backends.conftest import ALL_BACKENDS
 from ibis.backends.tests.errors import (
+    DatabricksServerOperationError,
     ExaQueryError,
     ImpalaHiveServer2Error,
     OracleDatabaseError,
     PsycoPg2InternalError,
     PsycoPg2UndefinedObject,
+    Py4JJavaError,
     PyODBCProgrammingError,
     SnowflakeProgrammingError,
-    TrinoUserError,
 )
+from ibis.conftest import IS_SPARK_REMOTE
 from ibis.util import gen_name
 
 if TYPE_CHECKING:
     from ibis.backends import BaseBackend
 
-pl = pytest.importorskip("polars", reason="Polars is not installed")
+
+np = pytest.importorskip("numpy")
+pd = pytest.importorskip("pandas")
+pa = pytest.importorskip("pyarrow")
+ds = pytest.importorskip("pyarrow.dataset")
 
 
 @pytest.fixture
@@ -82,16 +85,11 @@ def _create_temp_table_with_schema(backend, con, temp_table_name, schema, data=N
     "sch",
     [
         None,
-        ibis.schema(
-            dict(
-                first_name="string",
-                last_name="string",
-                department_name="string",
-                salary="float64",
-            )
-        ),
+        dict(first_name="string", salary="float64"),
+        dict(first_name="string", salary="float64").items(),
+        ibis.schema(dict(first_name="string", salary="float64")),
     ],
-    ids=["no_schema", "schema"],
+    ids=["no_schema", "dict_schema", "tuples", "schema"],
 )
 @pytest.mark.notimpl(["druid"])
 @pytest.mark.notimpl(
@@ -99,14 +97,7 @@ def _create_temp_table_with_schema(backend, con, temp_table_name, schema, data=N
     reason="Flink backend supports creating only TEMPORARY VIEW for in-memory data.",
 )
 def test_create_table(backend, con, temp_table, func, sch):
-    df = pd.DataFrame(
-        {
-            "first_name": ["A", "B", "C"],
-            "last_name": ["D", "E", "F"],
-            "department_name": ["AA", "BB", "CC"],
-            "salary": [100.0, 200.0, 300.0],
-        }
-    )
+    df = pd.DataFrame({"first_name": ["A", "B", "C"], "salary": [100.0, 200.0, 300.0]})
 
     con.create_table(temp_table, func(df), schema=sch)
     result = (
@@ -126,11 +117,22 @@ def test_create_table(backend, con, temp_table, func, sch):
             marks=[
                 pytest.mark.notyet(["clickhouse"], reason="Can't specify both"),
                 pytest.mark.notyet(
-                    ["pyspark", "trino", "exasol", "risingwave"],
+                    [
+                        "pyspark",
+                        "trino",
+                        "exasol",
+                        "risingwave",
+                        "impala",
+                        "databricks",
+                    ],
                     reason="No support for temp tables",
                 ),
-                pytest.mark.broken(["mssql"], reason="Incorrect temp table syntax"),
-                pytest.mark.broken(
+                pytest.mark.notyet(
+                    ["mssql"],
+                    reason="Can't rename temp tables",
+                    raises=ValueError,
+                ),
+                pytest.mark.notimpl(
                     ["bigquery"],
                     reason="tables created with temp=True cause a 404 on retrieval",
                 ),
@@ -148,11 +150,18 @@ def test_create_table(backend, con, temp_table, func, sch):
             id="temp, no overwrite",
             marks=[
                 pytest.mark.notyet(
-                    ["pyspark", "trino", "exasol", "risingwave"],
+                    [
+                        "pyspark",
+                        "trino",
+                        "exasol",
+                        "risingwave",
+                        "impala",
+                        "databricks",
+                    ],
                     reason="No support for temp tables",
                 ),
-                pytest.mark.broken(["mssql"], reason="Incorrect temp table syntax"),
-                pytest.mark.broken(
+                pytest.mark.notimpl(["mssql"], reason="Incorrect temp table syntax"),
+                pytest.mark.notimpl(
                     ["bigquery"],
                     reason="tables created with temp=True cause a 404 on retrieval",
                 ),
@@ -160,7 +169,7 @@ def test_create_table(backend, con, temp_table, func, sch):
         ),
     ],
 )
-@pytest.mark.notimpl(["druid", "impala"])
+@pytest.mark.notimpl(["druid"])
 def test_create_table_overwrite_temp(backend, con, temp_table, temp, overwrite):
     df = pd.DataFrame(
         {
@@ -221,7 +230,7 @@ def test_load_data(backend, con, temp_table, lamduh):
     [
         param(lambda t: t.string_col, [("string_col", dt.String)], id="column"),
         param(
-            lambda t: t[t.string_col, t.bigint_col],
+            lambda t: t.select(t.string_col, t.bigint_col),
             [("string_col", dt.String), ("bigint_col", dt.Int64)],
             id="table",
         ),
@@ -247,7 +256,6 @@ _LIMIT = {
 
 
 @pytest.mark.notimpl(["mssql"])
-@pytest.mark.never(["dask", "pandas"], reason="dask and pandas do not support SQL")
 def test_sql(backend, con):
     # execute the expression using SQL query
     table = backend.format_table("functional_alltypes")
@@ -289,7 +297,7 @@ def test_create_table_from_schema(con, new_schema, temp_table):
     assert result == new_table.schema()
 
 
-@mark.broken(
+@mark.notimpl(
     ["oracle"],
     reason="oracle temp tables aren't cleaned up on reconnect -- they need to "
     "be switched from using atexit to weakref.finalize",
@@ -302,9 +310,14 @@ def test_create_table_from_schema(con, new_schema, temp_table):
     raises=NotImplementedError,
 )
 @pytest.mark.never(
-    ["risingwave"],
+    ["risingwave", "databricks"],
     raises=com.UnsupportedOperationError,
     reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
+)
+@pytest.mark.notyet(
+    ["datafusion"],
+    raises=Exception,
+    reason="temp tables are not supported upstream in datafusion",
 )
 @pytest.mark.notimpl(
     ["flink"],
@@ -313,7 +326,9 @@ def test_create_table_from_schema(con, new_schema, temp_table):
 )
 def test_create_temporary_table_from_schema(con_no_data, new_schema):
     if con_no_data.name == "snowflake" and os.environ.get("SNOWFLAKE_SNOWPARK"):
-        with pytest.raises(com.IbisError, match="Reconnecting is not supported"):
+        with pytest.raises(
+            com.IbisError, match="Cannot reconnect to unconfigured .+ backend"
+        ):
             con_no_data.reconnect()
         return
 
@@ -330,14 +345,13 @@ def test_create_temporary_table_from_schema(con_no_data, new_schema):
 
     con_no_data.reconnect()
     # verify table no longer exist after reconnect
-    assert temp_table not in con_no_data.tables.keys()
+    assert temp_table not in con_no_data.list_tables()
 
 
 @mark.notimpl(
     [
         "bigquery",
         "clickhouse",
-        "dask",
         "datafusion",
         "druid",
         "duckdb",
@@ -345,7 +359,6 @@ def test_create_temporary_table_from_schema(con_no_data, new_schema):
         "mssql",
         "mysql",
         "oracle",
-        "pandas",
         "polars",
         "postgres",
         "risingwave",
@@ -369,10 +382,7 @@ def test_rename_table(con, temp_table, temp_table_orig):
 
 
 @mark.notimpl(["polars", "druid"])
-@mark.never(["impala", "pyspark"], reason="No non-nullable datatypes")
-@mark.notyet(
-    ["trino"], reason="trino doesn't support NOT NULL in its in-memory catalog"
-)
+@mark.never(["impala", "pyspark", "databricks"], reason="No non-nullable datatypes")
 @pytest.mark.notimpl(
     ["flink"],
     raises=com.IbisError,
@@ -419,6 +429,18 @@ def test_create_drop_view(ddl_con, temp_view):
 
 
 @pytest.fixture
+def test_employee_schema() -> ibis.schema:
+    return ibis.schema(
+        {
+            "first_name": "string",
+            "last_name": "string",
+            "department_name": "string",
+            "salary": "float64",
+        }
+    )
+
+
+@pytest.fixture
 def employee_empty_temp_table(backend, con, test_employee_schema):
     temp_table_name = gen_name("temp_employee_empty_table")
     _create_temp_table_with_schema(backend, con, temp_table_name, test_employee_schema)
@@ -427,9 +449,16 @@ def employee_empty_temp_table(backend, con, test_employee_schema):
 
 
 @pytest.fixture
-def employee_data_1_temp_table(
-    backend, con, test_employee_schema, test_employee_data_1
-):
+def employee_data_1_temp_table(backend, con, test_employee_schema):
+    test_employee_data_1 = pd.DataFrame(
+        {
+            "first_name": ["A", "B", "C"],
+            "last_name": ["D", "E", "F"],
+            "department_name": ["AA", "BB", "CC"],
+            "salary": [100.0, 200.0, 300.0],
+        }
+    )
+
     temp_table_name = gen_name("temp_employee_data_1")
     _create_temp_table_with_schema(
         backend, con, temp_table_name, test_employee_schema, data=test_employee_data_1
@@ -437,6 +466,22 @@ def employee_data_1_temp_table(
     assert temp_table_name in con.list_tables()
     yield temp_table_name
     con.drop_table(temp_table_name, force=True)
+
+
+@pytest.fixture
+def test_employee_data_2():
+    import pandas as pd
+
+    df2 = pd.DataFrame(
+        {
+            "first_name": ["X", "Y", "Z"],
+            "last_name": ["A", "B", "C"],
+            "department_name": ["XX", "YY", "ZZ"],
+            "salary": [400.0, 500.0, 600.0],
+        }
+    )
+
+    return df2
 
 
 @pytest.fixture
@@ -451,9 +496,7 @@ def employee_data_2_temp_table(
     con.drop_table(temp_table_name, force=True)
 
 
-@pytest.mark.notimpl(
-    ["polars", "pandas", "dask"], reason="`insert` method not implemented"
-)
+@pytest.mark.notimpl(["polars"], reason="`insert` method not implemented")
 def test_insert_no_overwrite_from_dataframe(
     backend, con, test_employee_data_2, employee_empty_temp_table
 ):
@@ -467,9 +510,7 @@ def test_insert_no_overwrite_from_dataframe(
     )
 
 
-@pytest.mark.notimpl(
-    ["polars", "pandas", "dask"], reason="`insert` method not implemented"
-)
+@pytest.mark.notimpl(["polars"], reason="`insert` method not implemented")
 @pytest.mark.notyet(
     ["risingwave"],
     raises=PsycoPg2InternalError,
@@ -477,9 +518,6 @@ def test_insert_no_overwrite_from_dataframe(
 )
 @pytest.mark.notyet(
     ["datafusion"], raises=Exception, reason="DELETE DML not implemented upstream"
-)
-@pytest.mark.notyet(
-    ["trino"], raises=TrinoUserError, reason="requires a non-memory connector"
 )
 @pytest.mark.notyet(["druid"], raises=NotImplementedError)
 def test_insert_overwrite_from_dataframe(
@@ -496,9 +534,7 @@ def test_insert_overwrite_from_dataframe(
     )
 
 
-@pytest.mark.notimpl(
-    ["polars", "pandas", "dask"], reason="`insert` method not implemented"
-)
+@pytest.mark.notimpl(["polars"], reason="`insert` method not implemented")
 def test_insert_no_overwrite_from_expr(
     backend, con, employee_empty_temp_table, employee_data_2_temp_table
 ):
@@ -514,16 +550,9 @@ def test_insert_no_overwrite_from_expr(
     )
 
 
-@pytest.mark.notimpl(
-    ["polars", "pandas", "dask"], reason="`insert` method not implemented"
-)
+@pytest.mark.notimpl(["polars"], reason="`insert` method not implemented")
 @pytest.mark.notyet(
     ["datafusion"], raises=Exception, reason="DELETE DML not implemented upstream"
-)
-@pytest.mark.notyet(
-    ["trino"],
-    raises=TrinoUserError,
-    reason="requires a non-memory connector for truncation",
 )
 @pytest.mark.notyet(
     ["risingwave"],
@@ -545,12 +574,7 @@ def test_insert_overwrite_from_expr(
     )
 
 
-@pytest.mark.notyet(
-    ["trino"], reason="memory connector doesn't allow writing to tables"
-)
-@pytest.mark.notimpl(
-    ["polars", "pandas", "dask"], reason="`insert` method not implemented"
-)
+@pytest.mark.notimpl(["polars"], reason="`insert` method not implemented")
 @pytest.mark.notyet(
     ["datafusion"], raises=Exception, reason="DELETE DML not implemented upstream"
 )
@@ -577,11 +601,10 @@ def test_insert_overwrite_from_list(con, employee_data_1_temp_table):
 
 
 @pytest.mark.notimpl(
-    ["polars", "dask", "pandas"],
-    raises=AttributeError,
-    reason="`insert` method not implemented",
+    ["polars"], raises=AttributeError, reason="`insert` method not implemented"
 )
 @pytest.mark.notyet(["druid"], raises=NotImplementedError)
+@pytest.mark.notimpl(["polars"], raises=AttributeError)
 @pytest.mark.notimpl(
     ["flink"],
     raises=com.IbisError,
@@ -604,13 +627,11 @@ def test_insert_from_memtable(con, temp_table):
     [
         "bigquery",
         "clickhouse",
-        "dask",
         "druid",
         "exasol",
         "impala",
         "mysql",
         "oracle",
-        "pandas",
         "polars",
         "flink",
         "sqlite",
@@ -633,18 +654,14 @@ def test_list_catalogs(con):
         "snowflake": {"IBIS_TESTING"},
         "trino": {"memory"},
         "pyspark": {"spark_catalog"},
+        "databricks": {"hive_metastore", "ibis", "ibis_testing", "samples", "system"},
     }
     result = set(con.list_catalogs())
     assert test_catalogs[con.name] <= result
 
 
 @pytest.mark.notyet(
-    [
-        "dask",
-        "druid",
-        "pandas",
-        "polars",
-    ],
+    ["druid", "polars"],
     raises=AttributeError,
     reason="doesn't support the common notion of a database",
 )
@@ -659,7 +676,7 @@ def test_list_database_contents(con):
         "flink": {"default_database"},
         "impala": {"ibis_testing", "default", "_impala_builtins"},
         "mssql": {"INFORMATION_SCHEMA", "dbo", "guest"},
-        "mysql": {"ibis_testing", "information_schema"},
+        "mysql": {"ibis-testing", "information_schema"},
         "oracle": {"SYS", "IBIS"},
         "postgres": {"public", "information_schema"},
         "pyspark": set(),
@@ -667,6 +684,7 @@ def test_list_database_contents(con):
         "snowflake": {"IBIS_TESTING"},
         "sqlite": {"main"},
         "trino": {"default", "information_schema"},
+        "databricks": {"default"},
     }
     result = set(con.list_databases())
     assert test_databases[con.name] <= result
@@ -674,6 +692,7 @@ def test_list_database_contents(con):
 
 @pytest.mark.notyet(["mssql"], raises=PyODBCProgrammingError)
 @pytest.mark.notyet(["pyspark"], raises=com.IbisTypeError)
+@pytest.mark.notyet(["databricks"], raises=DatabricksServerOperationError)
 @pytest.mark.notyet(["bigquery"], raises=com.UnsupportedBackendType)
 @pytest.mark.notyet(
     ["postgres"], raises=PsycoPg2UndefinedObject, reason="no unsigned int types"
@@ -715,11 +734,6 @@ def test_unsigned_integer_type(con, temp_table):
             id="clickhouse",
         ),
         param(
-            "dask://",
-            marks=mark.dask,
-            id="dask",
-        ),
-        param(
             "datafusion://",
             marks=mark.datafusion,
             id="datafusion",
@@ -733,11 +747,6 @@ def test_unsigned_integer_type(con, temp_table):
             "mysql://ibis:ibis@localhost:3306",
             marks=mark.mysql,
             id="mysql",
-        ),
-        param(
-            "pandas://",
-            marks=mark.pandas,
-            id="pandas",
         ),
         param(
             "polars://",
@@ -897,20 +906,19 @@ def test_self_join_memory_table(backend, con, monkeypatch):
                     [
                         "bigquery",
                         "clickhouse",
-                        "dask",
                         "duckdb",
                         "exasol",
                         "impala",
                         "mssql",
                         "mysql",
                         "oracle",
-                        "pandas",
                         "postgres",
                         "pyspark",
                         "risingwave",
                         "snowflake",
                         "sqlite",
                         "trino",
+                        "databricks",
                     ]
                 )
             ],
@@ -919,66 +927,44 @@ def test_self_join_memory_table(backend, con, monkeypatch):
         param(
             lambda: pa.table({"a": ["a"], "b": [1]}).to_batches()[0],
             "df_arrow_single_batch",
-            marks=[
-                pytest.mark.notimpl(
-                    [
-                        "bigquery",
-                        "clickhouse",
-                        "dask",
-                        "duckdb",
-                        "exasol",
-                        "impala",
-                        "mssql",
-                        "mysql",
-                        "oracle",
-                        "pandas",
-                        "postgres",
-                        "pyspark",
-                        "risingwave",
-                        "snowflake",
-                        "sqlite",
-                        "trino",
-                    ]
-                )
-            ],
             id="pyarrow_single_batch",
         ),
         param(
-            lambda: pa.dataset.dataset(pa.table({"a": ["a"], "b": [1]})),
+            lambda: ds.dataset(pa.table({"a": ["a"], "b": [1]})),
             "df_arrow_dataset",
             marks=[
                 pytest.mark.notimpl(
                     [
                         "bigquery",
                         "clickhouse",
-                        "dask",
-                        "duckdb",
                         "exasol",
                         "impala",
                         "mssql",
                         "mysql",
                         "oracle",
-                        "pandas",
-                        "polars",
                         "postgres",
                         "pyspark",
                         "risingwave",
                         "snowflake",
                         "sqlite",
                         "trino",
-                    ]
+                        "databricks",
+                    ],
+                    raises=com.UnsupportedOperationError,
+                    reason="we don't materialize datasets to avoid perf footguns",
                 ),
+                pytest.mark.notimpl(["polars"], raises=NotImplementedError),
             ],
             id="pyarrow dataset",
         ),
         param(lambda: pd.DataFrame({"a": ["a"], "b": [1]}), "df_pandas", id="pandas"),
         param(
-            lambda: pl.DataFrame({"a": ["a"], "b": [1]}),
+            lambda: pytest.importorskip("polars").DataFrame({"a": ["a"], "b": [1]}),
             "df_polars_eager",
             id="polars dataframe",
         ),
         param(
-            lambda: pl.LazyFrame({"a": ["a"], "b": [1]}),
+            lambda: pytest.importorskip("polars").LazyFrame({"a": ["a"], "b": [1]}),
             "df_polars_lazy",
             id="polars lazyframe",
         ),
@@ -998,12 +984,16 @@ def test_self_join_memory_table(backend, con, monkeypatch):
             id="memtable pandas",
         ),
         param(
-            lambda: ibis.memtable(pl.DataFrame({"a": ["a"], "b": [1]})),
+            lambda: ibis.memtable(
+                pytest.importorskip("polars").DataFrame({"a": ["a"], "b": [1]})
+            ),
             "memtable_polars_eager",
             id="memtable polars dataframe",
         ),
         param(
-            lambda: ibis.memtable(pl.LazyFrame({"a": ["a"], "b": [1]})),
+            lambda: ibis.memtable(
+                pytest.importorskip("polars").LazyFrame({"a": ["a"], "b": [1]})
+            ),
             "memtable_polars_lazy",
             id="memtable polars lazyframe",
         ),
@@ -1016,16 +1006,13 @@ def test_self_join_memory_table(backend, con, monkeypatch):
 )
 def test_create_table_in_memory(con, obj, table_name, monkeypatch):
     monkeypatch.setattr(ibis.options, "default_backend", con)
-    obj = obj()
-    t = con.create_table(table_name, obj)
+    table_name = gen_name(table_name)
+    t = con.create_table(table_name, obj())
 
-    result = pa.table({"a": ["a"], "b": [1]})
-    assert table_name in con.list_tables()
-
-    assert result.equals(t.to_pyarrow())
-
-    with contextlib.suppress(NotImplementedError):
-        # polars doesn't have drop_table
+    try:
+        assert table_name in con.list_tables()
+        assert pa.table({"a": ["a"], "b": [1]}).equals(t.to_pyarrow())
+    finally:
         con.drop_table(table_name, force=True)
 
 
@@ -1105,6 +1092,8 @@ def test_dunder_array_column(alltypes, dtype):
 
 @pytest.mark.parametrize("interactive", [True, False])
 def test_repr(alltypes, interactive, monkeypatch):
+    pytest.importorskip("rich")
+
     monkeypatch.setattr(ibis.options, "interactive", interactive)
 
     expr = alltypes.select("date_string_col")
@@ -1120,6 +1109,8 @@ def test_repr(alltypes, interactive, monkeypatch):
 
 @pytest.mark.parametrize("show_types", [True, False])
 def test_interactive_repr_show_types(alltypes, show_types, monkeypatch):
+    pytest.importorskip("rich")
+
     monkeypatch.setattr(ibis.options, "interactive", True)
     monkeypatch.setattr(ibis.options.repr.interactive, "show_types", show_types)
 
@@ -1133,6 +1124,8 @@ def test_interactive_repr_show_types(alltypes, show_types, monkeypatch):
 
 @pytest.mark.parametrize("is_jupyter", [True, False])
 def test_interactive_repr_max_columns(alltypes, is_jupyter, monkeypatch):
+    pytest.importorskip("rich")
+
     monkeypatch.setattr(ibis.options, "interactive", True)
 
     cols = {f"c_{i}": ibis._.id + i for i in range(50)}
@@ -1172,6 +1165,8 @@ def test_interactive_repr_max_columns(alltypes, is_jupyter, monkeypatch):
 @pytest.mark.parametrize("expr_type", ["table", "column"])
 @pytest.mark.parametrize("interactive", [True, False])
 def test_repr_mimebundle(alltypes, interactive, expr_type, monkeypatch):
+    pytest.importorskip("rich")
+
     monkeypatch.setattr(ibis.options, "interactive", interactive)
 
     if expr_type == "column":
@@ -1212,7 +1207,7 @@ def test_has_operation_no_geo(con, op):
         # filter out builtins that are types, except for tuples on ClickHouse
         # and duckdb because tuples are used to represent lists of expressions
         if isinstance(obj, type)
-        if (obj != tuple or backend not in ("clickhouse", "duckdb"))
+        if (obj is not tuple or backend not in ("clickhouse", "duckdb"))
         if (backend != "pyspark" or vparse(pd.__version__) < vparse("2"))
     ],
 )
@@ -1244,7 +1239,7 @@ def test_set_backend(con, monkeypatch):
     "name",
     [
         param(name, marks=getattr(mark, name), id=name)
-        for name in ("datafusion", "duckdb", "polars", "sqlite", "pandas", "dask")
+        for name in ("datafusion", "duckdb", "polars", "sqlite")
     ],
 )
 def test_set_backend_name(name, monkeypatch):
@@ -1287,19 +1282,18 @@ def test_set_backend_url(url, monkeypatch):
 @pytest.mark.notyet(
     [
         "bigquery",
-        "dask",
         "datafusion",
         "duckdb",
         "exasol",
         "impala",
         "mssql",
         "mysql",
-        "pandas",
         "polars",
         "postgres",
         "risingwave",
         "pyspark",
         "sqlite",
+        "databricks",
     ],
     reason="backend doesn't support timestamp with scale parameter",
 )
@@ -1307,10 +1301,10 @@ def test_set_backend_url(url, monkeypatch):
 @pytest.mark.notimpl(
     ["snowflake"], reason="scale not implemented in ibis's snowflake backend"
 )
-@pytest.mark.broken(
+@pytest.mark.never(
     ["oracle"], reason="oracle doesn't allow DESCRIBE outside of its CLI"
 )
-@pytest.mark.broken(["druid"], reason="dialect is broken")
+@pytest.mark.notimpl(["druid"], reason="dialect is broken")
 @pytest.mark.notimpl(
     ["flink"],
     raises=com.IbisError,
@@ -1330,187 +1324,6 @@ def test_create_table_timestamp(con, temp_table):
     assert result == schema
 
 
-@mark.notimpl(["datafusion", "flink", "impala", "trino", "druid"])
-@mark.never(
-    ["mssql"],
-    reason="mssql supports support temporary tables through naming conventions",
-)
-@mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
-@pytest.mark.never(
-    ["risingwave"],
-    raises=com.UnsupportedOperationError,
-    reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
-)
-def test_persist_expression_ref_count(backend, con, alltypes):
-    non_persisted_table = alltypes.mutate(test_column=ibis.literal("calculation"))
-    persisted_table = non_persisted_table.cache()
-
-    op = non_persisted_table.op()
-
-    # ref count is unaffected without a context manager
-    assert con._query_cache.refs[op] == 1
-    backend.assert_frame_equal(
-        non_persisted_table.to_pandas(), persisted_table.to_pandas()
-    )
-    assert con._query_cache.refs[op] == 1
-
-
-@mark.notimpl(["datafusion", "flink", "impala", "trino", "druid"])
-@mark.never(
-    ["mssql"],
-    reason="mssql supports support temporary tables through naming conventions",
-)
-@mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
-@pytest.mark.never(
-    ["risingwave"],
-    raises=com.UnsupportedOperationError,
-    reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
-)
-def test_persist_expression(backend, alltypes):
-    non_persisted_table = alltypes.mutate(
-        test_column=ibis.literal("calculation"), other_calc=ibis.literal("xyz")
-    )
-    persisted_table = non_persisted_table.cache()
-    backend.assert_frame_equal(
-        non_persisted_table.to_pandas(), persisted_table.to_pandas()
-    )
-
-
-@mark.notimpl(["datafusion", "flink", "impala", "trino", "druid"])
-@mark.never(
-    ["mssql"],
-    reason="mssql supports support temporary tables through naming conventions",
-)
-@mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
-@pytest.mark.never(
-    ["risingwave"],
-    raises=com.UnsupportedOperationError,
-    reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
-)
-def test_persist_expression_contextmanager(backend, alltypes):
-    non_cached_table = alltypes.mutate(
-        test_column=ibis.literal("calculation"), other_column=ibis.literal("big calc")
-    )
-    with non_cached_table.cache() as cached_table:
-        backend.assert_frame_equal(
-            non_cached_table.to_pandas(), cached_table.to_pandas()
-        )
-
-
-@mark.notimpl(["datafusion", "flink", "impala", "trino", "druid"])
-@mark.never(
-    ["mssql"],
-    reason="mssql supports support temporary tables through naming conventions",
-)
-@mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
-@pytest.mark.never(
-    ["risingwave"],
-    raises=com.UnsupportedOperationError,
-    reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
-)
-def test_persist_expression_contextmanager_ref_count(backend, con, alltypes):
-    non_cached_table = alltypes.mutate(
-        test_column=ibis.literal("calculation"), other_column=ibis.literal("big calc 2")
-    )
-    op = non_cached_table.op()
-    with non_cached_table.cache() as cached_table:
-        backend.assert_frame_equal(
-            non_cached_table.to_pandas(), cached_table.to_pandas()
-        )
-        assert con._query_cache.refs[op] == 1
-    assert con._query_cache.refs[op] == 0
-
-
-@mark.notimpl(["datafusion", "flink", "impala", "trino", "druid"])
-@mark.never(
-    ["mssql"],
-    reason="mssql supports support temporary tables through naming conventions",
-)
-@pytest.mark.never(
-    ["risingwave"],
-    raises=com.UnsupportedOperationError,
-    reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
-)
-@mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
-def test_persist_expression_multiple_refs(backend, con, alltypes):
-    non_cached_table = alltypes.mutate(
-        test_column=ibis.literal("calculation"), other_column=ibis.literal("big calc 2")
-    )
-    op = non_cached_table.op()
-    with non_cached_table.cache() as cached_table:
-        backend.assert_frame_equal(
-            non_cached_table.to_pandas(), cached_table.to_pandas()
-        )
-
-        name1 = cached_table.op().name
-
-        with non_cached_table.cache() as nested_cached_table:
-            name2 = nested_cached_table.op().name
-            assert not nested_cached_table.to_pandas().empty
-
-            # there are two refs to the uncached expression
-            assert con._query_cache.refs[op] == 2
-
-        # one ref to the uncached expression was removed by the context manager
-        assert con._query_cache.refs[op] == 1
-
-    # no refs left after the outer context manager exits
-    assert con._query_cache.refs[op] == 0
-
-    # assert that tables have been dropped
-    assert name1 not in con.list_tables()
-    assert name2 not in con.list_tables()
-
-
-@mark.notimpl(["datafusion", "flink", "impala", "trino", "druid"])
-@mark.never(
-    ["mssql"],
-    reason="mssql supports support temporary tables through naming conventions",
-)
-@mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
-@pytest.mark.never(
-    ["risingwave"],
-    raises=com.UnsupportedOperationError,
-    reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
-)
-def test_persist_expression_repeated_cache(alltypes):
-    non_cached_table = alltypes.mutate(
-        test_column=ibis.literal("calculation"), other_column=ibis.literal("big calc 2")
-    )
-    with non_cached_table.cache() as cached_table:
-        with cached_table.cache() as nested_cached_table:
-            assert not nested_cached_table.to_pandas().empty
-
-
-@mark.notimpl(["datafusion", "flink", "impala", "trino", "druid"])
-@mark.never(
-    ["mssql"],
-    reason="mssql supports support temporary tables through naming conventions",
-)
-@mark.notimpl(["exasol"], reason="Exasol does not support temporary tables")
-@pytest.mark.never(
-    ["risingwave"],
-    raises=com.UnsupportedOperationError,
-    reason="Feature is not yet implemented: CREATE TEMPORARY TABLE",
-)
-def test_persist_expression_release(con, alltypes):
-    non_cached_table = alltypes.mutate(
-        test_column=ibis.literal("calculation"), other_column=ibis.literal("big calc 3")
-    )
-    cached_table = non_cached_table.cache()
-    cached_table.release()
-    assert con._query_cache.refs[non_cached_table.op()] == 0
-
-    with pytest.raises(
-        com.IbisError,
-        match=r".+Did you call `\.release\(\)` twice on the same expression\?",
-    ):
-        cached_table.release()
-
-    with pytest.raises(Exception, match=cached_table.op().name):
-        cached_table.execute()
-
-
 @contextlib.contextmanager
 def gen_test_name(con: BaseBackend):
     name = gen_name("test_table")
@@ -1518,7 +1331,7 @@ def gen_test_name(con: BaseBackend):
     con.drop_table(name, force=True)
 
 
-@mark.broken(
+@mark.notimpl(
     ["druid"], raises=NotImplementedError, reason="generated SQL fails to parse"
 )
 @mark.notimpl(["impala"], reason="impala doesn't support memtable")
@@ -1553,6 +1366,40 @@ def test_overwrite(ddl_con, monkeypatch):
         assert t2.count().execute() == expected_count
 
 
+@contextlib.contextmanager
+def create_and_destroy_db(con):
+    con.create_database(dbname := gen_name("db"))
+    try:
+        yield dbname
+    finally:
+        con.drop_database(dbname)
+
+
+# TODO: move this to something like `test_ddl.py`
+@pytest.mark.notyet(
+    ["flink"],
+    reason="unclear whether Flink supports cross catalog/database inserts",
+    raises=Py4JJavaError,
+)
+def test_insert_with_database_specified(con_create_database):
+    con = con_create_database
+
+    t = ibis.memtable({"a": [1, 2, 3]})
+
+    with create_and_destroy_db(con) as dbname:
+        con.create_table(
+            table_name := gen_name("table"),
+            obj=t,
+            database=dbname,
+            temp=con.name == "flink",
+        )
+        try:
+            con.insert(table_name, obj=t, database=dbname)
+            assert con.table(table_name, database=dbname).count().to_pandas() == 6
+        finally:
+            con.drop_table(table_name, database=dbname)
+
+
 @pytest.mark.notyet(["datafusion"], reason="cannot list or drop catalogs")
 def test_create_catalog(con_create_catalog):
     catalog = gen_name("test_create_catalog")
@@ -1565,45 +1412,9 @@ def test_create_catalog(con_create_catalog):
 def test_create_database(con_create_database):
     database = gen_name("test_create_database")
     con_create_database.create_database(database)
-    if con_create_database.name == "exasol":
-        database = database.upper()
     assert database in con_create_database.list_databases()
-    database = database.lower()
     con_create_database.drop_database(database)
-    if con_create_database.name == "exasol":
-        database = database.upper()
     assert database not in con_create_database.list_databases()
-
-
-def test_list_schema_warns(con_list_schema):
-    with pytest.warns(FutureWarning):
-        con_list_schema.list_schemas()
-
-
-@pytest.mark.never(
-    [
-        "clickhouse",
-        "mysql",
-        "pyspark",
-        "flink",
-    ],
-    reason="No schema methods",
-)
-def test_create_schema(con_create_database):
-    schema = gen_name("test_create_schema")
-    with pytest.warns(FutureWarning):
-        con_create_database.create_schema(schema)
-    with pytest.warns(FutureWarning):
-        if con_create_database.name == "exasol":
-            schema = schema.upper()
-        assert schema in con_create_database.list_schemas()
-        schema = schema.lower()
-    with pytest.warns(FutureWarning):
-        con_create_database.drop_schema(schema)
-    with pytest.warns(FutureWarning):
-        if con_create_database.name == "exasol":
-            schema = schema.upper()
-        assert schema not in con_create_database.list_schemas()
 
 
 def test_list_databases(con_create_database):
@@ -1642,8 +1453,7 @@ def test_list_catalogs_databases(con_create_catalog_database):
 
 
 @pytest.mark.notyet(
-    ["pandas", "dask", "polars", "datafusion"],
-    reason="this is a no-op for in-memory backends",
+    ["polars", "datafusion"], reason="this is a no-op for in-memory backends"
 )
 @pytest.mark.notyet(
     ["trino", "clickhouse", "impala", "bigquery", "flink"],
@@ -1686,6 +1496,9 @@ def test_close_connection(con):
     raises=TypeError,
     reason="snowflake uses a custom pyarrow extension type for JSON pretty printing",
 )
+@pytest.mark.notimpl(
+    ["databricks"], raises=json.JSONDecodeError, reason="not yet implemented"
+)
 def test_json_to_pyarrow(con):
     t = con.tables.json_t
     table = t.to_pyarrow()
@@ -1722,9 +1535,8 @@ def test_json_to_pyarrow(con):
     assert result == expected
 
 
-@pytest.mark.notyet(["mssql"], raises=PyODBCProgrammingError)
 @pytest.mark.notyet(
-    ["risingwave", "exasol"],
+    ["risingwave", "exasol", "databricks"],
     raises=com.UnsupportedOperationError,
     reason="no temp table support",
 )
@@ -1751,9 +1563,12 @@ def test_schema_with_caching(alltypes):
 @pytest.mark.notyet(
     ["druid"], raises=NotImplementedError, reason="doesn't support create_table"
 )
-@pytest.mark.notyet(["pandas", "dask", "polars"], reason="Doesn't support insert")
+@pytest.mark.notyet(["polars"], reason="Doesn't support insert")
 @pytest.mark.notyet(
     ["datafusion"], reason="Doesn't support table creation from records"
+)
+@pytest.mark.notimpl(
+    ["flink"], reason="Temp tables are implemented as views, which don't support insert"
 )
 @pytest.mark.parametrize(
     "first_row, second_row",
@@ -1787,3 +1602,229 @@ def test_insert_using_col_name_not_position(con, first_row, second_row, monkeypa
     # Ideally we'd use a temp table for this test, but several backends don't
     # support them and it's nice to know that data are being inserted correctly.
     con.drop_table(table_name)
+
+
+CON_ATTR = {"bigquery": "client", "flink": "_table_env", "pyspark": "_session"}
+DEFAULT_CON_ATTR = "con"
+
+
+@pytest.mark.parametrize("top_level", [True, False])
+@pytest.mark.never(["polars"], reason="don't have a connection concept")
+def test_from_connection(con, top_level):
+    backend = getattr(ibis, con.name) if top_level else type(con)
+    new_con = backend.from_connection(getattr(con, CON_ATTR.get(con.name, "con")))
+    result = int(new_con.execute(ibis.literal(1, type="int")))
+    assert result == 1
+
+
+def test_table_not_found(con):
+    with pytest.raises(com.TableNotFound):
+        con.table(gen_name("table_not_found"))
+
+
+@pytest.mark.notimpl(
+    ["flink"], raises=com.IbisError, reason="not yet implemented for Flink"
+)
+def test_no_accidental_cross_database_table_load(con_create_database):
+    con = con_create_database
+
+    # Create an extra database
+    con.create_database(dbname := gen_name("dummy_db"))
+
+    # Create table with same name in current db and dummy db
+    con.create_table(
+        table := gen_name("table"), schema=(sch1 := ibis.schema({"a": "int"}))
+    )
+
+    con.create_table(table, schema=ibis.schema({"b": "string"}), database=dbname)
+
+    # Can grab table object from current db:
+    t = con.table(table)
+    assert t.schema().equals(sch1)
+
+    con.drop_table(table)
+
+    # Now attempting to load same table name without specifying db should fail
+    with pytest.raises(com.TableNotFound):
+        t = con.table(table)
+
+    # But can load if specify other db
+    t = con.table(table, database=dbname)
+
+    # Clean up
+    con.drop_table(table, database=dbname)
+    con.drop_database(dbname)
+
+
+@pytest.mark.notyet(["druid"], reason="can't create tables")
+@pytest.mark.notyet(
+    ["flink"], reason="can't create non-temporary tables from in-memory data"
+)
+def test_cross_database_join(con_create_database, monkeypatch):
+    con = con_create_database
+
+    monkeypatch.setattr(ibis.options, "default_backend", con)
+
+    left = ibis.memtable({"a": [1], "b": [2]})
+    right = ibis.memtable({"a": [1], "c": [3]})
+
+    # Create an extra database
+    con.create_database(dbname := gen_name("dummy_db"))
+
+    # Insert left into current_database
+    left = con.create_table(left_table := gen_name("left"), obj=left)
+
+    # Insert right into new database
+    right = con.create_table(
+        right_table := gen_name("right"), obj=right, database=dbname
+    )
+
+    expr = left.join(right, "a")
+    assert expr.columns == ("a", "b", "c")
+
+    result = expr.to_pyarrow()
+    expected = pa.Table.from_pydict({"a": [1], "b": [2], "c": [3]})
+
+    assert result.equals(expected)
+
+    con.drop_table(left_table)
+    con.drop_table(right_table, database=dbname)
+    con.drop_database(dbname)
+
+
+@pytest.mark.notimpl(
+    ["druid"], raises=AttributeError, reason="doesn't implement `raw_sql`"
+)
+@pytest.mark.notimpl(["clickhouse"], reason="create table isn't implemented")
+@pytest.mark.notyet(["flink"], raises=Py4JJavaError)
+@pytest.mark.notyet(["polars"], reason="Doesn't support insert")
+@pytest.mark.notyet(["exasol"], reason="Backend does not support raw_sql")
+@pytest.mark.notimpl(
+    ["impala", "pyspark", "trino"], reason="Default constraints are not supported"
+)
+@pytest.mark.notimpl(
+    ["databricks"],
+    reason="Default constraints ARE supported, "
+    "but you have to enable them with a property AND set DEFAULT, so no",
+    raises=DatabricksServerOperationError,
+)
+def test_insert_into_table_missing_columns(con, temp_table):
+    db = getattr(con, "current_database", None)
+
+    raw_ident = sg.table(
+        temp_table,
+        db=db if db is None else sg.to_identifier(db, quoted=True),
+        quoted=True,
+    ).sql("duckdb")
+
+    ct_sql = f'CREATE TABLE {raw_ident} ("a" INT DEFAULT 1, "b" INT)'
+    sg_expr = sg.parse_one(ct_sql, read="duckdb")
+    con.raw_sql(sg_expr.sql(dialect=con.dialect))
+    con.insert(temp_table, [{"b": 1}])
+
+    result = con.table(temp_table).to_pyarrow().to_pydict()
+    expected_result = {"a": [1], "b": [1]}
+
+    assert result == expected_result
+
+
+@pytest.mark.notyet(["druid"], raises=AssertionError, reason="can't drop tables")
+@pytest.mark.notyet(
+    ["clickhouse", "flink"],
+    raises=AssertionError,
+    reason="memtables are assembled every time",
+)
+@pytest.mark.notyet(
+    ["bigquery"], raises=AssertionError, reason="test is flaky", strict=False
+)
+@pytest.mark.notyet(
+    ["pyspark"],
+    condition=IS_SPARK_REMOTE,
+    raises=AssertionError,
+    reason="likely deadlock when using spark connect",
+)
+def test_memtable_cleanup(con):
+    name = ibis.util.gen_name("temp_memtable")
+    t = ibis.memtable({"a": [1, 2, 3], "b": list("def")}, name=name)
+
+    # the table isn't registered until we actually execute, and since we
+    # haven't yet executed anything, the table shouldn't be there
+    assert name not in con.list_tables()
+
+    # execute, which means the table is registered and should be visible in
+    # con.list_tables()
+    con.execute(t.select("a"))
+    assert name in con.list_tables()
+
+    con.execute(t.select("b"))
+    assert name in con.list_tables()
+
+    # remove all references to `t`, which means the `op` shouldn't be reachable
+    # and the table should thus be dropped and no longer visible
+    del t
+    assert name not in con.list_tables()
+
+
+def test_same_name_memtable_is_overwritten(con):
+    name = ibis.util.gen_name("temp_memtable")
+
+    data = {"a": [1, 2, 3], "b": ["a", "b", "c"]}
+
+    t = ibis.memtable(data, name=name)
+    assert len(con.execute(t)) == 3
+
+    s = ibis.memtable({"a": [1], "b": ["a"]}, name=name)
+    assert len(con.execute(s)) == 1
+
+
+@pytest.mark.notimpl(
+    ["clickhouse", "flink"],
+    raises=AssertionError,
+    reason="backend doesn't use _register_in_memory_table",
+)
+def test_memtable_registered_exactly_once(con, mocker):
+    name = ibis.util.gen_name("temp_memtable")
+
+    spy = mocker.spy(con, "_register_in_memory_table")
+
+    data = {"a": [1, 2, 3], "b": ["a", "b", "c"]}
+
+    t = ibis.memtable(data, name=name)
+
+    assert len(con.execute(t)) == 3
+    assert len(con.execute(t)) == 3
+
+    spy.assert_called_once_with(t.op())
+
+
+def test_unreachable_memtable_does_not_clobber_existing_data(con):
+    name = ibis.util.gen_name("temp_memtable")
+
+    t1 = ibis.memtable({"a": [1, 2, 3]}, name=name)
+    t2 = ibis.memtable({"a": [4, 5]}, name=name)
+
+    assert len(con.execute(t1)) == 3
+
+    assert len(con.execute(t2)) == 2
+
+    assert len(con.execute(t1)) == 3
+
+    # Drop t1, its finalizer runs, deleting table `test`
+    del t1
+
+    # ensure that the previous clean up doesn't erase t2
+    assert len(con.execute(t2)) == 2
+
+
+def test_identically_named_memtables_cannot_be_joined(con):
+    name = ibis.util.gen_name("temp_memtable")
+
+    t1 = ibis.memtable({"a": [1, 2, 3]}, name=name)
+    t2 = ibis.memtable({"a": [4, 5]}, name=name)
+
+    # mixing two memtables with the same name is an error
+    expr = t1.join(t2, "a")
+    with pytest.raises(
+        com.IbisError, match=rf"Duplicate in-memory table names: \['{name}'\]"
+    ):
+        con.execute(expr)

@@ -4,48 +4,27 @@ import contextlib
 import importlib
 import importlib.metadata
 import itertools
-import operator
 from functools import cache
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 import _pytest
-import numpy as np
-import pandas as pd
 import pytest
 from packaging.requirements import Requirement
-from packaging.version import parse as vparse
 
 import ibis
-import ibis.common.exceptions as com
 from ibis import util
 from ibis.backends import (
     CanCreateCatalog,
     CanCreateDatabase,
-    CanListSchema,
     _get_backend_names,
 )
 from ibis.conftest import WINDOWS
 from ibis.util import promote_tuple
 
 if TYPE_CHECKING:
+    from ibis.backends import BaseBackend
     from ibis.backends.tests.base import BackendTest
-
-
-def compare_versions(module_name, given_version, op):
-    try:
-        current_version = importlib.metadata.version(module_name)
-        return op(vparse(current_version), vparse(given_version))
-    except importlib.metadata.PackageNotFoundError:
-        return False
-
-
-def is_newer_than(module_name, given_version):
-    return compare_versions(module_name, given_version, operator.gt)
-
-
-def is_older_than(module_name, given_version):
-    return compare_versions(module_name, given_version, operator.lt)
 
 
 TEST_TABLES = {
@@ -153,7 +132,7 @@ TEST_TABLES = {
 # For now, many of our tests don't do this, and we're working to change this situation
 # by improving all tests file by file. All files that have already been improved are
 # added to this list to prevent regression.
-FIlES_WITH_STRICT_EXCEPTION_CHECK = [
+FILES_WITH_STRICT_EXCEPTION_CHECK = [
     "ibis/backends/tests/test_api.py",
     "ibis/backends/tests/test_array.py",
     "ibis/backends/tests/test_aggregation.py",
@@ -237,11 +216,6 @@ def pytest_collection_modifyitems(session, config, items):
     all_backends = _get_backend_names()
     additional_markers = []
 
-    try:
-        import pyspark
-    except ImportError:
-        pyspark = None
-
     unrecognized_backends = set()
     for item in items:
         # Yell loudly if unrecognized backend in notimpl, notyet or never
@@ -270,23 +244,6 @@ def pytest_collection_modifyitems(session, config, items):
             # anything else is a "core" test and is run by default
             if not any(item.iter_markers(name="benchmark")):
                 item.add_marker(pytest.mark.core)
-
-        # skip or xfail pyspark tests that run afoul of our non-ancient stack
-        for _ in item.iter_markers(name="pyspark"):
-            if not isinstance(item, pytest.DoctestItem):
-                additional_markers.append(
-                    (
-                        item,
-                        [
-                            pytest.mark.skipif(
-                                pyspark is not None
-                                and vparse(pyspark.__version__) < vparse("3.3.3")
-                                and vparse(np.__version__) >= vparse("1.24"),
-                                reason="PySpark doesn't support numpy >= 1.24",
-                            ),
-                        ],
-                    )
-                )
 
     if unrecognized_backends:
         raise pytest.PytestCollectionWarning("\n" + "\n".join(unrecognized_backends))
@@ -336,6 +293,14 @@ def pytest_runtest_call(item):
     if not backend:
         # Check item path to see if test is in backend-specific folder
         backend = set(_get_backend_names()).intersection(item.path.parts)
+    if not backend:
+        # Check if this is one of the uninstantiated backend class fixture
+        # used for signature checking
+        backend = [
+            backend.name
+            for key, backend in item.funcargs.items()
+            if key.endswith("backend_cls")
+        ]
 
     if not backend:
         return
@@ -361,7 +326,7 @@ def pytest_runtest_call(item):
     for marker in item.iter_markers(name="notimpl"):
         if backend in marker.args[0]:
             if (
-                item.location[0] in FIlES_WITH_STRICT_EXCEPTION_CHECK
+                item.location[0] in FILES_WITH_STRICT_EXCEPTION_CHECK
                 and "raises" not in marker.kwargs.keys()
             ):
                 raise ValueError("notimpl requires a raises")
@@ -375,7 +340,7 @@ def pytest_runtest_call(item):
     for marker in item.iter_markers(name="notyet"):
         if backend in marker.args[0]:
             if (
-                item.location[0] in FIlES_WITH_STRICT_EXCEPTION_CHECK
+                item.location[0] in FILES_WITH_STRICT_EXCEPTION_CHECK
                 and "raises" not in marker.kwargs.keys()
             ):
                 raise ValueError("notyet requires a raises")
@@ -393,22 +358,6 @@ def pytest_runtest_call(item):
             kwargs = _filter_none_from_raises(kwargs)
             item.add_marker(pytest.mark.xfail(**kwargs))
 
-    # Something has been exposed as broken by a new test and it shouldn't be
-    # imperative for a contributor to fix it just because they happened to
-    # bring it to attention  -- USE SPARINGLY
-    for marker in item.iter_markers(name="broken"):
-        if backend in marker.args[0]:
-            if (
-                item.location[0] in FIlES_WITH_STRICT_EXCEPTION_CHECK
-                and "raises" not in marker.kwargs.keys()
-            ):
-                raise ValueError("broken requires a raises")
-
-            kwargs = marker.kwargs.copy()
-            kwargs.setdefault("reason", f"Feature is failing on {backend}")
-            kwargs = _filter_none_from_raises(kwargs)
-            item.add_marker(pytest.mark.xfail(**kwargs))
-
     for marker in item.iter_markers(name="xfail_version"):
         kwargs = marker.kwargs.copy()
         kwargs = _filter_none_from_raises(kwargs)
@@ -420,13 +369,31 @@ def pytest_runtest_call(item):
         failing_specs = []
         for spec in specs:
             req = Requirement(spec)
-            if req.specifier.contains(importlib.import_module(req.name).__version__):
+            if req.specifier.contains(
+                importlib.import_module(req.name).__version__
+            ) and ((not req.marker) or req.marker.evaluate()):
                 failing_specs.append(spec)
         reason = f"{backend} backend test fails with {backend}{specs}"
         if provided_reason is not None:
             reason += f"; {provided_reason}"
         if failing_specs:
             item.add_marker(pytest.mark.xfail(reason=reason, **kwargs))
+
+
+def _get_backend_cls(backend_str: str):
+    """Convert a backend string to the test class for the backend."""
+    backend_mod = importlib.import_module(f"ibis.backends.{backend_str}")
+    return backend_mod.Backend
+
+
+@pytest.fixture(params=_get_backends_to_test(), scope="session")
+def backend_cls(request) -> BaseBackend:
+    """Return the uninstantiated backend class, unconnected.
+
+    This is used for signature checking and nothing should be executed."""
+
+    cls = _get_backend_cls(request.param)
+    return cls
 
 
 @pytest.fixture(params=_get_backends_to_test(), scope="session")
@@ -454,14 +421,6 @@ def backend_no_data(request, data_dir, tmp_path_factory, worker_id):
 def con_no_data(backend_no_data):
     """Return an Ibis backend instance, with no data loaded."""
     return backend_no_data.connection
-
-
-@pytest.fixture(scope="session")
-def con_list_schema(con):
-    if isinstance(con, CanListSchema):
-        return con
-    else:
-        pytest.skip(f"{con.name} backend cannot create schemas")
 
 
 @pytest.fixture(scope="session")
@@ -500,7 +459,7 @@ def _setup_backend(request, data_dir, tmp_path_factory, worker_id):
 
 
 @pytest.fixture(
-    params=_get_backends_to_test(discard=("dask", "pandas")),
+    params=_get_backends_to_test(),
     scope="session",
 )
 def ddl_backend(request, data_dir, tmp_path_factory, worker_id):
@@ -515,19 +474,13 @@ def ddl_con(ddl_backend):
 
 
 @pytest.fixture(
-    params=_get_backends_to_test(keep=("dask", "pandas", "pyspark")),
+    params=_get_backends_to_test(keep=("pyspark",)),
     scope="session",
 )
 def udf_backend(request, data_dir, tmp_path_factory, worker_id):
     """Runs the UDF-supporting backends."""
     cls = _get_backend_conf(request.param)
     return cls.load_data(data_dir, tmp_path_factory, worker_id)
-
-
-@pytest.fixture(scope="session")
-def udf_con(udf_backend):
-    """Instance of Client, already connected to the db (if applies)."""
-    return udf_backend.connection
 
 
 @pytest.fixture(scope="session")
@@ -546,11 +499,6 @@ def struct(backend):
 
 
 @pytest.fixture(scope="session")
-def sorted_alltypes(alltypes):
-    return alltypes.order_by("id")
-
-
-@pytest.fixture(scope="session")
 def udf_alltypes(udf_backend):
     return udf_backend.functional_alltypes
 
@@ -563,11 +511,6 @@ def batting(backend):
 @pytest.fixture(scope="session")
 def awards_players(backend):
     return backend.awards_players
-
-
-@pytest.fixture
-def analytic_alltypes(alltypes):
-    return alltypes
 
 
 @pytest.fixture(scope="session")
@@ -600,15 +543,8 @@ def awards_players_df(awards_players):
     return awards_players.execute(limit=None)
 
 
-@pytest.fixture(scope="session")
-def geo_df(geo):
-    if geo is not None:
-        return geo.execute(limit=None)
-    return None
-
-
 @pytest.fixture
-def temp_table(con) -> str:
+def temp_table(con):
     """Return a temporary table name.
 
     Parameters
@@ -627,7 +563,7 @@ def temp_table(con) -> str:
 
 
 @pytest.fixture
-def temp_table2(con) -> str:
+def temp_table2(con):
     name = util.gen_name("temp_table2")
     yield name
     with contextlib.suppress(NotImplementedError):
@@ -643,7 +579,7 @@ def temp_table_orig(con, temp_table):
 
 
 @pytest.fixture
-def temp_view(ddl_con) -> str:
+def temp_view(ddl_con):
     """Return a temporary view name.
 
     Parameters
@@ -659,72 +595,6 @@ def temp_view(ddl_con) -> str:
     yield name
     with contextlib.suppress(NotImplementedError):
         ddl_con.drop_view(name, force=True)
-
-
-@pytest.fixture
-def alternate_current_database(ddl_con, ddl_backend) -> str:
-    """Create a temporary database and yield its name. Drops the created
-    database upon completion.
-
-    Parameters
-    ----------
-    ddl_con : ibis.backends.Client
-
-    Yields
-    ------
-    str
-    """
-    name = util.gen_name("database")
-    try:
-        ddl_con.create_database(name)
-    except AttributeError:
-        pytest.skip(f"{ddl_backend.name()} doesn't have a `create_database` method.")
-    yield name
-
-    with contextlib.suppress(com.UnsupportedOperationError):
-        ddl_con.drop_database(name, force=True)
-
-
-@pytest.fixture
-def test_employee_schema() -> ibis.schema:
-    sch = ibis.schema(
-        [
-            ("first_name", "string"),
-            ("last_name", "string"),
-            ("department_name", "string"),
-            ("salary", "float64"),
-        ]
-    )
-
-    return sch
-
-
-@pytest.fixture
-def test_employee_data_1():
-    df = pd.DataFrame(
-        {
-            "first_name": ["A", "B", "C"],
-            "last_name": ["D", "E", "F"],
-            "department_name": ["AA", "BB", "CC"],
-            "salary": [100.0, 200.0, 300.0],
-        }
-    )
-
-    return df
-
-
-@pytest.fixture
-def test_employee_data_2():
-    df2 = pd.DataFrame(
-        {
-            "first_name": ["X", "Y", "Z"],
-            "last_name": ["A", "B", "C"],
-            "department_name": ["XX", "YY", "ZZ"],
-            "salary": [400.0, 500.0, 600.0],
-        }
-    )
-
-    return df2
 
 
 @pytest.fixture

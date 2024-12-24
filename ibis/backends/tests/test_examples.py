@@ -15,8 +15,10 @@ pytest.importorskip("pins")
     (LINUX or MACOS) and SANDBOXED,
     reason="nix on linux cannot download duckdb extensions or data due to sandboxing",
 )
-@pytest.mark.notimpl(["pyspark", "exasol"])
-@pytest.mark.notyet(["clickhouse", "druid", "impala", "mssql", "trino", "risingwave"])
+@pytest.mark.notimpl(["pyspark", "exasol", "databricks"])
+@pytest.mark.notyet(
+    ["clickhouse", "druid", "impala", "mssql", "trino", "risingwave", "datafusion"]
+)
 @pytest.mark.parametrize(
     ("example", "columns"),
     [
@@ -61,5 +63,5 @@ pytest.importorskip("pins")
 )
 def test_load_examples(con, example, columns):
     t = getattr(ibis.examples, example).fetch(backend=con)
-    assert t.columns == columns
+    assert t.columns == tuple(columns)
     assert t.count().execute() > 0

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import datetime  # noqa: TCH003
-import decimal  # noqa: TCH003
-import uuid  # noqa: TCH003
+import datetime  # noqa: TC003
+import decimal  # noqa: TC003
+import uuid  # noqa: TC003
 from dataclasses import dataclass
 from typing import Annotated, NamedTuple
 
@@ -13,6 +13,7 @@ import ibis.expr.datatypes as dt
 from ibis.common.annotations import ValidationError
 from ibis.common.patterns import As, Attrs, NoMatch, Pattern
 from ibis.common.temporal import TimestampUnit, TimeUnit
+from ibis.util import get_subclasses
 
 
 def test_validate_type():
@@ -541,15 +542,9 @@ def test_timestamp_from_unit():
     )
 
 
-def get_leaf_classes(op):
-    for child_class in op.__subclasses__():
-        yield child_class
-        yield from get_leaf_classes(child_class)
-
-
 @pytest.mark.parametrize(
     "dtype_class",
-    set(get_leaf_classes(dt.DataType))
+    set(get_subclasses(dt.DataType))
     - {
         # these require special case tests
         dt.Array,

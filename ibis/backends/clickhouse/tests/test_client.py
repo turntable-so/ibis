@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+from urllib.parse import quote_plus
 
 import pandas as pd
 import pandas.testing as tm
@@ -9,9 +10,18 @@ import pytest
 from pytest import param
 
 import ibis
+import ibis.common.exceptions as exc
 import ibis.expr.datatypes as dt
 import ibis.expr.types as ir
-from ibis import config, udf
+from ibis import udf
+from ibis.backends.clickhouse.tests.conftest import (
+    CLICKHOUSE_HOST,
+    CLICKHOUSE_PASS,
+    CLICKHOUSE_PORT,
+    CLICKHOUSE_USER,
+    IBIS_TEST_CLICKHOUSE_DB,
+)
+from ibis.backends.tests.errors import ClickHouseDatabaseError
 from ibis.util import gen_name
 
 cc = pytest.importorskip("clickhouse_connect")
@@ -62,21 +72,19 @@ def test_limit_overrides_expr(con, alltypes):
     assert len(result) == 5
 
 
-def test_limit_equals_none_no_limit(alltypes):
-    with config.option_context("sql.default_limit", 10):
-        result = alltypes.execute(limit=None)
-        assert len(result) > 10
+def test_limit_equals_none_no_limit(alltypes, monkeypatch):
+    monkeypatch.setattr(ibis.options.sql, "default_limit", 10)
+    result = alltypes.execute(limit=None)
+    assert len(result) > 10
 
 
-def test_verbose_log_queries(con):
+def test_verbose_log_queries(con, monkeypatch):
     queries = []
 
-    def logger(x):
-        queries.append(x)
+    monkeypatch.setattr(ibis.options, "verbose", True)
+    monkeypatch.setattr(ibis.options, "verbose_log", queries.append)
 
-    with config.option_context("verbose", True):
-        with config.option_context("verbose_log", logger):
-            con.table("functional_alltypes")
+    con.table("functional_alltypes")
 
     expected = "DESCRIBE functional_alltypes"
 
@@ -85,42 +93,49 @@ def test_verbose_log_queries(con):
     assert expected in queries
 
 
-def test_sql_query_limits(alltypes):
-    table = alltypes
-    with config.option_context("sql.default_limit", 100000):
-        # table has 25 rows
-        assert len(table.execute()) == 7300
-        # comply with limit arg for Table
-        assert len(table.execute(limit=10)) == 10
-        # state hasn't changed
-        assert len(table.execute()) == 7300
-        # non-Table ignores default_limit
-        assert table.count().execute() == 7300
-        # non-Table doesn't observe limit arg
-        assert table.count().execute(limit=10) == 7300
-    with config.option_context("sql.default_limit", 20):
-        # Table observes default limit setting
-        assert len(table.execute()) == 20
-        # explicit limit= overrides default
-        assert len(table.execute(limit=15)) == 15
-        assert len(table.execute(limit=23)) == 23
-        # non-Table ignores default_limit
-        assert table.count().execute() == 7300
-        # non-Table doesn't observe limit arg
-        assert table.count().execute(limit=10) == 7300
+def test_sql_query_limits_big(alltypes, monkeypatch):
+    monkeypatch.setattr(ibis.options.sql, "default_limit", 100_000)
+
+    # alltypes has 7300 rows
+    assert len(alltypes.execute()) == 7300  # comply with limit arg for alltypes
+    assert len(alltypes.execute(limit=10)) == 10
+    # state hasn't changed
+    assert len(alltypes.execute()) == 7300
+    # non-alltypes ignores default_limit
+    assert alltypes.count().execute() == 7300
+    # non-alltypes doesn't observe limit arg
+    assert alltypes.count().execute(limit=10) == 7300
+
+
+def test_sql_query_limits_small(alltypes, monkeypatch):
+    monkeypatch.setattr(ibis.options.sql, "default_limit", 20)
+
+    # alltypes observes default limit setting
+    assert len(alltypes.execute()) == 20
+    # explicit limit= overrides default
+    assert len(alltypes.execute(limit=15)) == 15
+    assert len(alltypes.execute(limit=23)) == 23
+    # non-alltypes ignores default_limit
+    assert alltypes.count().execute() == 7300
+    # non-alltypes doesn't observe limit arg
+    assert alltypes.count().execute(limit=10) == 7300
+
+
+def test_sql_query_limits_none(alltypes, monkeypatch):
+    monkeypatch.setattr(ibis.options.sql, "default_limit", None)
+
     # eliminating default_limit doesn't break anything
-    with config.option_context("sql.default_limit", None):
-        assert len(table.execute()) == 7300
-        assert len(table.execute(limit=15)) == 15
-        assert len(table.execute(limit=10000)) == 7300
-        assert table.count().execute() == 7300
-        assert table.count().execute(limit=10) == 7300
+    assert len(alltypes.execute()) == 7300
+    assert len(alltypes.execute(limit=15)) == 15
+    assert len(alltypes.execute(limit=10000)) == 7300
+    assert alltypes.count().execute() == 7300
+    assert alltypes.count().execute(limit=10) == 7300
 
 
 def test_embedded_identifier_quoting(alltypes):
     t = alltypes
 
-    expr = t[[(t.double_col * 2).name("double(fun)")]]["double(fun)"].sum()
+    expr = t.select((t.double_col * 2).name("double(fun)"))["double(fun)"].sum()
     expr.execute()
 
 
@@ -132,12 +147,17 @@ def temporary_alltypes(con):
     con.drop_table(table)
 
 
-def test_insert(con, temporary_alltypes, df):
+@pytest.mark.parametrize(
+    "transform",
+    [param(lambda df: df, id="pandas"), param(pa.Table.from_pandas, id="pyarrow")],
+)
+def test_insert(con, temporary_alltypes, df, transform):
     temporary = temporary_alltypes
     records = df[:10]
 
     assert temporary.count().execute() == 0
-    con.insert(temporary.op().name, records)
+
+    con.insert(temporary.op().name, transform(records))
 
     tm.assert_frame_equal(temporary.execute(), records)
 
@@ -346,3 +366,108 @@ def test_create_table_no_syntax_error(con):
     )
     t = con.create_table(gen_name("clickouse_temp_table"), schema=schema, temp=True)
     assert t.count().execute() == 0
+
+
+def test_password_with_bracket():
+    password = f'{os.environ.get("IBIS_TEST_CLICKHOUSE_PASSWORD", "")}[]'
+    quoted_pass = quote_plus(password)
+    host = os.environ.get("IBIS_TEST_CLICKHOUSE_HOST", "localhost")
+    user = os.environ.get("IBIS_TEST_CLICKHOUSE_USER", "default")
+    port = int(os.environ.get("IBIS_TEST_CLICKHOUSE_PORT", 8123))
+    with pytest.raises(
+        cc.driver.exceptions.DatabaseError, match="password is incorrect"
+    ):
+        ibis.clickhouse.connect(host=host, user=user, port=port, password=quoted_pass)
+
+
+def test_from_url(con):
+    assert ibis.connect(
+        f"clickhouse://{CLICKHOUSE_USER}:{CLICKHOUSE_PASS}@{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/{IBIS_TEST_CLICKHOUSE_DB}"
+    )
+
+
+def test_from_url_with_kwargs(con):
+    # since explicit kwargs take precedence, this passes, because we're passing
+    # `database` explicitly, even though our connection string says to use a
+    # random database
+    database = ibis.util.gen_name("clickhouse_database")
+    assert ibis.connect(
+        f"clickhouse://{CLICKHOUSE_USER}:{CLICKHOUSE_PASS}@{CLICKHOUSE_HOST}:{CLICKHOUSE_PORT}/{database}",
+        database=IBIS_TEST_CLICKHOUSE_DB,
+    )
+
+
+def test_invalid_port():
+    port = 9999
+    url = f"clickhouse://{CLICKHOUSE_USER}:{CLICKHOUSE_PASS}@{CLICKHOUSE_HOST}:{port}/{IBIS_TEST_CLICKHOUSE_DB}"
+    with pytest.raises(cc.driver.exceptions.DatabaseError):
+        ibis.connect(url)
+
+
+def test_subquery_with_join(con):
+    name = gen_name("clickhouse_tmp_table")
+
+    s = con.create_table(name, pa.Table.from_pydict({"a": [1, 2, 3]}), temp=True)
+
+    sql = f"""
+    SELECT
+      "o"."a"
+    FROM (
+      SELECT
+        "w"."a"
+      FROM "{name}" AS "s"
+      INNER JOIN "{name}" AS "w"
+      USING ("a")
+    ) AS "o"
+    """
+    with pytest.raises(
+        ClickHouseDatabaseError, match="Identifier 'o.a' cannot be resolved"
+    ):
+        # https://github.com/ClickHouse/ClickHouse/issues/66133
+        con.sql(sql)
+
+    # this works because we add the additional alias in the inner query
+    w = s.view()
+    expr = s.join(w, "a").select(a=w.a).select(b=lambda t: t.a + 1)
+    result = expr.to_pandas()
+    assert set(result["b"].tolist()) == {2, 3, 4}
+
+
+def test_alias_column_ref(con):
+    data = {"user_id": [1, 2, 3], "account_id": [4, 5, 6]}
+    t = con.create_table(gen_name("clickhouse_temp_table"), data, temp=True)
+    expr = t.alias("df").sql("select *, halfMD5(account_id) as id_md5 from df")
+
+    result = expr.execute()
+
+    assert len(result) == 3
+
+    assert result.columns.tolist() == ["user_id", "account_id", "id_md5"]
+
+    assert result.user_id.notnull().all()
+    assert result.account_id.notnull().all()
+    assert result.id_md5.notnull().all()
+
+
+@pytest.mark.parametrize("method_name", ["to_pandas", "to_pyarrow"])
+def test_query_cache(con, method_name):
+    t = con.table("functional_alltypes")
+    expr = t.count()
+
+    method = getattr(expr, method_name)
+
+    expected = method()
+    result = method(settings={"use_query_cache": True})
+
+    # test a bogus setting
+    with pytest.raises(ClickHouseDatabaseError):
+        method(settings={"ooze_query_cash": True})
+
+    assert result == expected
+
+
+def test_invalid_catalog_argument(con):
+    with pytest.raises(
+        exc.UnsupportedOperationError, match="`catalog` namespaces are not supported"
+    ):
+        con.get_schema("t", catalog="a", database="b")

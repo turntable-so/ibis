@@ -4,8 +4,6 @@ import contextlib
 from functools import reduce
 from operator import add
 
-import numpy as np
-import pandas as pd
 import pytest
 from pytest import param
 
@@ -14,12 +12,16 @@ import ibis.common.exceptions as com
 import ibis.expr.datatypes as dt
 from ibis.backends.tests.errors import (
     ClickHouseDatabaseError,
+    MySQLOperationalError,
     OracleDatabaseError,
     PsycoPg2InternalError,
-    PyDruidProgrammingError,
     PyODBCProgrammingError,
 )
 from ibis.common.annotations import ValidationError
+from ibis.util import gen_name
+
+np = pytest.importorskip("numpy")
+pd = pytest.importorskip("pandas")
 
 
 @pytest.mark.parametrize(
@@ -38,6 +40,7 @@ from ibis.common.annotations import ValidationError
                 "postgres": "text",
                 "risingwave": "text",
                 "flink": "CHAR(6) NOT NULL",
+                "databricks": "string",
             },
             id="string",
         ),
@@ -54,15 +57,16 @@ from ibis.common.annotations import ValidationError
                 "postgres": "text",
                 "risingwave": "text",
                 "flink": "CHAR(7) NOT NULL",
+                "databricks": "string",
             },
             id="string-quote1",
             marks=[
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["oracle"],
                     raises=OracleDatabaseError,
                     reason="ORA-01741: illegal zero length identifier",
                 ),
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["risingwave"],
                     raises=PsycoPg2InternalError,
                     reason='sql parser error: Expected end of statement, found: "NG\'" at line:1, column:31 Near "SELECT \'STRI"NG\' AS "\'STRI""',
@@ -82,15 +86,16 @@ from ibis.common.annotations import ValidationError
                 "postgres": "text",
                 "risingwave": "text",
                 "flink": "CHAR(7) NOT NULL",
+                "databricks": "string",
             },
             id="string-quote2",
             marks=[
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["oracle"],
                     raises=OracleDatabaseError,
                     reason="ORA-25716",
                 ),
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["risingwave"],
                     raises=PsycoPg2InternalError,
                     reason='sql parser error: Expected end of statement, found: "NG\'" at line:1, column:31 Near "SELECT \'STRI"NG\' AS "\'STRI""',
@@ -134,7 +139,7 @@ def uses_java_re(t):
             lambda t: t.string_col.str.contains("6"),
             id="contains",
             marks=[
-                pytest.mark.broken(
+                pytest.mark.notimpl(
                     ["mssql"], raises=PyODBCProgrammingError, reason="incorrect syntax"
                 ),
             ],
@@ -172,7 +177,7 @@ def uses_java_re(t):
                     ["polars"],
                     raises=com.OperationNotDefinedError,
                 ),
-                pytest.mark.broken(
+                pytest.mark.never(
                     ["mssql"],
                     reason="mssql doesn't allow like outside of filters",
                     raises=PyODBCProgrammingError,
@@ -415,13 +420,11 @@ def uses_java_re(t):
             lambda t: t.string_col.lpad(10, "a"),
             lambda t: t.string_col.str.pad(10, fillchar="a", side="left"),
             id="lpad",
-            marks=pytest.mark.notimpl(["mssql"], raises=com.OperationNotDefinedError),
         ),
         param(
             lambda t: t.string_col.rpad(10, "a"),
             lambda t: t.string_col.str.pad(10, fillchar="a", side="right"),
             id="rpad",
-            marks=pytest.mark.notimpl(["mssql"], raises=com.OperationNotDefinedError),
         ),
         param(
             lambda t: t.string_col.find_in_set(["1"]),
@@ -440,6 +443,7 @@ def uses_java_re(t):
                         "druid",
                         "oracle",
                         "exasol",
+                        "databricks",
                     ],
                     raises=com.OperationNotDefinedError,
                 ),
@@ -467,6 +471,7 @@ def uses_java_re(t):
                         "druid",
                         "oracle",
                         "exasol",
+                        "databricks",
                     ],
                     raises=com.OperationNotDefinedError,
                 ),
@@ -508,40 +513,28 @@ def uses_java_re(t):
             id="length",
         ),
         param(
-            lambda t: t.int_col.cases([(1, "abcd"), (2, "ABCD")], "dabc").startswith(
-                "abc"
-            ),
+            lambda t: t.int_col.cases(
+                (1, "abcd"), (2, "ABCD"), else_="dabc"
+            ).startswith("abc"),
             lambda t: t.int_col == 1,
             id="startswith",
-            marks=[
-                pytest.mark.notimpl(["mssql"], raises=com.OperationNotDefinedError),
-            ],
         ),
         param(
-            lambda t: t.int_col.cases([(1, "abcd"), (2, "ABCD")], "dabc").endswith(
+            lambda t: t.int_col.cases((1, "abcd"), (2, "ABCD"), else_="dabc").endswith(
                 "bcd"
             ),
             lambda t: t.int_col == 1,
             id="endswith",
-            marks=[
-                pytest.mark.notimpl(["mssql"], raises=com.OperationNotDefinedError),
-            ],
         ),
         param(
             lambda t: t.date_string_col.startswith("2010-01"),
             lambda t: t.date_string_col.str.startswith("2010-01"),
             id="startswith-simple",
-            marks=[
-                pytest.mark.notimpl(["mssql"], raises=com.OperationNotDefinedError),
-            ],
         ),
         param(
             lambda t: t.date_string_col.endswith("/10"),
             lambda t: t.date_string_col.str.endswith("/10"),
             id="endswith-simple",
-            marks=[
-                pytest.mark.notimpl(["mssql"], raises=com.OperationNotDefinedError),
-            ],
         ),
         param(
             lambda t: t.string_col.strip(),
@@ -638,7 +631,6 @@ def test_string(backend, alltypes, df, result_func, expected_func):
                         "Polars does not support columnar argument Subtract(StringLength(date_string_col), 1)"
                     ),
                 ),
-                pytest.mark.xfail_version(datafusion=["datafusion==35"]),
             ],
         ),
         param(
@@ -694,11 +686,9 @@ def test_re_replace_global(con):
 @pytest.mark.notimpl(["druid"], raises=ValidationError)
 def test_substr_with_null_values(backend, alltypes, df):
     table = alltypes.mutate(
-        substr_col_null=ibis.case()
-        .when(alltypes["bool_col"], alltypes["string_col"])
-        .else_(None)
-        .end()
-        .substr(0, 2)
+        substr_col_null=ibis.cases(
+            (alltypes["bool_col"], alltypes["string_col"]), else_=None
+        ).substr(0, 2)
     )
     result = table.execute()
 
@@ -730,7 +720,7 @@ def test_substr_with_null_values(backend, alltypes, df):
             "user:pass",
             marks=[
                 pytest.mark.notyet(
-                    ["bigquery", "clickhouse", "snowflake", "trino"],
+                    ["bigquery", "clickhouse", "trino"],
                     raises=com.OperationNotDefinedError,
                     reason="doesn't support `USERINFO`",
                 )
@@ -747,7 +737,7 @@ def test_substr_with_null_values(backend, alltypes, df):
                     raises=com.OperationNotDefinedError,
                     reason="host is netloc",
                 ),
-                pytest.mark.broken(
+                pytest.mark.notyet(
                     ["clickhouse"],
                     reason="Backend is foiled by the presence of a password",
                     raises=AssertionError,
@@ -761,7 +751,7 @@ def test_substr_with_null_values(backend, alltypes, df):
             id="file",
             marks=[
                 pytest.mark.notimpl(
-                    ["pandas", "dask", "datafusion", "sqlite"],
+                    ["datafusion", "sqlite"],
                     raises=com.OperationNotDefinedError,
                 ),
             ],
@@ -789,6 +779,7 @@ def test_substr_with_null_values(backend, alltypes, df):
         "pyspark",
         "druid",
         "oracle",
+        "databricks",
     ],
     raises=com.OperationNotDefinedError,
 )
@@ -802,18 +793,7 @@ def test_parse_url(con, result_func, expected):
 @pytest.mark.parametrize(
     ("inp, expected"),
     [
-        param(
-            None,
-            None,
-            id="none",
-            marks=[
-                pytest.mark.notyet(
-                    ["druid"],
-                    raises=PyDruidProgrammingError,
-                    reason="illegal use of NULL",
-                )
-            ],
-        ),
+        param(None, None, id="none"),
         param(
             "",
             "",
@@ -847,19 +827,13 @@ def test_capitalize(con, inp, expected):
         assert pd.isnull(result)
 
 
+@pytest.mark.notyet(
+    ["exasol", "impala", "mssql", "mysql", "sqlite"],
+    reason="Backend doesn't support arrays",
+    raises=(com.OperationNotDefinedError, com.UnsupportedBackendType),
+)
 @pytest.mark.notimpl(
-    [
-        "dask",
-        "pandas",
-        "polars",
-        "oracle",
-        "flink",
-        "sqlite",
-        "mssql",
-        "mysql",
-        "exasol",
-        "impala",
-    ],
+    ["polars", "oracle", "flink"],
     raises=com.OperationNotDefinedError,
 )
 def test_array_string_join(con):
@@ -891,12 +865,10 @@ def test_multiple_subs(con):
 @pytest.mark.notimpl(
     [
         "clickhouse",
-        "dask",
         "druid",
         "impala",
         "mssql",
         "mysql",
-        "pandas",
         "polars",
         "sqlite",
         "flink",
@@ -922,7 +894,7 @@ def test_levenshtein(con, right):
 @pytest.mark.parametrize(
     "expr",
     [
-        param(ibis.case().when(True, "%").end(), id="case"),
+        param(ibis.cases((True, "%")), id="case"),
         param(ibis.ifelse(True, "%", ibis.null()), id="ifelse"),
     ],
 )
@@ -940,7 +912,6 @@ def test_non_match_regex_search_is_false(con):
 
 @pytest.mark.notimpl(
     [
-        "dask",
         "impala",
         "mysql",
         "sqlite",
@@ -949,7 +920,6 @@ def test_non_match_regex_search_is_false(con):
         "oracle",
         "flink",
         "exasol",
-        "pandas",
         "bigquery",
     ],
     raises=com.OperationNotDefinedError,
@@ -963,7 +933,6 @@ def test_re_split(con):
 
 @pytest.mark.notimpl(
     [
-        "dask",
         "impala",
         "mysql",
         "sqlite",
@@ -972,7 +941,6 @@ def test_re_split(con):
         "oracle",
         "flink",
         "exasol",
-        "pandas",
         "bigquery",
     ],
     raises=com.OperationNotDefinedError,
@@ -985,7 +953,6 @@ def test_re_split_column(alltypes):
 
 @pytest.mark.notimpl(
     [
-        "dask",
         "impala",
         "mysql",
         "sqlite",
@@ -994,7 +961,6 @@ def test_re_split_column(alltypes):
         "oracle",
         "flink",
         "exasol",
-        "pandas",
         "bigquery",
     ],
     raises=com.OperationNotDefinedError,
@@ -1033,7 +999,6 @@ def test_re_split_column_multiple_patterns(alltypes):
     [lambda n: n + "a", lambda n: n + n, lambda n: "a" + n],
     ids=["null-a", "null-null", "a-null"],
 )
-@pytest.mark.notimpl(["pandas", "dask"], raises=TypeError)
 def test_concat_with_null(con, fn):
     null = ibis.literal(None, type="string")
     expr = fn(null)
@@ -1055,7 +1020,388 @@ def test_concat_with_null(con, fn):
     [lambda args: args[0].concat(*args[1:]), lambda args: reduce(add, args)],
     ids=["concat", "add"],
 )
-@pytest.mark.notimpl(["pandas", "dask"], raises=TypeError)
 def test_concat(con, args, method):
     expr = method(args)
     assert pd.isna(con.execute(expr))
+
+
+## String tests with hand-crafted memtables
+## (These will all fail on Druid b/c no table creation)
+
+
+@pytest.fixture(scope="session")
+def string_temp_table(backend, con):
+    better_strings = pd.DataFrame(
+        {
+            "string_col": [
+                "AbC\t",
+                "\n123\n   ",
+                "abc, 123",
+                "123",
+                "aBc",
+                "🐍",
+                "ÉéÈèêç",
+            ],
+            "index_col": [0, 1, 2, 3, 4, 5, 6],
+        }
+    )
+
+    temp_table_name = gen_name("strings")
+    if backend.name() == "druid":
+        pytest.xfail("druid doesn't support create table")
+    else:
+        yield con.create_table(
+            temp_table_name, better_strings, temp=backend.name() == "flink" or None
+        )
+        con.drop_table(temp_table_name, force=True)
+
+
+@pytest.mark.never(["druid"], reason="can't create tables")
+@pytest.mark.parametrize(
+    "result_mut, expected_func",
+    [
+        param(
+            lambda t: t.string_col.contains("c,"),
+            lambda t: t.str.contains("c,"),
+            id="contains",
+            marks=pytest.mark.notyet(
+                ["mssql"],
+                raises=PyODBCProgrammingError,
+                reason="need to fulltext index the column!?",
+            ),
+        ),
+        param(
+            lambda t: t.string_col.contains("123"),
+            lambda t: t.str.contains("123"),
+            id="contains_multi",
+            marks=pytest.mark.notyet(
+                ["mssql"],
+                raises=PyODBCProgrammingError,
+                reason="need to fulltext index the column!?",
+            ),
+        ),
+        param(
+            lambda t: t.string_col.find("123"),
+            lambda t: t.str.find("123"),
+            id="find",
+            marks=pytest.mark.notimpl("polars", raises=com.OperationNotDefinedError),
+        ),
+        param(
+            lambda t: t.string_col.rpad(4, "-"),
+            lambda t: t.str.pad(4, side="right", fillchar="-"),
+            id="rpad",
+            marks=[
+                pytest.mark.notyet(
+                    ["oracle"],
+                    raises=AssertionError,
+                    reason="Treats len(🐍) == 2",
+                ),
+                pytest.mark.notyet(
+                    ["impala"],
+                    raises=AssertionError,
+                    reason="Treats len(🐍) == 4 and accented characters as len 2",
+                ),
+            ],
+        ),
+        param(
+            lambda t: t.string_col.rpad(8, "-"),
+            lambda t: t.str.pad(8, side="right", fillchar="-"),
+            id="rpad_gt",
+            marks=[
+                pytest.mark.notyet(
+                    ["oracle"],
+                    raises=AssertionError,
+                    reason="Treats len(🐍) == 2",
+                ),
+                pytest.mark.notyet(
+                    ["impala"],
+                    raises=AssertionError,
+                    reason="Treats len(🐍) == 4 and accented characters as len 2",
+                ),
+            ],
+        ),
+        param(
+            lambda t: t.string_col.lpad(4, "-"),
+            lambda t: t.str.pad(4, side="left", fillchar="-"),
+            id="lpad_lt",
+            marks=[
+                pytest.mark.notyet(
+                    ["oracle"],
+                    raises=AssertionError,
+                    reason="Treats len(🐍) == 2",
+                ),
+                pytest.mark.notyet(
+                    ["impala"],
+                    raises=AssertionError,
+                    reason="Treats len(🐍) == 4 and accented characters as len 2",
+                ),
+            ],
+        ),
+        param(
+            lambda t: t.string_col.lpad(8, "-"),
+            lambda t: t.str.pad(8, side="left", fillchar="-"),
+            id="lpad_gt",
+            marks=[
+                pytest.mark.notyet(
+                    ["oracle"],
+                    raises=AssertionError,
+                    reason="Treats len(🐍) == 2",
+                ),
+                pytest.mark.notyet(
+                    ["impala"],
+                    raises=AssertionError,
+                    reason="Treats len(🐍) == 4 and accented characters as len 2",
+                ),
+            ],
+        ),
+        param(
+            lambda t: t.string_col.length(),
+            lambda t: t.str.len().astype("int32"),
+            id="len",
+            marks=[
+                pytest.mark.notyet(
+                    ["impala", "polars"],
+                    raises=AssertionError,
+                    reason="thinks emoji are 4 characters long, double-counts accented characters",
+                ),
+                pytest.mark.notyet(
+                    ["clickhouse"],
+                    raises=AssertionError,
+                    reason="Can use lengthUTF8 instead",
+                ),
+            ],
+        ),
+        param(
+            lambda t: t.string_col.find_in_set(["aBc", "123"]),
+            lambda t: pd.Series([-1, -1, -1, 1, 0, -1, -1], name="tmp"),
+            id="find_in_set",
+            marks=[
+                pytest.mark.notyet(
+                    ["mysql"],
+                    raises=MySQLOperationalError,
+                    reason="operand should contain 1 column",
+                ),
+                pytest.mark.notimpl(
+                    [
+                        "bigquery",
+                        "exasol",
+                        "flink",
+                        "pyspark",
+                        "mssql",
+                        "oracle",
+                        "polars",
+                        "snowflake",
+                        "sqlite",
+                        "trino",
+                        "databricks",
+                    ],
+                    raises=com.OperationNotDefinedError,
+                ),
+            ],
+        ),
+        param(
+            lambda t: t.string_col.find_in_set(["abc, 123"]),
+            lambda t: pd.Series([-1, -1, -1, -1, -1, -1, -1], name="tmp"),
+            id="find_in_set_w_comma",
+            marks=[
+                pytest.mark.notyet(
+                    [
+                        "clickhouse",
+                        "datafusion",
+                        "duckdb",
+                        "mysql",
+                        "postgres",
+                        "risingwave",
+                    ],
+                    raises=AssertionError,
+                    reason="should return -1 if comma in field according to docstring",
+                ),
+                pytest.mark.notimpl(
+                    [
+                        "bigquery",
+                        "exasol",
+                        "flink",
+                        "pyspark",
+                        "mssql",
+                        "oracle",
+                        "polars",
+                        "snowflake",
+                        "sqlite",
+                        "trino",
+                        "databricks",
+                    ],
+                    raises=com.OperationNotDefinedError,
+                ),
+            ],
+        ),
+        param(
+            lambda t: t.string_col.lstrip(),
+            lambda t: t.str.lstrip(),
+            id="lstrip",
+            marks=[
+                pytest.mark.notyet(
+                    ["pyspark", "databricks"],
+                    raises=AssertionError,
+                    reason="Spark SQL LTRIM doesn't accept characters to trim",
+                ),
+            ],
+        ),
+        param(
+            lambda t: t.string_col.rstrip(),
+            lambda t: t.str.rstrip(),
+            id="rstrip",
+            marks=[
+                pytest.mark.notyet(
+                    ["pyspark", "databricks"],
+                    raises=AssertionError,
+                    reason="Spark SQL RTRIM doesn't accept characters to trim",
+                ),
+            ],
+        ),
+        param(
+            lambda t: t.string_col.strip(),
+            lambda t: t.str.strip(),
+            id="strip",
+        ),
+        param(
+            lambda t: t.string_col.upper(),
+            lambda t: t.str.upper(),
+            id="upper",
+            marks=[
+                pytest.mark.notyet(
+                    ["impala", "risingwave", "sqlite"],
+                    raises=AssertionError,
+                    reason="no upper on accented characters",
+                ),
+                pytest.mark.notyet(
+                    ["clickhouse"],
+                    raises=AssertionError,
+                    reason="no upper on accented characters, can use upperUTF8 instead",
+                ),
+            ],
+        ),
+        param(
+            lambda t: t.string_col.lower(),
+            lambda t: t.str.lower(),
+            id="lower",
+            marks=[
+                pytest.mark.notyet(
+                    ["impala", "risingwave", "sqlite"],
+                    raises=AssertionError,
+                    reason="no lower on accented characters",
+                ),
+                pytest.mark.notyet(
+                    ["clickhouse"],
+                    raises=AssertionError,
+                    reason="no lower on accented characters, can use lowerUTF8 instead",
+                ),
+            ],
+        ),
+    ],
+)
+def test_string_methods_accents_and_emoji(
+    string_temp_table, backend, result_mut, expected_func
+):
+    """
+    ┏━━━━━━━━━━━━┓
+    ┃ string_col ┃
+    ┡━━━━━━━━━━━━┩
+    │ string     │
+    ├────────────┤
+    │ AbC\t      │
+    │ \n123\n    │
+    │ abc, 123   │
+    │ 123        │
+    │ aBc        │
+    │ 🐍         │
+    │ ÉéÈèêç     │
+    └────────────┘
+    """
+    t = string_temp_table
+    series = t.order_by(t.index_col).string_col.name("tmp").to_pandas()
+
+    expr = t.mutate(string_col=result_mut).order_by(t.index_col)
+    result = expr.string_col.name("tmp").to_pandas()
+
+    expected = expected_func(series)
+
+    backend.assert_series_equal(result, expected)
+
+
+@pytest.fixture(scope="session")
+def string_temp_table_no_complications(backend, con):
+    better_strings = pd.DataFrame(
+        {
+            "string_col": [
+                "AbC\t",
+                "\n123\n   ",
+                "abc, 123",
+                "123",
+                "aBc",
+            ],
+            "index_col": [0, 1, 2, 3, 4],
+        }
+    )
+
+    temp_table_name = gen_name("strings")
+    if backend.name() == "druid":
+        pytest.xfail("druid doesn't support create table")
+    else:
+        yield con.create_table(
+            temp_table_name, better_strings, temp=backend.name() == "flink" or None
+        )
+        con.drop_table(temp_table_name, force=True)
+
+
+@pytest.mark.never(["druid"], reason="can't create tables")
+@pytest.mark.parametrize(
+    "result_mut, expected_func",
+    [
+        param(
+            lambda t: t.string_col.rpad(4, "-"),
+            lambda t: t.str.pad(4, side="right", fillchar="-"),
+            id="rpad_lt",
+        ),
+        param(
+            lambda t: t.string_col.rpad(8, "-"),
+            lambda t: t.str.pad(8, side="right", fillchar="-"),
+            id="rpad_gt",
+        ),
+        param(
+            lambda t: t.string_col.lpad(4, "-"),
+            lambda t: t.str.pad(4, side="left", fillchar="-"),
+            id="lpad_lt",
+        ),
+        param(
+            lambda t: t.string_col.lpad(8, "-"),
+            lambda t: t.str.pad(8, side="left", fillchar="-"),
+            id="lpad_gt",
+        ),
+    ],
+)
+def test_string_methods_no_accents_and_no_emoji(
+    string_temp_table_no_complications, backend, result_mut, expected_func
+):
+    """
+    ┏━━━━━━━━━━━━┓
+    ┃ string_col ┃
+    ┡━━━━━━━━━━━━┩
+    │ string     │
+    ├────────────┤
+    │ AbC\t      │
+    │ \n123\n    │
+    │ abc, 123   │
+    │ 123        │
+    │ aBc        │
+    └────────────┘
+    """
+    # TODO: figure out a better organization for this
+    t = string_temp_table_no_complications
+    series = t.order_by(t.index_col).string_col.name("tmp").to_pandas()
+
+    expr = t.mutate(string_col=result_mut).order_by(t.index_col)
+    result = expr.string_col.name("tmp").to_pandas()
+
+    expected = expected_func(series)
+
+    backend.assert_series_equal(result, expected)

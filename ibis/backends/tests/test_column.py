@@ -9,14 +9,12 @@ import ibis.common.exceptions as com
     [
         "bigquery",
         "clickhouse",
-        "dask",
         "datafusion",
         "exasol",
         "impala",
         "mssql",
         "mysql",
         "oracle",
-        "pandas",
         "polars",
         "postgres",
         "risingwave",
@@ -25,6 +23,7 @@ import ibis.common.exceptions as com
         "trino",
         "druid",
         "flink",
+        "databricks",
     ],
     raises=com.OperationNotDefinedError,
 )

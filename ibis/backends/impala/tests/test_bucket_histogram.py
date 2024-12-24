@@ -81,9 +81,9 @@ def test_bucket_assign_labels(table, snapshot):
     bucket = table.f.bucket(buckets, include_under=True)
 
     size = table.group_by(bucket.name("tier")).size()
-    labelled = size.tier.label(
-        ["Under 0", "0 to 10", "10 to 25", "25 to 50"], nulls="error"
+    labelled = size.tier.cases(
+        *enumerate(["Under 0", "0 to 10", "10 to 25", "25 to 50"]), else_="error"
     ).name("tier2")
-    expr = size[labelled, size[1]]
+    expr = size.select(labelled, size[1])
 
     snapshot.assert_match(translate(expr), "out.sql")

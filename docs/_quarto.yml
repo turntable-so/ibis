@@ -22,8 +22,6 @@ interlinks:
   sources:
     python:
       url: https://docs.python.org/3/
-    sqlalchemy:
-      url: https://docs.sqlalchemy.org/
     arrow:
       url: https://arrow.apache.org/docs/
     pandas:
@@ -124,7 +122,11 @@ website:
       collapse-level: 2
       contents:
         - auto: backends/*.qmd
-        - auto: backends/support
+        - section: Support
+          contents:
+            - backends/cloud_support_policy.qmd
+            - auto: backends/support/*.qmd
+            - reference/operations.qmd
     - id: how-to
       title: "How-to"
       style: "docked"
@@ -170,6 +172,7 @@ website:
         - section: UDFs
           contents:
             - reference/scalar-udfs.qmd
+            - reference/aggregate-udfs.qmd
 
         - section: Connection APIs
           contents:
@@ -181,6 +184,10 @@ website:
             - reference/Options.qmd
             - reference/Repr.qmd
             - reference/SQL.qmd
+
+        - section: Cursed Knowledge
+          contents:
+            - reference/cursed_knowledge.qmd
 
 format:
   html:
@@ -214,6 +221,7 @@ quartodoc:
           contents:
             - name: Table
               package: ibis.expr.types.relations
+              include_inherited: true
             - name: GroupedTable
               package: ibis.expr.types.groupby
             - name: read_csv
@@ -286,12 +294,19 @@ quartodoc:
             name: Generic expressions
             desc: Scalars and columns of any element type.
           contents:
+            # types
             - name: Value
               package: ibis.expr.types.generic
             - name: Column
               package: ibis.expr.types.generic
+            - name: Deferred
+              package: ibis.common.deferred
             - name: Scalar
               package: ibis.expr.types.generic
+
+            # constants
+            - name: deferred
+              package: ibis.expr.api
             - name: literal
               dynamic: true
               signature_name: full
@@ -301,27 +316,37 @@ quartodoc:
             - name: "null"
               dynamic: true
               signature_name: full
+            - name: range
+              dynamic: true
+              signature_name: full
             - name: coalesce
               dynamic: true
               signature_name: full
+
+            # comparisons
             - name: least
               dynamic: true
               signature_name: full
             - name: greatest
               dynamic: true
               signature_name: full
+            - name: ifelse
+              dynamic: true
+              signature_name: full
+            - name: cases
+              dynamic: true
+              signature_name: full
+
+            # sorting
             - name: asc
               dynamic: true
               signature_name: full
             - name: desc
               dynamic: true
               signature_name: full
-            - name: ifelse
-              dynamic: true
-              signature_name: full
-            - name: case
-              dynamic: true
-              signature_name: full
+
+            # conversions
+            # TODO: add decompile here once the API is not experimental
             - name: to_sql
               dynamic: true
               signature_name: full
@@ -346,6 +371,8 @@ quartodoc:
               package: ibis.expr.types.numeric
             - name: BooleanValue
               package: ibis.expr.types.logical
+            - name: BooleanColumn
+              package: ibis.expr.types.logical
             - name: and_
               dynamic: true
               signature_name: full
@@ -355,6 +382,12 @@ quartodoc:
             - name: random
               dynamic: true
               signature_name: full
+
+            # constants
+            - name: e
+              package: ibis.expr.api
+            - name: pi
+              package: ibis.expr.api
 
         - kind: page
           path: expression-strings
@@ -544,14 +577,15 @@ quartodoc:
             - matches
             - any_of
             - all_of
-            - c
+            - cols
             - across
             - if_any
             - if_all
-            - r
+            - index
             - first
             - last
             - all
+            - none
 
     - title: Type System
       desc: "Data types and schemas"
@@ -642,6 +676,13 @@ quartodoc:
             desc: "Scalar user-defined function APIs"
           contents:
             - scalar
+        - kind: page
+          path: aggregate-udfs
+          summary:
+            name: Aggregate UDFs (experimental)
+            desc: "Aggregate user-defined function APIs"
+          contents:
+            - agg
 
     - title: Configuration
       desc: "Ibis configuration"

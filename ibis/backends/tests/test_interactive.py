@@ -13,10 +13,12 @@
 # limitations under the License.
 from __future__ import annotations
 
+import shutil
+
 import pytest
 
 import ibis
-from ibis import config
+import ibis.common.exceptions as exc
 
 
 @pytest.fixture
@@ -33,48 +35,49 @@ def table(backend):
     return backend.functional_alltypes
 
 
-@pytest.mark.notimpl(["dask", "pandas", "polars"])
+@pytest.mark.notimpl(["polars"])
 def test_interactive_execute_on_repr(table, queries):
     repr(table.bigint_col.sum())
     assert len(queries) >= 1
 
 
-def test_repr_png_is_none_in_interactive(table):
-    with config.option_context("interactive", True):
-        assert table._repr_png_() is None
+def test_repr_png_is_none_in_interactive(table, monkeypatch):
+    monkeypatch.setattr(ibis.options, "interactive", True)
+    assert table._repr_png_() is None
 
 
-def test_repr_png_is_not_none_in_not_interactive(table):
+def test_repr_png_is_not_none_in_not_interactive(table, monkeypatch):
     pytest.importorskip("ibis.expr.visualize")
+    monkeypatch.setattr(ibis.options, "interactive", False)
+    monkeypatch.setattr(ibis.options, "graphviz_repr", True)
 
-    with (
-        config.option_context("interactive", False),
-        config.option_context("graphviz_repr", True),
-    ):
-        assert table._repr_png_() is not None
+    assert shutil.which("dot") is not None
+    assert table._repr_png_() is not None
 
 
-@pytest.mark.notimpl(["dask", "pandas", "polars"])
+@pytest.mark.notimpl(["polars"])
 def test_default_limit(table, queries):
     repr(table.select("id", "bool_col"))
 
     assert len(queries) >= 1
 
 
-@pytest.mark.notimpl(["dask", "pandas", "polars"])
+@pytest.mark.notimpl(["polars"])
 def test_respect_set_limit(table, queries):
     repr(table.select("id", "bool_col").limit(10))
 
     assert len(queries) >= 1
 
 
-@pytest.mark.notimpl(["dask", "pandas", "polars"])
-def test_disable_query_limit(table, queries):
+@pytest.mark.notimpl(["polars"])
+def test_disable_query_limit(table, queries, monkeypatch):
     assert ibis.options.sql.default_limit is None
 
-    with config.option_context("sql.default_limit", 10):
-        assert ibis.options.sql.default_limit == 10
-        repr(table.select("id", "bool_col"))
+    monkeypatch.setattr(ibis.options.sql, "default_limit", 10)
+
+    assert ibis.options.sql.default_limit == 10
+
+    repr(table.select("id", "bool_col"))
 
     assert len(queries) >= 1
 
@@ -86,6 +89,40 @@ def test_interactive_non_compilable_repr_does_not_fail(table):
 
 def test_isin_rule_suppressed_exception_repr_not_fail(table):
     bool_clause = table["string_col"].notin(["1", "4", "7"])
-    expr = table[bool_clause]["string_col"].value_counts()
+    expr = table.filter(bool_clause)["string_col"].value_counts()
 
     repr(expr)
+
+
+def test_no_recursion_error(con, monkeypatch):
+    monkeypatch.setattr(ibis.options, "interactive", True)
+    monkeypatch.setattr(ibis.options, "default_backend", con)
+
+    a = ibis.memtable({"a": [1]})
+    b = ibis.memtable({"b": [1]})
+
+    expr = a.count() + b.count()
+
+    with pytest.raises(
+        exc.RelationError, match="The scalar expression cannot be converted"
+    ):
+        repr(expr)
+
+
+@pytest.mark.notimpl(
+    ["impala", "flink", "pyspark"],
+    reason="backend calls `execute` as part of pyarrow conversion",
+)
+def test_scalar_uses_pyarrow(con, table, monkeypatch, mocker):
+    monkeypatch.setattr(ibis.options, "interactive", True)
+
+    execute_spy = mocker.spy(con, "execute")
+    to_pyarrow_spy = mocker.spy(con, "to_pyarrow")
+
+    repr(table.limit(1).string_col)
+
+    # pyarrow does get called
+    to_pyarrow_spy.assert_called_once()
+
+    # execute doesn't get called
+    execute_spy.assert_not_called()

@@ -6,7 +6,10 @@ import tempfile
 
 import pytest
 
-from ibis.backends.bigquery.udf.core import PythonToJavaScriptTranslator, SymbolTable
+from ibis.backends.sql.compilers.bigquery.udf.core import (
+    PythonToJavaScriptTranslator,
+    SymbolTable,
+)
 
 
 def test_symbol_table():
@@ -56,7 +59,7 @@ def f(a):
         )
         f.seek(0)
         code = builtins.compile(f.read(), f.name, "exec")
-        exec(code, d)
+        exec(code, d)  # noqa: S102
         f = d["f"]
         js = compile(f)
     snapshot.assert_match(js, "out.js")

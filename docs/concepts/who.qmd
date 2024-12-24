@@ -34,7 +34,7 @@ Some include:
 - [Microsoft's Magpie
  project](https://www.microsoft.com/en-us/research/project/magpie-2/), built on
  top of Ibis
-- [SuperDuperDB](https://github.com/SuperDuperDB/superduperdb), bringing AI to
+- [Superduper](https://github.com/superduper-io/superduper), bringing AI to
  any backend Ibis supports
 
 Ibis is also contributed to by other companies. You can [look through the full
@@ -44,7 +44,7 @@ GitHub](https://github.com/ibis-project/ibis/graphs/contributors).
 ## History
 
 Ibis was originally created by [Wes McKinney](https://wesmckinney.com/). Wes
-created pandas, co-created Apache Arrrow, and co-founded Voltron Data (among
+created pandas, co-created Apache Arrow, and co-founded Voltron Data (among
 other things). Ibis was initially a pandas-like dataframe library for Apache
 Impala, but has since grown to support many other backends and mature under the
 stewardship of [Phillip Cloud](https://github.com/cpcloud) and others on the

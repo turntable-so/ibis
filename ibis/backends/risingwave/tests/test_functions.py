@@ -215,8 +215,7 @@ def test_coalesce_all_na_double(con):
 def test_numeric_builtins_work(alltypes, df):
     expr = alltypes.double_col.fill_null(0)
     result = expr.execute()
-    expected = df.double_col.fillna(0)
-    expected.name = "Coalesce()"
+    expected = df.double_col.fillna(0).rename(expr.get_name())
     tm.assert_series_equal(result, expected)
 
 
@@ -302,7 +301,7 @@ def test_category_label(alltypes, df):
     bins = [0, 10, 25, 50, 100]
     labels = ["a", "b", "c", "d"]
     bucket = d.bucket(bins)
-    expr = bucket.label(labels)
+    expr = bucket.cases(*enumerate(labels), else_=None)
     result = expr.execute()
 
     with warnings.catch_warnings():
@@ -449,7 +448,7 @@ def test_not_exists(alltypes, df):
     t = alltypes
     t2 = t.view()
 
-    expr = t[~((t.string_col == t2.string_col).any())]
+    expr = t.filter(~((t.string_col == t2.string_col).any()))
     result = expr.execute()
 
     left, right = df, t2.execute()
@@ -616,7 +615,7 @@ def test_window_with_arithmetic(alltypes, df):
 
 def test_anonymous_aggregate(alltypes, df):
     t = alltypes
-    expr = t[t.double_col > t.double_col.mean()]
+    expr = t.filter(t.double_col > t.double_col.mean())
     result = expr.execute()
     expected = df[df.double_col > df.double_col.mean()].reset_index(drop=True)
     tm.assert_frame_equal(result, expected)
@@ -674,13 +673,11 @@ def test_identical_to(con, df):
     tm.assert_series_equal(result, expected)
 
 
-@pytest.mark.parametrize("opname", ["invert", "neg"])
-def test_not_and_negate_bool(con, opname, df):
-    op = getattr(operator, opname)
+def test_invert_bool(con, df):
     t = con.table("functional_alltypes").limit(10)
-    expr = t.select(op(t.bool_col).name("bool_col"))
+    expr = t.select((~t.bool_col).name("bool_col"))
     result = expr.execute().bool_col
-    expected = op(df.head(10).bool_col)
+    expected = ~df.head(10).bool_col
     tm.assert_series_equal(result, expected)
 
 
@@ -702,14 +699,6 @@ def test_negate_non_boolean(con, field, df):
     expr = t.select((-t[field]).name(field))
     result = expr.execute()[field]
     expected = -df.head(10)[field]
-    tm.assert_series_equal(result, expected)
-
-
-def test_negate_boolean(con, df):
-    t = con.table("functional_alltypes").limit(10)
-    expr = t.select((-t.bool_col).name("bool_col"))
-    result = expr.execute().bool_col
-    expected = -df.head(10).bool_col
     tm.assert_series_equal(result, expected)
 
 

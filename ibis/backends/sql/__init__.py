@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import abc
+from functools import partial
 from typing import TYPE_CHECKING, Any, ClassVar
 
 import sqlglot as sg
@@ -13,7 +14,6 @@ import ibis.expr.schema as sch
 import ibis.expr.types as ir
 from ibis import util
 from ibis.backends import BaseBackend
-from ibis.backends.sql.compiler import STAR
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Mapping
@@ -21,53 +21,15 @@ if TYPE_CHECKING:
     import pandas as pd
     import pyarrow as pa
 
-    from ibis.backends.sql.compiler import SQLGlotCompiler
+    from ibis.backends.sql.compilers.base import SQLGlotCompiler
     from ibis.expr.schema import SchemaLike
 
 
-class _DatabaseSchemaHandler:
-    """Temporary mixin collecting several helper functions and code snippets.
-
-    Help to 'gracefully' deprecate the use of `schema` as a hierarchical term.
-    """
-
-    @staticmethod
-    def _warn_schema():
-        util.warn_deprecated(
-            name="schema",
-            as_of="9.0",
-            removed_in="10.0",
-            instead="Use the `database` kwarg with one of the following patterns:"
-            '\ndatabase="database"'
-            '\ndatabase=("catalog", "database")'
-            '\ndatabase="catalog.database"',
-            # TODO: add option for namespace object
-        )
-
-    def _warn_and_create_table_loc(self, database=None, schema=None):
-        if schema is not None:
-            self._warn_schema()
-
-        if database is not None and schema is not None:
-            if isinstance(database, str):
-                table_loc = f"{database}.{schema}"
-            elif isinstance(database, tuple):
-                table_loc = database + schema
-        elif schema is not None:
-            table_loc = schema
-        elif database is not None:
-            table_loc = database
-        else:
-            table_loc = None
-
-        table_loc = self._to_sqlglot_table(table_loc)
-
-        return table_loc
-
-
-class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
+class SQLBackend(BaseBackend):
     compiler: ClassVar[SQLGlotCompiler]
     name: ClassVar[str]
+
+    _top_level_methods = ("from_connection",)
 
     @property
     def dialect(self) -> sg.Dialect:
@@ -107,7 +69,6 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
     def table(
         self,
         name: str,
-        schema: str | None = None,
         database: tuple[str, str] | str | None = None,
     ) -> ir.Table:
         """Construct a table expression.
@@ -116,8 +77,6 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
         ----------
         name
             Table name
-        schema
-            [deprecated] Schema name
         database
             Database name
 
@@ -127,12 +86,10 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
             Table expression
 
         """
-        table_loc = self._warn_and_create_table_loc(database, schema)
+        table_loc = self._to_sqlglot_table(database)
 
-        catalog, database = None, None
-        if table_loc is not None:
-            catalog = table_loc.catalog or None
-            database = table_loc.db or None
+        catalog = table_loc.catalog or None
+        database = table_loc.db or None
 
         table_schema = self.get_schema(name, catalog=catalog, database=database)
         return ops.DatabaseTable(
@@ -142,39 +99,15 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
             namespace=ops.Namespace(catalog=catalog, database=database),
         ).to_expr()
 
-    def _to_sqlglot(
-        self, expr: ir.Expr, *, limit: str | None = None, params=None, **_: Any
-    ):
-        """Compile an Ibis expression to a sqlglot object."""
-        table_expr = expr.as_table()
-
-        if limit == "default":
-            limit = ibis.options.sql.default_limit
-        if limit is not None:
-            table_expr = table_expr.limit(limit)
-
-        if params is None:
-            params = {}
-
-        sql = self.compiler.translate(table_expr.op(), params=params)
-        assert not isinstance(sql, sge.Subquery)
-
-        if isinstance(sql, sge.Table):
-            sql = sg.select(STAR, copy=False).from_(sql, copy=False)
-
-        assert not isinstance(sql, sge.Subquery)
-        return sql
-
     def compile(
         self,
         expr: ir.Expr,
         limit: str | None = None,
-        params=None,
+        params: Mapping[ir.Expr, Any] | None = None,
         pretty: bool = False,
-        **kwargs: Any,
     ):
         """Compile an Ibis expression to a SQL string."""
-        query = self._to_sqlglot(expr, limit=limit, params=params, **kwargs)
+        query = self.compiler.to_sqlglot(expr, limit=limit, params=params)
         sql = query.sql(dialect=self.dialect, pretty=pretty, copy=False)
         self._log(sql)
         return sql
@@ -215,19 +148,26 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
             The schema inferred from `query`
         """
 
-    def _get_sql_string_view_schema(self, name, table, query) -> sch.Schema:
-        compiler = self.compiler
-        dialect = compiler.dialect
-
-        cte = self._to_sqlglot(table)
-        parsed = sg.parse_one(query, read=dialect)
-        parsed.args["with"] = cte.args.pop("with", [])
-        parsed = parsed.with_(
-            sg.to_identifier(name, quoted=compiler.quoted), as_=cte, dialect=dialect
-        )
-
-        sql = parsed.sql(dialect)
+    def _get_sql_string_view_schema(
+        self, *, name: str, table: ir.Table, query: str
+    ) -> sch.Schema:
+        sql = self.compiler.add_query_to_expr(name=name, table=table, query=query)
         return self._get_schema_using_query(sql)
+
+    def _register_udfs(self, expr: ir.Expr) -> None:
+        udf_sources = []
+        compiler = self.compiler
+        for udf_node in expr.op().find(ops.ScalarUDF):
+            compile_func = getattr(
+                compiler, f"_compile_{udf_node.__input_type__.name.lower()}_udf"
+            )
+            if sql := compile_func(udf_node):
+                udf_sources.append(sql)
+        if udf_sources:
+            # define every udf in one execution to avoid the overhead of db
+            # round trips per udf
+            with self._safe_raw_sql(";\n".join(udf_sources)):
+                pass
 
     def create_view(
         self,
@@ -235,10 +175,9 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
         obj: ir.Table,
         *,
         database: str | None = None,
-        schema: str | None = None,
         overwrite: bool = False,
     ) -> ir.Table:
-        table_loc = self._warn_and_create_table_loc(database, schema)
+        table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
         src = sge.Create(
@@ -252,19 +191,14 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
             pass
         return self.table(name, database=(catalog, db))
 
-    def _register_in_memory_tables(self, expr: ir.Expr) -> None:
-        for memtable in expr.op().find(ops.InMemoryTable):
-            self._register_in_memory_table(memtable)
-
     def drop_view(
         self,
         name: str,
         *,
         database: str | None = None,
-        schema: str | None = None,
         force: bool = False,
     ) -> None:
-        table_loc = self._warn_and_create_table_loc(database, schema)
+        table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
         src = sge.Drop(
@@ -274,12 +208,6 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
         )
         with self._safe_raw_sql(src):
             pass
-
-    def _load_into_cache(self, name, expr):
-        self.create_table(name, expr, schema=expr.schema(), temp=True)
-
-    def _clean_up_cached_table(self, op):
-        self.drop_table(op.name)
 
     def execute(
         self,
@@ -308,10 +236,10 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
         database: tuple[str, str] | str | None = None,
         force: bool = False,
     ) -> None:
-        table_loc = self._warn_and_create_table_loc(database, None)
+        table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
-        drop_stmt = sg.exp.Drop(
+        drop_stmt = sge.Drop(
             kind="TABLE",
             this=sg.table(name, db=db, catalog=catalog, quoted=self.compiler.quoted),
             exists=force,
@@ -385,7 +313,6 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
         self,
         table_name: str,
         obj: pd.DataFrame | ir.Table | list | dict,
-        schema: str | None = None,
         database: str | None = None,
         overwrite: bool = False,
     ) -> None:
@@ -408,8 +335,6 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
             The name of the table to which data needs will be inserted
         obj
             The source data or expression to insert
-        schema
-            [deprecated] The name of the schema that the table is located in
         database
             Name of the attached database that the table is located in.
 
@@ -420,7 +345,7 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
             If `True` then replace existing contents of table
 
         """
-        table_loc = self._warn_and_create_table_loc(database, schema)
+        table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
         if overwrite:
@@ -431,27 +356,26 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
 
         self._run_pre_execute_hooks(obj)
 
-        query = self._build_insert_query(
+        query = self._build_insert_from_table(
             target=table_name, source=obj, db=db, catalog=catalog
         )
 
         with self._safe_raw_sql(query):
             pass
 
-    def _build_insert_query(
+    def _build_insert_from_table(
         self, *, target: str, source, db: str | None = None, catalog: str | None = None
     ):
         compiler = self.compiler
         quoted = compiler.quoted
         # Compare the columns between the target table and the object to be inserted
-        # If they don't match, assume auto-generated column names and use positional
-        # ordering.
-        source_cols = source.columns
+        # If source is a subset of target, use source columns for insert list
+        # Otherwise, assume auto-generated column names and use positional ordering.
+        target_cols = self.get_schema(target, catalog=catalog, database=db).keys()
+
         columns = (
             source_cols
-            if not set(target_cols := self.get_schema(target).names).difference(
-                source_cols
-            )
+            if (source_cols := source.schema().keys()) <= target_cols
             else target_cols
         )
 
@@ -463,8 +387,59 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
         )
         return query
 
+    def _build_insert_template(
+        self,
+        name,
+        *,
+        schema: sch.Schema,
+        catalog: str | None = None,
+        columns: bool = False,
+        placeholder: str = "?",
+    ) -> str:
+        """Builds an INSERT INTO table VALUES query string with placeholders.
+
+        Parameters
+        ----------
+        name
+            Name of the table to insert into
+        schema
+            Ibis schema of the table to insert into
+        catalog
+            Catalog name of the table to insert into
+        columns
+            Whether to render the columns to insert into
+        placeholder
+            Placeholder string. Can be a format string with a single `{i}` spec.
+
+        Returns
+        -------
+        str
+            The query string
+        """
+        quoted = self.compiler.quoted
+        return sge.insert(
+            sge.Values(
+                expressions=[
+                    sge.Tuple(
+                        expressions=[
+                            sge.Var(this=placeholder.format(i=i))
+                            for i in range(len(schema))
+                        ]
+                    )
+                ]
+            ),
+            into=sg.table(name, catalog=catalog, quoted=quoted),
+            columns=(
+                map(partial(sg.to_identifier, quoted=quoted), schema.keys())
+                if columns
+                else None
+            ),
+        ).sql(self.dialect)
+
     def truncate_table(
-        self, name: str, database: str | None = None, schema: str | None = None
+        self,
+        name: str,
+        database: str | None = None,
     ) -> None:
         """Delete all rows from a table.
 
@@ -488,11 +463,10 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
             For backends that support multi-level table hierarchies, you can
             pass in a dotted string path like `"catalog.database"` or a tuple of
             strings like `("catalog", "database")`.
-        schema
-            [deprecated] Schema name
+
 
         """
-        table_loc = self._warn_and_create_table_loc(database, schema)
+        table_loc = self._to_sqlglot_table(database)
         catalog, db = self._to_catalog_db_tuple(table_loc)
 
         ident = sg.table(name, db=db, catalog=catalog, quoted=self.compiler.quoted).sql(
@@ -501,33 +475,28 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
         with self._safe_raw_sql(f"TRUNCATE TABLE {ident}"):
             pass
 
+    @util.experimental
+    @classmethod
+    def from_connection(cls, con: Any, **kwargs: Any) -> BaseBackend:
+        """Create an Ibis client from an existing connection.
+
+        Parameters
+        ----------
+        con
+            An existing connection.
+        **kwargs
+            Extra arguments to be applied to the newly-created backend.
+        """
+        raise NotImplementedError(
+            f"{cls.name} backend cannot be constructed from an existing connection"
+        )
+
     def disconnect(self):
         # This is part of the Python DB-API specification so should work for
         # _most_ sqlglot backends
         self.con.close()
 
-    def _compile_builtin_udf(self, udf_node: ops.ScalarUDF | ops.AggUDF) -> None:
-        """Compile a built-in UDF. No-op by default."""
-
-    def _compile_python_udf(self, udf_node: ops.ScalarUDF) -> None:
-        raise NotImplementedError(
-            f"Python UDFs are not supported in the {self.name} backend"
-        )
-
-    def _compile_pyarrow_udf(self, udf_node: ops.ScalarUDF) -> None:
-        raise NotImplementedError(
-            f"PyArrow UDFs are not supported in the {self.name} backend"
-        )
-
-    def _compile_pandas_udf(self, udf_node: ops.ScalarUDF) -> str:
-        raise NotImplementedError(
-            f"pandas UDFs are not supported in the {self.name} backend"
-        )
-
     def _to_catalog_db_tuple(self, table_loc: sge.Table):
-        if table_loc is None or table_loc == (None, None):
-            return None, None
-
         if (sg_cat := table_loc.args["catalog"]) is not None:
             sg_cat.args["quoted"] = False
             sg_cat = sg_cat.sql(self.name)
@@ -539,7 +508,8 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
 
     def _to_sqlglot_table(self, database):
         if database is None:
-            return None
+            # Create "table" with empty catalog and db
+            database = sge.Table(catalog=None, db=None)
         elif isinstance(database, (list, tuple)):
             if len(database) > 2:
                 raise ValueError(
@@ -558,7 +528,7 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
                     '\n("catalog", "database")'
                     '\n("database",)'
                 )
-            database = sg.exp.Table(
+            database = sge.Table(
                 catalog=sg.to_identifier(catalog, quoted=self.compiler.quoted),
                 db=sg.to_identifier(database, quoted=self.compiler.quoted),
             )
@@ -568,14 +538,14 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
             # sqlglot parsing of the string will assume that it's a Table
             # so we unpack the arguments into a new sqlglot object, switching
             # table (this) -> database (db) and database (db) -> catalog
-            table = sg.parse_one(database, into=sg.exp.Table, dialect=self.dialect)
+            table = sg.parse_one(database, into=sge.Table, dialect=self.dialect)
             if table.args["catalog"] is not None:
                 raise exc.IbisInputError(
                     f"Overspecified table hierarchy provided: `{table.sql(self.dialect)}`"
                 )
             catalog = table.args["db"]
             db = table.args["this"]
-            database = sg.exp.Table(catalog=catalog, db=db)
+            database = sge.Table(catalog=catalog, db=db)
         else:
             raise ValueError(
                 """Invalid database hierarchy format.  Please use either dotted
@@ -583,3 +553,24 @@ class SQLBackend(BaseBackend, _DatabaseSchemaHandler):
             )
 
         return database
+
+    def _register_builtin_udf(self, udf_node: ops.ScalarUDF) -> None:
+        """No-op."""
+
+    def _register_python_udf(self, udf_node: ops.ScalarUDF) -> str:
+        raise NotImplementedError(
+            f"Python UDFs are not supported in the {self.dialect} backend"
+        )
+
+    def _register_pyarrow_udf(self, udf_node: ops.ScalarUDF) -> str:
+        raise NotImplementedError(
+            f"PyArrow UDFs are not supported in the {self.dialect} backend"
+        )
+
+    def _register_pandas_udf(self, udf_node: ops.ScalarUDF) -> str:
+        raise NotImplementedError(
+            f"pandas UDFs are not supported in the {self.dialect} backend"
+        )
+
+    def _finalize_memtable(self, name: str) -> None:
+        self.drop_table(name, force=True)

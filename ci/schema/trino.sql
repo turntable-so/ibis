@@ -1,5 +1,4 @@
-DROP TABLE IF EXISTS hive.default.diamonds;
-CREATE TABLE hive.default.diamonds (
+CREATE TABLE IF NOT EXISTS hive.default.diamonds (
     "carat" DOUBLE,
     "cut" VARCHAR,
     "color" VARCHAR,
@@ -18,8 +17,7 @@ CREATE TABLE hive.default.diamonds (
 CREATE OR REPLACE VIEW memory.default.diamonds AS
 SELECT * FROM hive.default.diamonds;
 
-DROP TABLE IF EXISTS hive.default.astronauts;
-CREATE TABLE hive.default.astronauts (
+CREATE TABLE IF NOT EXISTS hive.default.astronauts (
     "id" BIGINT,
     "number" BIGINT,
     "nationwide_number" BIGINT,
@@ -52,8 +50,7 @@ CREATE TABLE hive.default.astronauts (
 CREATE OR REPLACE VIEW memory.default.astronauts AS
 SELECT * FROM hive.default.astronauts;
 
-DROP TABLE IF EXISTS hive.default.batting;
-CREATE TABLE hive.default.batting (
+CREATE TABLE IF NOT EXISTS hive.default.batting (
     "playerID" VARCHAR,
     "yearID" BIGINT,
     "stint" BIGINT,
@@ -84,8 +81,7 @@ CREATE TABLE hive.default.batting (
 CREATE OR REPLACE VIEW memory.default.batting AS
 SELECT * FROM hive.default.batting;
 
-DROP TABLE IF EXISTS hive.default.awards_players;
-CREATE TABLE hive.default.awards_players (
+CREATE TABLE IF NOT EXISTS hive.default.awards_players (
     "playerID" VARCHAR,
     "awardID" VARCHAR,
     "yearID" BIGINT,
@@ -93,15 +89,14 @@ CREATE TABLE hive.default.awards_players (
     "tie" VARCHAR,
     "notes" VARCHAR
 ) WITH (
-    external_location = 's3a://trino/awards-players',
+    external_location = 's3a://trino/awards_players',
     format = 'PARQUET'
 );
 
 CREATE OR REPLACE VIEW memory.default.awards_players AS
 SELECT * FROM hive.default.awards_players;
 
-DROP TABLE IF EXISTS hive.default.functional_alltypes;
-CREATE TABLE hive.default.functional_alltypes (
+CREATE TABLE IF NOT EXISTS hive.default.functional_alltypes (
     "id" INTEGER,
     "bool_col" BOOLEAN,
     "tinyint_col" TINYINT,
@@ -116,9 +111,10 @@ CREATE TABLE hive.default.functional_alltypes (
     "year" INTEGER,
     "month" INTEGER
 ) WITH (
-    external_location = 's3a://trino/functional-alltypes',
+    external_location = 's3a://trino/functional_alltypes',
     format = 'PARQUET'
 );
+
 CREATE OR REPLACE VIEW memory.default.functional_alltypes AS
 SELECT * FROM hive.default.functional_alltypes;
 
@@ -160,23 +156,23 @@ INSERT INTO struct
 
 DROP TABLE IF EXISTS memory.default.json_t;
 
-CREATE TABLE IF NOT EXISTS memory.default.json_t (js JSON);
+CREATE TABLE IF NOT EXISTS memory.default.json_t (rowid BIGINT, js JSON);
 
 INSERT INTO memory.default.json_t VALUES
-    (JSON '{"a": [1,2,3,4], "b": 1}'),
-    (JSON '{"a":null,"b":2}'),
-    (JSON '{"a":"foo", "c":null}'),
-    (JSON 'null'),
-    (JSON '[42,47,55]'),
-    (JSON '[]'),
-    (JSON '"a"'),
-    (JSON '""'),
-    (JSON '"b"'),
-    (NULL),
-    (JSON 'true'),
-    (JSON 'false'),
-    (JSON '42'),
-    (JSON '37.37');
+    (1, JSON '{"a": [1,2,3,4], "b": 1}'),
+    (2, JSON '{"a":null,"b":2}'),
+    (3, JSON '{"a":"foo", "c":null}'),
+    (4, JSON 'null'),
+    (5, JSON '[42,47,55]'),
+    (6, JSON '[]'),
+    (7, JSON '"a"'),
+    (8, JSON '""'),
+    (9, JSON '"b"'),
+    (10, NULL),
+    (11, JSON 'true'),
+    (12, JSON 'false'),
+    (13, JSON '42'),
+    (14, JSON '37.37');
 
 DROP TABLE IF EXISTS win;
 CREATE TABLE win (g VARCHAR, x BIGINT, y BIGINT);

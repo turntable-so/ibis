@@ -761,6 +761,29 @@ def test_chained_join_referencing_intermediate_table():
     assert isinstance(abc, ir.JoinExpr)
 
 
+@pytest.mark.parametrize("how", ["positional", "cross"])
+def test_chained_join_positional_cross(how):
+    a = ibis.table(name="a", schema={"a": "int64", "b": "string"})
+    b = ibis.table(name="b", schema={"c": "int64", "d": "string"})
+    c = ibis.table(name="c", schema={"e": "int64", "f": "string"})
+    joined = a.join(b, how=how).join(c, how=how)
+    result = joined._finish()
+
+    with join_tables(joined) as (r1, r2, r3):
+        assert result.op() == JoinChain(
+            first=r1,
+            rest=[JoinLink(how, r2, ()), JoinLink(how, r3, ())],
+            values={
+                "a": r1.a,
+                "b": r1.b,
+                "c": r2.c,
+                "d": r2.d,
+                "e": r3.e,
+                "f": r3.f,
+            },
+        )
+
+
 def test_join_predicate_dereferencing():
     # See #790, predicate pushdown in joins not supported
 
@@ -769,7 +792,7 @@ def test_join_predicate_dereferencing():
     table2 = ibis.table({"foo_id": str, "value1": float, "value3": float})
     table3 = ibis.table({"bar_id": str, "value2": float})
 
-    filtered = table[table["f"] > 0]
+    filtered = table.filter(table["f"] > 0)
 
     # dereference table.foo_id to filtered.foo_id
     j1 = filtered.left_join(table2, table["foo_id"] == table2["foo_id"])
@@ -793,7 +816,7 @@ def test_join_predicate_dereferencing():
 
     j1 = filtered.left_join(table2, table["foo_id"] == table2["foo_id"])
     j2 = j1.inner_join(table3, filtered["bar_id"] == table3["bar_id"])
-    view = j2[[filtered, table2["value1"], table3["value2"]]]
+    view = j2.select(filtered, table2["value1"], table3["value2"])
     with join_tables(j2) as (r1, r2, r3):
         expected = ops.JoinChain(
             first=r1,
@@ -1130,7 +1153,7 @@ def test_self_join():
 
 
 def test_self_join_view():
-    t = ibis.memtable({"x": [1, 2], "y": [2, 1], "z": ["a", "b"]})
+    t = ibis.table(schema={"x": "int", "y": "int", "z": "str"})
     t_view = t.view()
     expr = t.join(t_view, t.x == t_view.y).select("x", "y", "z", "z_right")
 
@@ -1146,9 +1169,9 @@ def test_self_join_view():
 
 
 def test_self_join_with_view_projection():
-    t1 = ibis.memtable({"x": [1, 2], "y": [2, 1], "z": ["a", "b"]})
+    t1 = ibis.table(schema={"x": "int", "y": "int", "z": "str"})
     t2 = t1.view()
-    expr = t1.inner_join(t2, ["x"])[[t1]]
+    expr = t1.inner_join(t2, ["x"]).select(t1)
 
     with join_tables(expr) as (r1, r2):
         expected = ops.JoinChain(
@@ -1200,7 +1223,7 @@ def test_join_chain_gets_reused_and_continued_after_a_select():
     c = ibis.table(name="c", schema={"e": "int64", "f": "string"})
 
     ab = a.join(b, [a.a == b.c])
-    abc = ab[a.b, b.d].join(c, [a.a == c.e])
+    abc = ab.select(a.b, b.d).join(c, [a.a == c.e])
 
     with join_tables(abc) as (r1, r2, r3):
         expected = ops.JoinChain(
@@ -1442,8 +1465,8 @@ def test_join_between_joins():
     )
     t4 = ibis.table([("key3", "string"), ("value4", "double")], "fourth")
 
-    left = t1.inner_join(t2, [("key1", "key1")])[t1, t2.value2]
-    right = t3.inner_join(t4, [("key3", "key3")])[t3, t4.value4]
+    left = t1.inner_join(t2, [("key1", "key1")]).select(t1, t2.value2)
+    right = t3.inner_join(t4, [("key3", "key3")]).select(t3, t4.value4)
 
     joined = left.inner_join(right, left.key2 == right.key2)
 
@@ -1535,7 +1558,7 @@ def test_join_with_compound_predicate():
             (t1.a + t1.a != t2.b) & (t1.b + t1.b != t2.a),
         ],
     )
-    expr = joined[t1]
+    expr = joined.select(t1)
     with join_tables(joined) as (r1, r2):
         expected = ops.JoinChain(
             first=r1,
@@ -1737,3 +1760,104 @@ def test_projections_with_different_field_order_are_unequal():
     t2 = t.select(b=2, a=1)
 
     assert not t1.equals(t2)
+
+
+def test_filters_are_allowed_to_have_the_same_name():
+    t = ibis.table({"a": "int64", "b": "string"}, name="t")
+    f1 = t.filter(t.a > 1, t.a > 1)
+    f2 = t.filter(t.a > 1)
+    f3 = t.filter((t.a > 1).name("a"))
+    f4 = t.filter((t.a > 1).name("a"), (t.a > 1).name("b"))
+    assert f1.equals(f2)
+    assert f1.equals(f3)
+    assert f1.equals(f4)
+
+
+def test_projections_with_similar_expressions_have_different_names():
+    t = ibis.table({"a": "string", "b": "string"}, name="t")
+
+    a = t.a.fill_null("")
+    b = t.b.fill_null("")
+    assert a.op().name != b.op().name
+
+    expr = t.select(a, b)
+    fields = expr.op().fields
+
+    assert a.op().name in fields
+    assert b.op().name in fields
+
+    assert expr.schema() == ibis.schema({a.op().name: "string", b.op().name: "string"})
+
+
+def test_expr_in_join_projection():
+    t1 = ibis.table({"a": "int64", "b": "string"}, name="t1")
+    t2 = ibis.table({"c": "int64", "b": "string"}, name="t2")
+    t3 = ibis.table({"a": "int64", "d": "int64", "e": "string"}, name="t3")
+    expr = t1.inner_join(t2, "b").select(
+        "a", lit1=1, lit2=2 * t1.a, lit3=_.c - 5, lit4=t2.b.length() / 2.0
+    )
+
+    op = expr.op()
+    assert isinstance(op, ops.JoinChain)
+    assert op.schema == ibis.schema(
+        {
+            "a": "int64",
+            "lit1": "int8",
+            "lit2": "int64",
+            "lit3": "int64",
+            "lit4": "float64",
+        }
+    )
+
+    # simple chain selection
+    expr2 = expr.inner_join(t3, "a").select("a", "d", "lit1", "lit2", "lit3", "lit4")
+    op2 = expr2.op()
+    assert isinstance(op2, ops.JoinChain)
+    assert op2.schema == ibis.schema(
+        {
+            "a": "int64",
+            "d": "int64",
+            "lit1": "int8",
+            "lit2": "int64",
+            "lit3": "int64",
+            "lit4": "float64",
+        }
+    )
+
+    # chain with expressions from all three tables in the join
+    expr = (
+        t1.inner_join(t2, "b")
+        .inner_join(t3, t2.b == t3.e)
+        .select(
+            "a",
+            lit1=1,
+            lit2=2 * t1.a,
+            lit3=_.c - 5,
+            lit4=t2.b.length() / 2.0,
+            lit5=_.e.cast("int") * 3,
+            lit6=t3.d + 1,
+        )
+    )
+
+    op = expr.op()
+    assert isinstance(op, ops.JoinChain)
+    assert op.schema == ibis.schema(
+        {
+            "a": "int64",
+            "lit1": "int8",
+            "lit2": "int64",
+            "lit3": "int64",
+            "lit4": "float64",
+            "lit5": "int64",
+            "lit6": "int64",
+        }
+    )
+
+
+def test_analytic_dereference():
+    t = ibis.table({"a": "int"})
+    ix = ibis.row_number()
+    expr = t.mutate(ix=ix).filter(ix == 5)
+    assert expr.op().predicates == (
+        ops.Equals(ops.WindowFunction(ops.RowNumber()), ops.Literal(5, dtype="int8")),
+    )

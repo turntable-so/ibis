@@ -47,12 +47,6 @@ FROM my_data
 In Ibis, this is
 
 ```{python}
-proj = t["two", "one"]
-```
-
-or
-
-```{python}
 proj = t.select("two", "one")
 ```
 
@@ -78,7 +72,7 @@ new_col = (t.three * 2).name("new_col")
 Now, we have:
 
 ```{python}
-proj = t["two", "one", new_col]
+proj = t.select("two", "one", new_col)
 ibis.to_sql(proj)
 ```
 
@@ -113,7 +107,7 @@ select all columns in a table using the `SELECT *` construct. To do this, use
 the table expression itself in a projection:
 
 ```{python}
-proj = t[t]
+proj = t.select(t)
 ibis.to_sql(proj)
 ```
 
@@ -121,7 +115,7 @@ This is how `mutate` is implemented. The example above
 `t.mutate(new_col=t.three * 2)` can be written as a normal projection:
 
 ```{python}
-proj = t[t, new_col]
+proj = t.select(t, new_col)
 ibis.to_sql(proj)
 ```
 
@@ -144,7 +138,7 @@ To write this with Ibis, it is:
 
 ```{python}
 diff = (t.two - t2.value).name("diff")
-joined = t.join(t2, t.one == t2.key)[t, diff]
+joined = t.join(t2, t.one == t2.key).select(t, diff)
 ```
 
 And verify the generated SQL:
@@ -157,7 +151,7 @@ ibis.to_sql(joined)
 
 If you pass a function instead of a string or Ibis expression in any projection
 context, it will be invoked with the "parent" table as its argument. This can
-help significantly when [composing complex operations. Consider this SQL:
+help significantly when composing complex operations. Consider this SQL:
 
 ```sql
 SELECT one, avg(abs(the_sum)) AS mad
@@ -188,19 +182,18 @@ ibis.to_sql(expr)
 
 ## Filtering / `WHERE`
 
-You can add filter clauses to a table expression either by indexing with
-`[]` (similar to pandas) or use the `filter` method:
+You can add filter clauses to a table expression by using the `filter` method:
 
 ```{python}
-filtered = t[t.two > 0]
+filtered = t.filter(t.two > 0)
 ibis.to_sql(filtered)
 ```
 
-`filter` can take a list of expressions, which must all be satisfied for
+`filter` can take multiple expressions, which must all be satisfied for
 a row to appear in the result:
 
 ```{python}
-filtered = t.filter([t.two > 0, t.one.isin(["A", "B"])])
+filtered = t.filter(t.two > 0, t.one.isin(["A", "B"]))
 ibis.to_sql(filtered)
 ```
 
@@ -209,7 +202,7 @@ To compose boolean expressions with `AND` or `OR`, use the respective
 
 ```{python}
 cond = (t.two < 0) | ((t.two > 0) | t.one.isin(["A", "B"]))
-filtered = t[cond]
+filtered = t.filter(cond)
 ibis.to_sql(filtered)
 ```
 
@@ -473,11 +466,11 @@ semantics:
 case = (
     t.one.cast("timestamp")
     .year()
-    .case()
-    .when(2015, "This year")
-    .when(2014, "Last year")
-    .else_("Earlier")
-    .end()
+    .cases(
+        (2015, "This year"),
+        (2014, "Last year"),
+        else_="Earlier",
+    )
 )
 
 expr = t.mutate(year_group=case)
@@ -496,18 +489,16 @@ CASE
 END
 ```
 
-To do this, use `ibis.case`:
+To do this, use `ibis.cases`:
 
 ```{python}
-case = (
-    ibis.case()
-    .when(t.two < 0, t.three * 2)
-    .when(t.two > 1, t.three)
-    .else_(t.two)
-    .end()
+cases = ibis.cases(
+    (t.two < 0, t.three * 2),
+    (t.two > 1, t.three),
+    else_=t.two,
 )
 
-expr = t.mutate(cond_value=case)
+expr = t.mutate(cond_value=cases)
 ibis.to_sql(expr)
 ```
 
@@ -617,7 +608,7 @@ ibis.to_sql(expr)
 
 ```{python}
 agged = (
-    expr[expr.one.notnull()]
+    expr.filter(expr.one.notnull())
     .group_by("is_valid")
     .aggregate(three_count=lambda t: t.three.notnull().sum())
 )
@@ -632,7 +623,7 @@ keyword. The result of `between` is boolean and can be used with any
 other boolean expression:
 
 ```{python}
-expr = t[t.two.between(10, 50) & t.one.notnull()]
+expr = t.filter(t.two.between(10, 50) & t.one.notnull())
 ibis.to_sql(expr)
 ```
 
@@ -684,7 +675,7 @@ After one or more joins, you can reference any of the joined tables in
 a projection immediately after:
 
 ```{python}
-expr = joined[t1, t2.value2]
+expr = joined.select(t1, t2.value2)
 ibis.to_sql(expr)
 ```
 
@@ -692,7 +683,7 @@ If you need to compute an expression that involves both tables, you can
 do that also:
 
 ```{python}
-expr = joined[t1.key1, (t1.value1 - t2.value2).name("diff")]
+expr = joined.select(t1.key1, (t1.value1 - t2.value2).name("diff"))
 ibis.to_sql(expr)
 ```
 
@@ -800,7 +791,7 @@ In these case, we can specify a list of common join keys:
 
 ```{python}
 joined = t4.join(t5, ["key1", "key2", "key3"])
-expr = joined[t4, t5.value2]
+expr = joined.select(t4, t5.value2)
 ibis.to_sql(expr)
 ```
 
@@ -808,7 +799,7 @@ You can mix the overlapping key names with other expressions:
 
 ```{python}
 joined = t4.join(t5, ["key1", "key2", t4.key3.left(4) == t5.key3.left(4)])
-expr = joined[t4, t5.value2]
+expr = joined.select(t4, t5.value2)
 ibis.to_sql(expr)
 ```
 
@@ -885,7 +876,7 @@ cond = (events.user_id == purchases.user_id).any()
 This can now be used to filter `events`:
 
 ```{python}
-expr = events[cond]
+expr = events.filter(cond)
 ibis.to_sql(expr)
 ```
 
@@ -893,7 +884,7 @@ If you negate the condition, it will instead give you only event data
 from user *that have not made a purchase*:
 
 ```{python}
-expr = events[-cond]
+expr = events.filter(-cond)
 ibis.to_sql(expr)
 ```
 
@@ -916,7 +907,7 @@ you can write with Ibis:
 
 ```{python}
 cond = events.user_id.isin(purchases.user_id)
-expr = events[cond]
+expr = events.filter(cond)
 ibis.to_sql(expr)
 ```
 
@@ -941,7 +932,7 @@ WHERE value1 > (
 With Ibis, the code is simpler and more pandas-like:
 
 ```{python}
-expr = t1[t1.value1 > t2.value2.max()]
+expr = t1.filter(t1.value1 > t2.value2.max())
 ibis.to_sql(expr)
 ```
 
@@ -968,8 +959,8 @@ With Ibis, the code is similar, but you add the correlated filter to the
 average statistic:
 
 ```{python}
-stat = t2[t1.key1 == t2.key3].value2.mean()
-expr = t1[t1.value1 > stat]
+stat = t2.filter(t1.key1 == t2.key3).value2.mean()
+expr = t1.filter(t1.value1 > stat)
 ibis.to_sql(expr)
 ```
 
@@ -1118,7 +1109,7 @@ Ibis provides a `row_number()` function that allows you to do this:
 expr = purchases.mutate(
   row_number=ibis.row_number().over(group_by=[_.user_id], order_by=_.price)
 )
-expr = expr[_.row_number < 3]
+expr = expr.filter(_.row_number < 3)
 ```
 
 The output of this is a table with the three most expensive items that each user has purchased
@@ -1149,7 +1140,7 @@ Ibis has a set of interval APIs that allow you to do date/time
 arithmetic. For example:
 
 ```{python}
-expr = events[events.ts > (ibis.now() - ibis.interval(years=1))]
+expr = events.filter(events.ts > (ibis.now() - ibis.interval(years=1)))
 ibis.to_sql(expr)
 ```
 
@@ -1160,7 +1151,12 @@ engine.
 
 To appear.
 
-## Unions
+## Set operators
+
+Set operations are a common SQL idiom for combining or comparing rows
+from different relations. Ibis supports the following set operations:
+
+### Unions
 
 SQL dialects often support two kinds of `UNION` operations:
 
@@ -1172,10 +1168,39 @@ The Ibis `union` function by default is a `UNION ALL`, and you can set
 `distinct=True` to get the normal `UNION` behavior:
 
 ```{python}
-expr1 = t1.limit(10)
-expr2 = t1.limit(10, offset=10)
+#| code-fold: true
+sales_2023 = ibis.table(
+    dict(product_name="string", order_quantity="int64"),
+    name="sales_2023",
+)
+sales_2024 = ibis.table(
+    dict(product_name="string", order_quantity="int64"),
+    name="sales_2024",
+)
+```
+
+```{python}
+expr1 = sales_2023.limit(10)
+expr2 = sales_2024.limit(10, offset=10)
 
 expr = expr1.union(expr2)
+ibis.to_sql(expr)
+```
+
+### Intersection and difference
+
+SQL dialects support `INTERSECT` and `EXCEPT` operators that returns rows that
+are in both tables or only in one table, respectively.
+
+In Ibis, we can perform these operations using `intersection` and `difference`.
+
+```{python}
+expr = ibis.difference(sales_2023, sales_2024)
+ibis.to_sql(expr)
+```
+
+```{python}
+expr = ibis.intersect(sales_2023, sales_2024)
 ibis.to_sql(expr)
 ```
 
@@ -1214,12 +1239,13 @@ purchases = ibis.table(
 metric = purchases.amount.sum().name("total")
 agged = purchases.group_by(["region", "kind"]).aggregate(metric)
 
-left = agged[agged.kind == "foo"]
-right = agged[agged.kind == "bar"]
+left = agged.filter(agged.kind == "foo")
+right = agged.filter(agged.kind == "bar")
 
-result = left.join(right, left.region == right.region)[
-    left.region, (left.total - right.total).name("diff")
-]
+result = (
+    left.join(right, left.region == right.region)
+    .select(left.region, (left.total - right.total).name("diff"))
+)
 ```
 
 Ibis automatically creates a CTE for `agged`:

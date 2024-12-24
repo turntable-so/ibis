@@ -438,7 +438,7 @@ def test_literal_none_to_nullable_column(alltypes):
 
 def test_timestamp_from_integer(con, alltypes, assert_sql):
     # timestamp_col has datetime type
-    expr = alltypes.int_col.to_timestamp()
+    expr = alltypes.int_col.as_timestamp("s")
     assert_sql(expr, "out.sql")
     assert len(con.execute(expr))
 
@@ -476,7 +476,7 @@ def test_udf_in_array_map(alltypes):
 
     n = 5
     expr = (
-        alltypes[alltypes.int_col == 1]
+        alltypes.filter(alltypes.int_col == 1)
         .limit(n)
         .int_col.collect()
         .map(lambda x: my_add(x, 1))
@@ -492,3 +492,19 @@ def test_udf_in_array_filter(alltypes):
     expr = alltypes.int_col.collect().filter(lambda x: my_eq(x, 1))
     result = expr.execute()
     assert set(result) == {1}
+
+
+def test_timestamp_to_start_of_week(con):
+    pytest.importorskip("pyarrow")
+
+    expr = ibis.timestamp("2024-02-03 00:00:00").truncate("W")
+    result = con.to_pyarrow(expr).as_py()
+    assert result == datetime(2024, 1, 29, 0, 0, 0)
+
+
+def test_date_to_start_of_day(con):
+    pytest.importorskip("pyarrow")
+
+    expr = ibis.date("2024-02-03")
+    expr1 = expr.truncate("D")
+    assert con.to_pyarrow(expr1) == con.to_pyarrow(expr)

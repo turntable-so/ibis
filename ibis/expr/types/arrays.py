@@ -5,7 +5,9 @@ from typing import TYPE_CHECKING
 
 from public import public
 
+import ibis.expr.datatypes as dt
 import ibis.expr.operations as ops
+from ibis.common.annotations import EMPTY
 from ibis.common.deferred import Deferred, deferrable
 from ibis.expr.types.generic import Column, Scalar, Value
 
@@ -179,7 +181,7 @@ class ArrayValue(Value):
         └──────────────────────┘
         >>> t.a.concat(t.a)
         ┏━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayConcat()        ┃
+        ┃ ArrayConcat((a, a))  ┃
         ┡━━━━━━━━━━━━━━━━━━━━━━┩
         │ array<int64>         │
         ├──────────────────────┤
@@ -188,38 +190,38 @@ class ArrayValue(Value):
         │ NULL                 │
         └──────────────────────┘
         >>> t.a.concat(ibis.literal([4], type="array<int64>"))
-        ┏━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayConcat()        ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<int64>         │
-        ├──────────────────────┤
-        │ [7, 4]               │
-        │ [3, 4]               │
-        │ [4]                  │
-        └──────────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayConcat((a, (4,))) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<int64>           │
+        ├────────────────────────┤
+        │ [7, 4]                 │
+        │ [3, 4]                 │
+        │ NULL                   │
+        └────────────────────────┘
 
         `concat` is also available using the `+` operator
 
         >>> [1] + t.a
-        ┏━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayConcat()        ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<int64>         │
-        ├──────────────────────┤
-        │ [1, 7]               │
-        │ [1, 3]               │
-        │ [1]                  │
-        └──────────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayConcat(((1,), a)) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<int64>           │
+        ├────────────────────────┤
+        │ [1, 7]                 │
+        │ [1, 3]                 │
+        │ NULL                   │
+        └────────────────────────┘
         >>> t.a + [1]
-        ┏━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayConcat()        ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<int64>         │
-        ├──────────────────────┤
-        │ [7, 1]               │
-        │ [3, 1]               │
-        │ [1]                  │
-        └──────────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayConcat((a, (1,))) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<int64>           │
+        ├────────────────────────┤
+        │ [7, 1]                 │
+        │ [3, 1]                 │
+        │ NULL                   │
+        └────────────────────────┘
         """
         return ops.ArrayConcat((self, other, *args)).to_expr()
 
@@ -286,11 +288,22 @@ class ArrayValue(Value):
     __mul__ = __rmul__ = repeat
 
     def unnest(self) -> ir.Value:
-        """Flatten an array into a column.
+        """Unnest an array into a column.
 
         ::: {.callout-note}
-        ## Rows with empty arrays are dropped in the output.
+        ## Empty arrays and `NULL`s are dropped in the output.
+        To preserve empty arrays as `NULL`s as well as existing `NULL` values,
+        use [`Table.unnest`](./expression-tables.qmd#ibis.expr.types.relations.Table.unnest).
         :::
+
+        Returns
+        -------
+        ir.Value
+            Unnested array
+
+        See Also
+        --------
+        [`Table.unnest`](./expression-tables.qmd#ibis.expr.types.relations.Table.unnest)
 
         Examples
         --------
@@ -318,11 +331,6 @@ class ArrayValue(Value):
         │     3 │
         │     3 │
         └───────┘
-
-        Returns
-        -------
-        ir.Value
-            Unnested array
         """
         expr = ops.Unnest(self).to_expr()
         try:
@@ -377,13 +385,55 @@ class ArrayValue(Value):
         """
         return ops.ArrayStringJoin(self, sep=sep).to_expr()
 
-    def map(self, func: Deferred | Callable[[ir.Value], ir.Value]) -> ir.ArrayValue:
+    def _construct_array_func_inputs(self, func):
+        if isinstance(func, Deferred):
+            name = "_"
+            index = None
+            resolve = func.resolve
+        elif callable(func):
+            names = (
+                key
+                for key, value in inspect.signature(func).parameters.items()
+                # arg is already bound
+                if value.default is EMPTY
+            )
+            name = next(names)
+            index = next(names, None)
+            resolve = func
+        else:
+            raise TypeError(
+                f"function must be a Deferred or Callable, got `{type(func).__name__}`"
+            )
+
+        shape = self.op().shape
+        parameter = ops.Argument(name=name, shape=shape, dtype=self.type().value_type)
+
+        kwargs = {name: parameter.to_expr()}
+
+        if index is not None:
+            index_arg = ops.Argument(name=index, shape=shape, dtype=dt.int64)
+            kwargs[index] = index_arg.to_expr()
+            index = index_arg
+
+        body = resolve(**kwargs)
+        return parameter, index, body
+
+    def map(
+        self,
+        func: Deferred
+        | Callable[[ir.Value], ir.Value]
+        | Callable[[ir.Value, ir.Value], ir.Value],
+    ) -> ir.ArrayValue:
         """Apply a `func` or `Deferred` to each element of this array expression.
 
         Parameters
         ----------
         func
             Function or `Deferred` to apply to each element of this array.
+
+            Callables must accept one or two arguments. If there are two
+            arguments, the second argument is the **zero**-based index of each
+            element of the array.
 
         Returns
         -------
@@ -410,84 +460,90 @@ class ArrayValue(Value):
         The most succinct way to use `map` is with `Deferred` expressions:
 
         >>> t.a.map((_ + 100).cast("float"))
-        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayMap(a, Cast(Add(_, 100), float64)) ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<float64>                          │
-        ├─────────────────────────────────────────┤
-        │ [101.0, None, ... +1]                   │
-        │ [104.0]                                 │
-        │ []                                      │
-        └─────────────────────────────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayMap(a, Cast(Add(_, 100), float64), _) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<float64>                             │
+        ├────────────────────────────────────────────┤
+        │ [101.0, None, ... +1]                      │
+        │ [104.0]                                    │
+        │ []                                         │
+        └────────────────────────────────────────────┘
 
         You can also use `map` with a lambda function:
 
         >>> t.a.map(lambda x: (x + 100).cast("float"))
-        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayMap(a, Cast(Add(x, 100), float64)) ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<float64>                          │
-        ├─────────────────────────────────────────┤
-        │ [101.0, None, ... +1]                   │
-        │ [104.0]                                 │
-        │ []                                      │
-        └─────────────────────────────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayMap(a, Cast(Add(x, 100), float64), x) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<float64>                             │
+        ├────────────────────────────────────────────┤
+        │ [101.0, None, ... +1]                      │
+        │ [104.0]                                    │
+        │ []                                         │
+        └────────────────────────────────────────────┘
 
         `.map()` also supports more complex callables like `functools.partial`
-        and lambdas with closures
+        and `lambda`s with closures
 
         >>> from functools import partial
         >>> def add(x, y):
         ...     return x + y
         >>> add2 = partial(add, y=2)
         >>> t.a.map(add2)
-        ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayMap(a, Add(x, 2)) ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<int64>           │
-        ├────────────────────────┤
-        │ [3, None, ... +1]      │
-        │ [6]                    │
-        │ []                     │
-        └────────────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayMap(a, Add(x, 2), x) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<int64>              │
+        ├───────────────────────────┤
+        │ [3, None, ... +1]         │
+        │ [6]                       │
+        │ []                        │
+        └───────────────────────────┘
         >>> y = 2
         >>> t.a.map(lambda x: x + y)
-        ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayMap(a, Add(x, 2)) ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<int64>           │
-        ├────────────────────────┤
-        │ [3, None, ... +1]      │
-        │ [6]                    │
-        │ []                     │
-        └────────────────────────┘
-        """
-        if isinstance(func, Deferred):
-            name = "_"
-            resolve = func.resolve
-        elif callable(func):
-            name = next(iter(inspect.signature(func).parameters.keys()))
-            resolve = func
-        else:
-            raise TypeError(
-                f"`func` must be a Deferred or Callable, got `{type(func).__name__}`"
-            )
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayMap(a, Add(x, 2), x) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<int64>              │
+        ├───────────────────────────┤
+        │ [3, None, ... +1]         │
+        │ [6]                       │
+        │ []                        │
+        └───────────────────────────┘
 
-        parameter = ops.Argument(
-            name=name, shape=self.op().shape, dtype=self.type().value_type
-        )
-        body = resolve(parameter.to_expr())
-        return ops.ArrayMap(self, param=parameter.param, body=body).to_expr()
+        You can optionally include a second index argument in the mapped function
+
+        >>> t.a.map(lambda x, i: i % 2)
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayMap(a, Modulus(i, 2), x, i) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<int64>                     │
+        ├──────────────────────────────────┤
+        │ [0, 1, ... +1]                   │
+        │ [0]                              │
+        │ []                               │
+        └──────────────────────────────────┘
+        """
+        param, index, body = self._construct_array_func_inputs(func)
+        return ops.ArrayMap(self, param=param, index=index, body=body).to_expr()
 
     def filter(
-        self, predicate: Deferred | Callable[[ir.Value], bool | ir.BooleanValue]
+        self,
+        predicate: Deferred
+        | Callable[[ir.Value], bool | ir.BooleanValue]
+        | Callable[[ir.Value, ir.IntegerValue], bool | ir.BooleanValue],
     ) -> ir.ArrayValue:
         """Filter array elements using `predicate` function or `Deferred`.
 
         Parameters
         ----------
         predicate
-            Function or `Deferred` to use to filter array elements
+            Function or `Deferred` to use to filter array elements.
+
+            Callables must accept one or two arguments. If there are two
+            arguments, the second argument is the **zero**-based index of each
+            element of the array.
 
         Returns
         -------
@@ -514,75 +570,73 @@ class ArrayValue(Value):
         The most succinct way to use `filter` is with `Deferred` expressions:
 
         >>> t.a.filter(_ > 1)
-        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayFilter(a, Greater(_, 1)) ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<int64>                  │
-        ├───────────────────────────────┤
-        │ [2]                           │
-        │ [4]                           │
-        │ []                            │
-        └───────────────────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayFilter(a, Greater(_, 1), _) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<int64>                     │
+        ├──────────────────────────────────┤
+        │ [2]                              │
+        │ [4]                              │
+        │ []                               │
+        └──────────────────────────────────┘
 
-        You can also use `map` with a lambda function:
+        You can also use `filter` with a lambda function:
 
         >>> t.a.filter(lambda x: x > 1)
-        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayFilter(a, Greater(x, 1)) ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<int64>                  │
-        ├───────────────────────────────┤
-        │ [2]                           │
-        │ [4]                           │
-        │ []                            │
-        └───────────────────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayFilter(a, Greater(x, 1), x) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<int64>                     │
+        ├──────────────────────────────────┤
+        │ [2]                              │
+        │ [4]                              │
+        │ []                               │
+        └──────────────────────────────────┘
 
         `.filter()` also supports more complex callables like `functools.partial`
-        and lambdas with closures
+        and `lambda`s with closures
 
         >>> from functools import partial
         >>> def gt(x, y):
         ...     return x > y
         >>> gt1 = partial(gt, y=1)
         >>> t.a.filter(gt1)
-        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayFilter(a, Greater(x, 1)) ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<int64>                  │
-        ├───────────────────────────────┤
-        │ [2]                           │
-        │ [4]                           │
-        │ []                            │
-        └───────────────────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayFilter(a, Greater(x, 1), x) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<int64>                     │
+        ├──────────────────────────────────┤
+        │ [2]                              │
+        │ [4]                              │
+        │ []                               │
+        └──────────────────────────────────┘
         >>> y = 1
         >>> t.a.filter(lambda x: x > y)
-        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayFilter(a, Greater(x, 1)) ┃
-        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
-        │ array<int64>                  │
-        ├───────────────────────────────┤
-        │ [2]                           │
-        │ [4]                           │
-        │ []                            │
-        └───────────────────────────────┘
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayFilter(a, Greater(x, 1), x) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<int64>                     │
+        ├──────────────────────────────────┤
+        │ [2]                              │
+        │ [4]                              │
+        │ []                               │
+        └──────────────────────────────────┘
+
+        You can optionally include a second index argument in the predicate function
+
+        >>> t.a.filter(lambda x, i: i % 4 == 0)
+        ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+        ┃ ArrayFilter(a, Equals(Modulus(i, 4), 0), x, i) ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
+        │ array<int64>                                   │
+        ├────────────────────────────────────────────────┤
+        │ [1]                                            │
+        │ [4]                                            │
+        │ []                                             │
+        └────────────────────────────────────────────────┘
         """
-        if isinstance(predicate, Deferred):
-            name = "_"
-            resolve = predicate.resolve
-        elif callable(predicate):
-            name = next(iter(inspect.signature(predicate).parameters.keys()))
-            resolve = predicate
-        else:
-            raise TypeError(
-                f"`predicate` must be a Deferred or Callable, got `{type(predicate).__name__}`"
-            )
-        parameter = ops.Argument(
-            name=name,
-            shape=self.op().shape,
-            dtype=self.type().value_type,
-        )
-        body = resolve(parameter.to_expr())
-        return ops.ArrayFilter(self, param=parameter.param, body=body).to_expr()
+        param, index, body = self._construct_array_func_inputs(predicate)
+        return ops.ArrayFilter(self, param=param, index=index, body=body).to_expr()
 
     def contains(self, other: ir.Value) -> ir.BooleanValue:
         """Return whether the array contains `other`.
@@ -944,7 +998,7 @@ class ArrayValue(Value):
         └──────────────────────┴──────────────────────┘
         >>> t.numbers.zip(t.strings)
         ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
-        ┃ ArrayZip()                                    ┃
+        ┃ ArrayZip((numbers, strings))                  ┃
         ┡━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┩
         │ array<struct<f1: int64, f2: string>>          │
         ├───────────────────────────────────────────────┤
@@ -1053,6 +1107,243 @@ class ArrayValue(Value):
         """
         return ops.ArrayFlatten(self).to_expr()
 
+    def anys(self) -> ir.BooleanValue:
+        """Return whether any element in the array is true.
+
+        Returns NULL if the array is empty or contains only NULLs.
+
+        See Also
+        --------
+        [`BooleanColumn.any`](./expression-numeric.qmd#ibis.expr.types.logical.BooleanColumn.any)
+
+        Returns
+        -------
+        BooleanValue
+            Whether any element in the array is true
+
+        Examples
+        --------
+        >>> import ibis
+        >>> ibis.options.interactive = True
+        >>> t = ibis.memtable(
+        ...     {
+        ...         "arr": [
+        ...             [True, False],
+        ...             [False],
+        ...             [True],
+        ...             [None, False],
+        ...             [None, True],
+        ...             [None],
+        ...             [],
+        ...             None,
+        ...         ]
+        ...     }
+        ... )
+        >>> t.mutate(x=t.arr.anys())
+        ┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
+        ┃ arr                  ┃ x       ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━┩
+        │ array<boolean>       │ boolean │
+        ├──────────────────────┼─────────┤
+        │ [True, False]        │ True    │
+        │ [False]              │ False   │
+        │ [True]               │ True    │
+        │ [None, False]        │ False   │
+        │ [None, True]         │ True    │
+        │ [None]               │ NULL    │
+        │ []                   │ NULL    │
+        │ NULL                 │ NULL    │
+        └──────────────────────┴─────────┘
+        """
+        return ops.ArrayAny(self).to_expr()
+
+    def alls(self) -> ir.BooleanValue:
+        """Return whether all elements (ignoring nulls) in the array are true.
+
+        Returns NULL if the array is empty or contains only NULLs.
+
+        See Also
+        --------
+        [`BooleanColumn.all`](./expression-numeric.qmd#ibis.expr.types.logical.BooleanColumn.all)
+
+        Returns
+        -------
+        BooleanValue
+            Whether all elements (ignoring nulls) in the array are true.
+
+        Examples
+        --------
+        >>> import ibis
+        >>> ibis.options.interactive = True
+        >>> t = ibis.memtable(
+        ...     {
+        ...         "id": range(8),
+        ...         "arr": [
+        ...             [True, False],
+        ...             [False],
+        ...             [True],
+        ...             [None, False],
+        ...             [None, True],
+        ...             [None],
+        ...             [],
+        ...             None,
+        ...         ],
+        ...     }
+        ... )
+        >>> t.mutate(x=t.arr.alls()).order_by("id")
+        ┏━━━━━━━┳━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
+        ┃ id    ┃ arr                  ┃ x       ┃
+        ┡━━━━━━━╇━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━┩
+        │ int64 │ array<boolean>       │ boolean │
+        ├───────┼──────────────────────┼─────────┤
+        │     0 │ [True, False]        │ False   │
+        │     1 │ [False]              │ False   │
+        │     2 │ [True]               │ True    │
+        │     3 │ [None, False]        │ False   │
+        │     4 │ [None, True]         │ True    │
+        │     5 │ [None]               │ NULL    │
+        │     6 │ []                   │ NULL    │
+        │     7 │ NULL                 │ NULL    │
+        └───────┴──────────────────────┴─────────┘
+        """
+        return ops.ArrayAll(self).to_expr()
+
+    def mins(self) -> ir.NumericValue:
+        """Return the minimum value in the array.
+
+        Returns NULL if the array is empty or contains only NULLs.
+
+        See Also
+        --------
+        [`Column.min`](./expression-generic.qmd#ibis.expr.types.generic.Column.min)
+
+        Returns
+        -------
+        Value
+            Minimum value in the array
+
+        Examples
+        --------
+        >>> import ibis
+        >>> ibis.options.interactive = True
+        >>> t = ibis.memtable({"arr": [[1, 2, 3], [None, 6], [None], [], None]})
+        >>> t.mutate(x=t.arr.mins())
+        ┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+        ┃ arr                  ┃ x     ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+        │ array<int64>         │ int64 │
+        ├──────────────────────┼───────┤
+        │ [1, 2, ... +1]       │     1 │
+        │ [None, 6]            │     6 │
+        │ [None]               │  NULL │
+        │ []                   │  NULL │
+        │ NULL                 │  NULL │
+        └──────────────────────┴───────┘
+        """
+        return ops.ArrayMin(self).to_expr()
+
+    def maxs(self) -> ir.NumericValue:
+        """Return the maximum value in the array.
+
+        Returns NULL if the array is empty or contains only NULLs.
+
+        See Also
+        --------
+        [`Column.max`](./expression-generic.qmd#ibis.expr.types.generic.Column.max)
+
+        Returns
+        -------
+        Value
+            Maximum value in the array
+
+        Examples
+        --------
+        >>> import ibis
+        >>> ibis.options.interactive = True
+        >>> t = ibis.memtable({"arr": [[1, 2, 3], [None, 6], [None], [], None]})
+        >>> t.mutate(x=t.arr.maxs())
+        ┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+        ┃ arr                  ┃ x     ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+        │ array<int64>         │ int64 │
+        ├──────────────────────┼───────┤
+        │ [1, 2, ... +1]       │     3 │
+        │ [None, 6]            │     6 │
+        │ [None]               │  NULL │
+        │ []                   │  NULL │
+        │ NULL                 │  NULL │
+        └──────────────────────┴───────┘
+        """
+        return ops.ArrayMax(self).to_expr()
+
+    def sums(self) -> ir.NumericValue:
+        """Return the sum of the values in the array.
+
+        Returns NULL if the array is empty or contains only NULLs.
+
+        See Also
+        --------
+        [`NumericColumn.sum`](./expression-numeric.qmd#ibis.expr.types.numeric.NumericColumn.sum)
+
+        Returns
+        -------
+        Value
+            Sum of the values in the array
+
+        Examples
+        --------
+        >>> import ibis
+        >>> ibis.options.interactive = True
+        >>> t = ibis.memtable({"arr": [[1, 2, 3], [None, 6], [None], [], None]})
+        >>> t.mutate(x=t.arr.sums())
+        ┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━┓
+        ┃ arr                  ┃ x     ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━┩
+        │ array<int64>         │ int64 │
+        ├──────────────────────┼───────┤
+        │ [1, 2, ... +1]       │     6 │
+        │ [None, 6]            │     6 │
+        │ [None]               │  NULL │
+        │ []                   │  NULL │
+        │ NULL                 │  NULL │
+        └──────────────────────┴───────┘
+        """
+        return ops.ArraySum(self).to_expr()
+
+    def means(self) -> ir.FloatingValue:
+        """Return the mean of the values in the array.
+
+        Returns NULL if the array is empty or contains only NULLs.
+
+        See Also
+        --------
+        [`NumericColumn.mean`](./expression-numeric.qmd#ibis.expr.types.numeric.NumericColumn.mean)
+
+        Returns
+        -------
+        Value
+            Mean of the values in the array
+
+        Examples
+        --------
+        >>> import ibis
+        >>> ibis.options.interactive = True
+        >>> t = ibis.memtable({"arr": [[1, 2, 3], [None, 6], [None], [], None]})
+        >>> t.mutate(x=t.arr.means())
+        ┏━━━━━━━━━━━━━━━━━━━━━━┳━━━━━━━━━┓
+        ┃ arr                  ┃ x       ┃
+        ┡━━━━━━━━━━━━━━━━━━━━━━╇━━━━━━━━━┩
+        │ array<int64>         │ float64 │
+        ├──────────────────────┼─────────┤
+        │ [1, 2, ... +1]       │     2.0 │
+        │ [None, 6]            │     6.0 │
+        │ [None]               │    NULL │
+        │ []                   │    NULL │
+        │ NULL                 │    NULL │
+        └──────────────────────┴─────────┘
+        """
+        return ops.ArrayMean(self).to_expr()
+
 
 @public
 class ArrayScalar(Scalar, ArrayValue):
@@ -1099,7 +1390,7 @@ def array(values: Iterable[V]) -> ArrayValue:
     >>> t = ibis.memtable({"a": [1, 2, 3], "b": [4, 5, 6]})
     >>> ibis.array([t.a, 42, ibis.literal(None)])
     ┏━━━━━━━━━━━━━━━━━━━━━━┓
-    ┃ Array()              ┃
+    ┃ Array((a, 42, None)) ┃
     ┡━━━━━━━━━━━━━━━━━━━━━━┩
     │ array<int64>         │
     ├──────────────────────┤
@@ -1109,14 +1400,14 @@ def array(values: Iterable[V]) -> ArrayValue:
     └──────────────────────┘
 
     >>> ibis.array([t.a, 42 + ibis.literal(5)])
-    ┏━━━━━━━━━━━━━━━━━━━━━━┓
-    ┃ Array()              ┃
-    ┡━━━━━━━━━━━━━━━━━━━━━━┩
-    │ array<int64>         │
-    ├──────────────────────┤
-    │ [1, 47]              │
-    │ [2, 47]              │
-    │ [3, 47]              │
-    └──────────────────────┘
+    ┏━━━━━━━━━━━━━━━━━━━━━━━━┓
+    ┃ Array((a, Add(5, 42))) ┃
+    ┡━━━━━━━━━━━━━━━━━━━━━━━━┩
+    │ array<int64>           │
+    ├────────────────────────┤
+    │ [1, 47]                │
+    │ [2, 47]                │
+    │ [3, 47]                │
+    └────────────────────────┘
     """
     return ops.Array(tuple(values)).to_expr()

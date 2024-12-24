@@ -1,14 +1,19 @@
 from __future__ import annotations
 
-from datetime import date  # noqa: TCH003
+from datetime import date  # noqa: TC003
 
+import oracledb
 import pandas as pd
 import pandas.testing as tm
 import pytest
 
 import ibis
-import ibis.common.exceptions as exc
 from ibis import udf
+from ibis.backends.oracle.tests.conftest import (
+    ORACLE_HOST,
+    ORACLE_PASS,
+    ORACLE_USER,
+)
 
 
 def test_ibis_is_not_defeated_by_statement_cache(con):
@@ -61,13 +66,24 @@ def test_builtin_agg_udf(con):
     tm.assert_frame_equal(result, expected, check_dtype=False)
 
 
-def test_list_tables_schema_warning_refactor(con):
+def test_list_tables(con):
     assert con.list_tables()
 
-    with pytest.raises(exc.IbisInputError):
-        con.list_tables(database="not none", schema="not none")
-
-    with pytest.warns(FutureWarning):
-        assert con.list_tables(schema="SYS", like="EXU8OPT") == ["EXU8OPT"]
-
     assert con.list_tables(database="SYS", like="EXU8OPT") == ["EXU8OPT"]
+
+
+def test_from_url():
+    new_con = ibis.connect("oracle://ibis:ibis@localhost:1521/IBIS_TESTING")
+
+    result = new_con.sql('SELECT 1 AS "a"').to_pandas()
+    assert result.a.iat[0] == 1
+
+
+def test_invalid_port(con):
+    port = 9999
+    url = f"oracle://{ORACLE_USER}:{ORACLE_PASS}@{ORACLE_HOST}:{port}/IBIS_TESTING"
+    with pytest.raises(
+        oracledb.OperationalError,
+        match="DPY-6005: cannot connect to database",
+    ):
+        ibis.connect(url)
