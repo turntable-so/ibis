@@ -1,4 +1,4 @@
-[tool.poetry]
+[project]
 name = "turntable-spoonbill"
 version = "10.0.3"
 packages = [{ include = "ibis" }]
@@ -13,17 +13,12 @@ homepage = "https://ibis-project.org"
 repository = "https://github.com/ibis-project/ibis"
 documentation = "https://ibis-project.org"
 description = "Productivity-centric Python Big Data Framework"
-authors = ["Turntable Team <team@turntable.so>"]
-maintainers = ["Ibis Maintainers <maintainers@ibis-project.org>"]
-license = "Apache-2.0"
-readme = "README.md"
-license = "Apache-2.0"
-authors = [
-  { name = "Ibis Maintainers", email = "maintainers@ibis-project.org" },
-]
+authors = [{ name = "Turntable Team", email = "team@turntable.so" }]
 maintainers = [
   { name = "Ibis Maintainers", email = "maintainers@ibis-project.org" },
 ]
+license = "Apache-2.0"
+readme = "README.md"
 classifiers = [
   "Development Status :: 5 - Production/Stable",
   "Intended Audience :: Developers",
